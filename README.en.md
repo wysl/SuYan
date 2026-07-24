@@ -39,6 +39,7 @@ Open a card to edit, copy, or share.
 - 🖼️ **Image + prompt together** — browse, edit, copy, and share in one flow
 - ✨ **AI when you need it** — split parameters, expand terms, reverse-prompt, translate, optimize; works offline without AI
 - 🧹 **Easy cleanup** — compress, dedupe, batch import/export
+- 📂 **Mount folders** — index existing image / video folders without copying source files; optional per-folder watching
 
 ---
 
@@ -60,7 +61,7 @@ Browse in everyday order. Each section lists capabilities, then shows a demo GIF
 ### 📥 Import
 
 - **Import images** — batch add local files
-- **Mount folders** — index existing image / video folders without copying the source media
+- **Mount folders** — index existing image / video folders without copying the source media; deleting a library item does not delete the original file
 - **Paste** — clipboard images go straight in
 - **Import documents** — extract images and prompts from Word
 - **Import shares** — ZIP packages or shared web links
@@ -69,9 +70,15 @@ Browse in everyday order. Each section lists capabilities, then shows a demo GIF
 
 Left sidebar **Import** → **Import images**, multi-select local files; paste and Word import also work.
 
-Mounted folders can be watched individually from **Material folders**; watching is off by default. While enabled, new media is indexed automatically, removals are marked missing without deleting either the index or source files, and uniquely identifiable renames update the stored relative path. Turning watching off stops automatic synchronization.
-
 <img src="./photo/本地素材导入.gif" alt="Local import" width="860" />
+
+#### Mount folders
+
+Left sidebar **Import** → **Add material folder** to scan existing image and video directories. Media stays in place; SuYan only stores indexes, size / mtime, and thumbnails (thumbnails live under the app data directory, not in your folder).
+
+- **Missing sources** — if a folder disconnects or a file is moved, cards show **source missing**; use **Material folders** to verify, remap, rescan, or unmount; remapping restores items by the original relative path
+- **Watch this folder** — optional per root, **off by default**. While on, new media is indexed automatically; removals are marked missing without deleting the index or source files; uniquely identifiable renames update the relative path, otherwise treat as “old missing + new item”; turn off to stop auto-sync
+- **Share & compress** — ZIP export reads external sources read-only into the package; external items are not in-app compressed / transcoded or overwritten in place; to compress, import as a managed copy first
 
 #### Network import
 
@@ -198,6 +205,7 @@ Six default splash images ship with the app; replace them with your own for next
 2. **Install or open** via the wizard, or run the portable build
 3. **Import** images, paste, documents, or share packages from the left sidebar  
    (see [Local import](#local-import) / [Network import](#network-import))
+   - Existing libraries: **Add material folder** for [Mount folders](#mount-folders) (index only, no copy; enable **Watch this folder** under **Material folders** for auto-sync)
 4. **Organize** in the masonry; open detail to edit prompts; configure AI when ready  
    (see [AI assistant](#-ai-assistant) / [Model settings](#model-settings))
 
@@ -218,6 +226,20 @@ Send evidence to [Issues](https://github.com/guliacer/SuYan/issues). Verified ca
 <summary><b>Where is my library? Is it uploaded?</b></summary>
 
 **A:** On your machine by default. Browse and edit offline. Network is used only when you call remote AI, parse share links, or download remote images.
+
+</details>
+
+<details>
+<summary><b>Can I mount an existing image folder without copying files?</b></summary>
+
+**A:** Yes. **Import** → **Add material folder** indexes the folder only — **no copy** of original images / videos. Thumbnails are cached under app data. Deleting a library item removes the index and cache, **not** files on disk. See [Mount folders](#mount-folders).
+
+</details>
+
+<details>
+<summary><b>What if files are moved or renamed?</b></summary>
+
+**A:** Cards show **source missing**. Use **Material folders** to verify, remap, or rescan; remapping restores by relative path. With **Watch this folder** on, new files are indexed automatically and removals are marked missing; unique renames update the relative path.
 
 </details>
 
