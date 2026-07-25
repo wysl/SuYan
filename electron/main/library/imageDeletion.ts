@@ -11,7 +11,6 @@ export function getDeletableImageFileNames(
   return Array.from(
     new Set(
       deletedItems
-        .filter((item) => !item.mediaStorage || item.mediaStorage === "managed")
         .flatMap((item) => collectLibraryMediaFileNames(item))
         .filter((imageFileName) => imageFileName && !remainingImageFileNames.has(imageFileName)),
     ),

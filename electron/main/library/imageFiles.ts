@@ -23,7 +23,6 @@ import {
 } from "./importedImageWriter";
 import { getImagePath, getImageThumbnailPath } from "./libraryPaths";
 import { appendLibraryItems, readLibraryFile, writeLibraryFile } from "./libraryStore";
-import { resolveMediaAbsolutePath } from "./mediaPathResolver";
 import {
   createEmptyPromptImportDraft,
   parsePromptDraftFromImageMetadata,
@@ -640,7 +639,6 @@ async function copyMediaFileAsItemVariant(
     ...baseItem,
     id,
     imageFileName,
-    mediaStorage: "managed",
     promptType: normalizePromptType(undefined, { ...baseItem, imageFileName }),
     createdAt: isBlankPromptItem(baseItem) ? baseItem.createdAt : now,
     updatedAt: now,
@@ -693,7 +691,6 @@ export async function importClipboardImageForItem(
     ...baseItem,
     id: importedItemId,
     imageFileName,
-    mediaStorage: "managed",
     createdAt: now,
     updatedAt: now,
   };
@@ -706,7 +703,7 @@ export async function importClipboardImageForItem(
 }
 
 export async function copyImageToClipboard(imageFileName: string): Promise<void> {
-  const image = nativeImage.createFromPath(await resolveMediaPathByImageFileName(imageFileName));
+  const image = nativeImage.createFromPath(getImagePath(imageFileName));
 
   if (image.isEmpty()) {
     throw new AppError("IMAGE_COPY_FAILED", "复制图片失败，请重试。");
@@ -716,7 +713,7 @@ export async function copyImageToClipboard(imageFileName: string): Promise<void>
 }
 
 export async function exportImageToLocal(imageFileName: string): Promise<{ canceled: boolean; filePath: string | null }> {
-  const sourcePath = await resolveMediaPathByImageFileName(imageFileName);
+  const sourcePath = getImagePath(imageFileName);
   const extension = getExportImageExtension(imageFileName);
   const result = await dialog.showSaveDialog({
     title: "导出媒体文件",
@@ -744,12 +741,6 @@ function getExportImageExtension(imageFileName: string): string {
   const extension = path.extname(imageFileName).replace(/^\./, "").toLowerCase();
 
   return extension || "png";
-}
-
-async function resolveMediaPathByImageFileName(imageFileName: string): Promise<string> {
-  const library = await readLibraryFile();
-  const item = library.items.find((candidate) => candidate.imageFileName === imageFileName);
-  return item ? resolveMediaAbsolutePath(item) : getImagePath(imageFileName);
 }
 
 async function isGeneratedPlaceholderImage(item: LibraryItem): Promise<boolean> {
@@ -814,9 +805,6 @@ export async function deleteLibraryItems(
   const writeDoneAt = Date.now();
 
   let cleanupFileCount = 0;
-  const externalThumbnailFileNames = deletedItems
-    .filter((item) => item.mediaStorage && item.mediaStorage !== "managed")
-    .map((item) => item.imageFileName);
 
   if (deleteImages) {
     const deletableFileNames = getDeletableImageFileNames(deletedItems, remainingItems);
@@ -829,12 +817,6 @@ export async function deleteLibraryItems(
         removedCount,
       });
     });
-  }
-
-  // External media remains user-owned even when the user chooses "delete media". Only the app cache is removed.
-  if (externalThumbnailFileNames.length > 0) {
-    cleanupFileCount += externalThumbnailFileNames.length;
-    void cleanupExternalThumbnailFiles(externalThumbnailFileNames);
   }
 
   logger.info("item-delete", "timing", {
@@ -866,10 +848,6 @@ async function cleanupDeletedMediaFiles(fileNames: readonly string[]): Promise<n
   );
 
   return results.filter(Boolean).length;
-}
-
-async function cleanupExternalThumbnailFiles(fileNames: readonly string[]): Promise<void> {
-  await Promise.all(fileNames.map((fileName) => unlinkQuietly(getImageThumbnailPath(fileName))));
 }
 
 async function unlinkQuietly(filePath: string): Promise<boolean> {

@@ -21,14 +21,10 @@ export function isNsfwItem(item: Pick<LibraryItem, "nsfwRating">): boolean {
 }
 
 export function shouldGradeNsfwItem(
-  item: Pick<LibraryItem, "imageFileName" | "mediaStorage" | "nsfwRating">,
+  item: Pick<LibraryItem, "imageFileName" | "nsfwRating">,
   options: { force?: boolean } = {},
 ): boolean {
   if (!item.imageFileName) {
-    return false;
-  }
-
-  if (item.mediaStorage && item.mediaStorage !== "managed" && item.mediaStorage.status === "missing") {
     return false;
   }
 

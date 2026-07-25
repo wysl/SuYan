@@ -37,9 +37,6 @@ export async function compressImages(
 
   const library = await readLibraryFile();
   const targetItems = selectTargetItems(library.items, options.itemIds);
-  const skippedExternalCount = selectRequestedItems(library.items, options.itemIds).filter(
-    (item) => !isManagedMedia(item) && !isVideoMediaFile(item.imageFileName),
-  ).length;
   const total = targetItems.length;
 
   let processedCount = 0;
@@ -96,16 +93,7 @@ export async function compressImages(
     });
   }
 
-  return { processedCount, totalOriginalBytes, totalCompressedBytes, skippedExternalCount, failedItems };
-}
-
-function selectRequestedItems(items: readonly LibraryItem[], itemIds: string[] | undefined): LibraryItem[] {
-  if (!itemIds || itemIds.length === 0) {
-    return [...items];
-  }
-
-  const idSet = new Set(itemIds);
-  return items.filter((item) => idSet.has(item.id));
+  return { processedCount, totalOriginalBytes, totalCompressedBytes, failedItems };
 }
 
 export function selectTargetItems(
@@ -115,16 +103,10 @@ export function selectTargetItems(
   if (itemIds && itemIds.length > 0) {
     const idSet = new Set(itemIds);
 
-    return items.filter(
-      (item) => idSet.has(item.id) && isManagedMedia(item) && !isVideoMediaFile(item.imageFileName),
-    );
+    return items.filter((item) => idSet.has(item.id) && !isVideoMediaFile(item.imageFileName));
   }
 
-  return items.filter((item) => isManagedMedia(item) && !isVideoMediaFile(item.imageFileName));
-}
-
-function isManagedMedia(item: LibraryItem): boolean {
-  return !item.mediaStorage || item.mediaStorage === "managed";
+  return items.filter((item) => !isVideoMediaFile(item.imageFileName));
 }
 
 async function compressSingleImage(

@@ -46,10 +46,6 @@ export function getLibraryPath(): string {
   return path.join(getLibraryDataDir(), "library.json");
 }
 
-export function getLibraryRootsPath(): string {
-  return path.join(getLibraryDataDir(), "library-roots.json");
-}
-
 export function getLibraryViewSettingsPath(): string {
   return path.join(getLibraryDataDir(), "view-settings.json");
 }
