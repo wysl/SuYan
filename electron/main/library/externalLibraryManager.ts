@@ -1,7 +1,7 @@
 import type { BrowserWindow } from "electron";
 import type { LibraryFile, LibraryRoot } from "../../../src/features/library/types/library";
 import { refreshExternalMediaHealth } from "./externalMediaHealth";
-import { readLibraryFile, writeLibraryFile } from "./libraryStore";
+import { readLibraryFile, updateLibraryFile } from "./libraryStore";
 import { chooseAndRemapLibraryRoot, removeLibraryRoot } from "./libraryRoots";
 import { deleteLibraryItems } from "./imageFiles";
 
@@ -12,14 +12,16 @@ export type ExternalValidationResult = {
 };
 
 export async function validateExternalLibrary(): Promise<ExternalValidationResult> {
-  const library = await readLibraryFile();
-  const refreshed = await refreshExternalMediaHealth(library);
-  const changedCount = countHealthChanges(library, refreshed);
-  const nextLibrary = refreshed === library ? library : await writeLibraryFile(refreshed, { skipNormalize: true });
+  let changedCount = 0;
+  const library = await updateLibraryFile(async (current) => {
+    const refreshed = await refreshExternalMediaHealth(current);
+    changedCount = countHealthChanges(current, refreshed);
+    return refreshed === current ? null : refreshed;
+  }, { skipNormalize: true });
 
   return {
-    library: nextLibrary,
-    missingCount: countMissingItems(nextLibrary),
+    library,
+    missingCount: countMissingItems(library),
     changedCount,
   };
 }

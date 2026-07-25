@@ -12,7 +12,7 @@ import {
 } from "../../shared/promptImportParser";
 import { supportedImportVisualMediaExtensions } from "./importedImageWriter";
 import { warmLibraryItemThumbnails } from "./imageThumbnails";
-import { appendLibraryItems, readLibraryFile } from "./libraryStore";
+import { readLibraryFile, updateLibraryFile } from "./libraryStore";
 import { readLibraryRoots, updateLibraryRoot } from "./libraryRoots";
 
 export type ExternalScanProgress = {
@@ -136,20 +136,38 @@ export async function scanExternalLibraryRoot(
     items.push(await createExternalLibraryItem(root, absolutePath, now));
   }
 
-  const nextLibrary = items.length > 0 ? await appendLibraryItems(items) : library;
+  let importedItems: LibraryItem[] = [];
+  const nextLibrary = items.length > 0
+    ? await updateLibraryFile((current) => {
+        const latestKnownPaths = new Set(
+          current.items.flatMap((item) => {
+            const storage = item.mediaStorage;
+            return storage && storage !== "managed" && storage.rootId === root.id ? [storage.relativePath] : [];
+          }),
+        );
+        importedItems = items.filter((item) => {
+          const storage = item.mediaStorage;
+          return Boolean(storage && storage !== "managed" && !latestKnownPaths.has(storage.relativePath));
+        });
+        skippedCount += items.length - importedItems.length;
+        return importedItems.length > 0
+          ? { ...current, items: [...importedItems, ...current.items] }
+          : null;
+      })
+    : library;
   const updatedRoot = await updateLibraryRoot({ ...root, lastScanAt: new Date().toISOString() });
-  warmLibraryItemThumbnails(items);
+  warmLibraryItemThumbnails(importedItems);
   logger.info("external-library", "scan:complete", {
     rootId: root.id,
-    importedCount: items.length,
+    importedCount: importedItems.length,
     skippedCount,
     total: mediaPaths.length,
   });
 
-  return { library: nextLibrary, root: updatedRoot, importedCount: items.length, skippedCount };
+  return { library: nextLibrary, root: updatedRoot, importedCount: importedItems.length, skippedCount };
 }
 
-async function collectMediaPaths(rootPath: string, recursive: boolean): Promise<string[]> {
+export async function collectMediaPaths(rootPath: string, recursive: boolean): Promise<string[]> {
   const paths: string[] = [];
 
   async function visit(directory: string): Promise<void> {

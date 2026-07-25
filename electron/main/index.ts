@@ -13,7 +13,7 @@ import {
   warmLibraryItemThumbnails,
 } from "./library/imageThumbnails";
 import { getImagePath, getStartupGalleryImagePath } from "./library/libraryPaths";
-import { readLibraryFile } from "./library/libraryStore";
+import { findLibraryItemByImageFileName } from "./library/libraryStore";
 import { resolveMediaAbsolutePath } from "./library/mediaPathResolver";
 import { ensureStartupGalleryStorage, getFreshStartupThumbnailPath } from "./library/startupGalleryStore";
 import { waitForImportedVideoNormalization } from "./library/videoImportNormalizer";
@@ -481,11 +481,6 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   void shutdownExternalLibraryWatchers();
 });
-
-async function findLibraryItemByImageFileName(imageFileName: string) {
-  const library = await readLibraryFile();
-  return library.items.find((item) => item.imageFileName === imageFileName) ?? null;
-}
 
 function registerWindowControls(window: BrowserWindow): void {
   ipcMain.handle(ipcChannels.windowMinimize, () => {

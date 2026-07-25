@@ -170,6 +170,7 @@ type LibraryState = {
   clearStatus: () => void;
   openExternalUrl: (url: string, label?: string) => Promise<boolean>;
   importImages: () => Promise<void>;
+  importManagedLibraryDirectory: () => Promise<void>;
   addAndScanLibraryRoot: () => Promise<void>;
   scanLibraryRoot: (rootId: string) => Promise<void>;
   setLibraryRootWatch: (rootId: string, enabled: boolean) => Promise<void>;
@@ -1074,6 +1075,49 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }
   },
 
+  importManagedLibraryDirectory: async () => {
+    const previousItemIds = new Set(get().items.map((item) => item.id));
+    set({ isBusy: true, statusMessage: progressStatus("正在复制目录素材到软件目录...") });
+    const unsubscribe = window.suyanApi.onImportProgress((progress) => {
+      set({ statusMessage: progressStatus(`正在复制：${progress.currentFile} (${progress.current}/${progress.total})`) });
+    });
+
+    try {
+      const result = await window.suyanApi.chooseAndImportLibraryDirectory();
+
+      if (!result.ok) {
+        set({ statusMessage: errorStatus(result.error.code, result.error.message) });
+        return;
+      }
+
+      setLibrary(result.data.library, set, get);
+      if (result.data.importedCount > 0) {
+        markRecentImportPins(set, get, previousItemIds);
+        scheduleLexiconSyncAfterImport(set, get, previousItemIds);
+      }
+
+      if (!result.data.directoryLabel) {
+        set({ statusMessage: infoStatus("未选择素材目录。") });
+      } else if (result.data.canceled) {
+        set({
+          statusMessage: infoStatus(
+            `已停止复制，已导入 ${result.data.importedCount} 个素材，跳过 ${result.data.skippedCount} 个。`,
+          ),
+        });
+      } else {
+        set({
+          statusMessage: successStatus(
+            `已从 ${result.data.directoryLabel} 复制 ${result.data.importedCount} 个素材到软件目录${
+              result.data.skippedCount > 0 ? `，跳过 ${result.data.skippedCount} 个` : ""
+            }。`,
+          ),
+        });
+      }
+    } finally {
+      unsubscribe();
+      set({ isBusy: false });
+    }
+  },
   addAndScanLibraryRoot: async () => {
     const previousItemIds = new Set(get().items.map((item) => item.id));
     set({ isBusy: true, statusMessage: progressStatus("正在选择并扫描素材目录...") });

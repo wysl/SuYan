@@ -53,6 +53,14 @@ export type ExternalLibraryScanData = {
   skippedCount: number;
 };
 
+export type ManagedDirectoryImportData = {
+  canceled: boolean;
+  directoryLabel: string | null;
+  library: LibraryFile;
+  importedCount: number;
+  skippedCount: number;
+};
+
 export type ExternalLibraryValidationData = {
   library: LibraryFile;
   missingCount: number;
@@ -290,6 +298,7 @@ export type SuyanApi = {
   saveLibraryViewSettings: (settings: LibraryViewSettings) => Promise<IpcResult<LibraryViewSettings>>;
   listLibraryRoots: () => Promise<IpcResult<LibraryRoot[]>>;
   chooseAndScanLibraryRoot: () => Promise<IpcResult<ExternalLibraryScanData>>;
+  chooseAndImportLibraryDirectory: () => Promise<IpcResult<ManagedDirectoryImportData>>;
   scanLibraryRoot: (rootId: string) => Promise<IpcResult<ExternalLibraryScanData>>;
   remapLibraryRoot: (rootId: string) => Promise<IpcResult<ExternalLibraryRemapData>>;
   removeLibraryRoot: (rootId: string) => Promise<IpcResult<ExternalLibraryRootRemoveData>>;

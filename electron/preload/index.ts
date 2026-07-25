@@ -42,6 +42,7 @@ const suyanApi: SuyanApi = {
     invoke(IpcChannelName.LibraryViewSettingsSave, settings),
   listLibraryRoots: () => invoke(IpcChannelName.LibraryRootsList),
   chooseAndScanLibraryRoot: () => invoke(IpcChannelName.LibraryRootChooseAndScan),
+  chooseAndImportLibraryDirectory: () => invoke(IpcChannelName.LibraryDirectoryChooseAndImport),
   scanLibraryRoot: (rootId: string) => invoke(IpcChannelName.LibraryRootScan, rootId),
   remapLibraryRoot: (rootId: string) => invoke(IpcChannelName.LibraryRootRemap, rootId),
   removeLibraryRoot: (rootId: string) => invoke(IpcChannelName.LibraryRootRemove, rootId),

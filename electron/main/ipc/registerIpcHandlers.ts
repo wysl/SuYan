@@ -35,6 +35,7 @@ import {
 } from "../ai/promptAnalysisService";
 import { importClipboardImage } from "../clipboard/readClipboardImage";
 import { exportLibraryZip, importLibraryZip } from "../library/archiveStore";
+import { chooseAndImportManagedDirectory } from "../library/directoryImport";
 import {
   cancelImport,
   copyImageToClipboard,
@@ -58,7 +59,7 @@ import {
   importPromptLexiconImage,
 } from "../library/lexiconFiles";
 import { getImageThumbnailPath } from "../library/libraryPaths";
-import { readLibraryFile, writeLibraryFile } from "../library/libraryStore";
+import { readLibraryFile, saveLibraryFileFromRenderer } from "../library/libraryStore";
 import { chooseAndAddLibraryRoot, readLibraryRoots } from "../library/libraryRoots";
 import { scanExternalLibraryRoot } from "../library/externalLibraryScanner";
 import {
@@ -140,7 +141,7 @@ export function registerIpcHandlers(): void {
     }),
   );
   ipcMain.handle(ipcChannels.librarySave, (_event, library: LibraryFile) =>
-    handleResult("library:save", () => writeLibraryFile(library)),
+    handleResult("library:save", () => saveLibraryFileFromRenderer(library)),
   );
   ipcMain.handle(ipcChannels.libraryViewSettingsRead, () =>
     handleResult("library:view-settings-read", () => readLibraryViewSettings()),
@@ -149,6 +150,14 @@ export function registerIpcHandlers(): void {
     handleResult("library:view-settings-save", () => writeLibraryViewSettings(settings)),
   );
   ipcMain.handle(ipcChannels.libraryRootsList, () => handleResult("library:roots-list", () => readLibraryRoots()));
+  ipcMain.handle(ipcChannels.libraryDirectoryChooseAndImport, (event) =>
+    handleResult("library:directory-choose-and-import", () =>
+      chooseAndImportManagedDirectory(
+        (progress) => event.sender.send(IpcChannelName.ImageImportProgress, progress),
+        BrowserWindow.fromWebContents(event.sender),
+      ),
+    ),
+  );
   ipcMain.handle(ipcChannels.libraryRootChooseAndScan, (event) =>
     handleResult("library:root-choose-and-scan", async () => {
       const selection = await chooseAndAddLibraryRoot(BrowserWindow.fromWebContents(event.sender));

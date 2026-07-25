@@ -22,7 +22,7 @@ import {
   writeImportMediaFile,
 } from "./importedImageWriter";
 import { getImagePath, getImageThumbnailPath } from "./libraryPaths";
-import { appendLibraryItems, readLibraryFile, writeLibraryFile } from "./libraryStore";
+import { appendLibraryItems, readLibraryFile, updateLibraryFile, writeLibraryFile } from "./libraryStore";
 import { resolveMediaAbsolutePath } from "./mediaPathResolver";
 import {
   createEmptyPromptImportDraft,
@@ -799,18 +799,19 @@ export async function deleteLibraryItems(
 ): Promise<{ library: Awaited<ReturnType<typeof readLibraryFile>>; deletedCount: number }> {
   const startedAt = Date.now();
   const ids = new Set(itemIds);
-  const library = await readLibraryFile();
-  const readDoneAt = Date.now();
-  const deletedItems = library.items.filter((item) => ids.has(item.id));
-  const remainingItems = library.items.filter((item) => !ids.has(item.id));
-  // 删除只是过滤已有合法条目，可跳过全量 normalize，减少卡顿。
-  const nextLibrary = await writeLibraryFile(
-    {
+  let deletedItems: LibraryItem[] = [];
+  let remainingItems: LibraryItem[] = [];
+  let readDoneAt = startedAt;
+  // 删除与读取最新库放在同一个队列操作中，避免覆盖目录监控或并发导入的新条目。
+  const nextLibrary = await updateLibraryFile((library) => {
+    readDoneAt = Date.now();
+    deletedItems = library.items.filter((item) => ids.has(item.id));
+    remainingItems = library.items.filter((item) => !ids.has(item.id));
+    return {
       ...library,
       items: remainingItems,
-    },
-    { skipNormalize: true },
-  );
+    };
+  }, { skipNormalize: true });
   const writeDoneAt = Date.now();
 
   let cleanupFileCount = 0;

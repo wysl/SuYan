@@ -176,7 +176,7 @@ const minMasonryColumnCount = 2;
 const maxMasonryColumnCount = 10;
 const defaultMasonryColumnCount = 4;
 const masonryColumnGap = 16;
-const appVersion = "0.1.1";
+const appVersion = "0.2.0";
 const suyanGithubRepoUrl = "https://github.com/guliacer/SuYan";
 const suyanGithubReleasesUrl = `${suyanGithubRepoUrl}/releases`;
 const allParameterSourcesValue = "__all__";
@@ -540,6 +540,7 @@ export function LibraryView() {
   const reverseImagePromptWithAi = useLibraryStore((state) => state.reverseImagePromptWithAi);
   const clearStatus = useLibraryStore((state) => state.clearStatus);
   const importImages = useLibraryStore((state) => state.importImages);
+  const importManagedLibraryDirectory = useLibraryStore((state) => state.importManagedLibraryDirectory);
   const addAndScanLibraryRoot = useLibraryStore((state) => state.addAndScanLibraryRoot);
   const scanLibraryRoot = useLibraryStore((state) => state.scanLibraryRoot);
   const setLibraryRootWatch = useLibraryStore((state) => state.setLibraryRootWatch);
@@ -601,6 +602,7 @@ export function LibraryView() {
   const [isPerformanceSettingsOpen, setIsPerformanceSettingsOpen] = useState(false);
   const [isStartupGallerySettingsOpen, setIsStartupGallerySettingsOpen] = useState(false);
   const [isLibraryRootsOpen, setIsLibraryRootsOpen] = useState(false);
+  const [isDirectoryImportModeOpen, setIsDirectoryImportModeOpen] = useState(false);
   const [isImportMenuOpen, setIsImportMenuOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(getStoredSidebarOpen);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
@@ -1564,11 +1566,25 @@ function resetFilters() {
       onDrop={handleWindowDrop}
     >
       <AppTitleBar isSidebarOpen={isSidebarOpen} overlayActive={isDetailOverlayOpen} onToggleSidebar={toggleSidebar} />
+      {isDirectoryImportModeOpen ? (
+        <DirectoryImportModeDialog
+          isBusy={isBusy}
+          onClose={() => setIsDirectoryImportModeOpen(false)}
+          onCopy={() => {
+            setIsDirectoryImportModeOpen(false);
+            void importManagedLibraryDirectory();
+          }}
+          onIndex={() => {
+            setIsDirectoryImportModeOpen(false);
+            void addAndScanLibraryRoot();
+          }}
+        />
+      ) : null}
       {isLibraryRootsOpen ? (
         <LibraryRootsDialog
           isBusy={isBusy}
           roots={libraryRoots}
-          onAdd={() => void addAndScanLibraryRoot()}
+          onAdd={() => setIsDirectoryImportModeOpen(true)}
           onClose={() => setIsLibraryRootsOpen(false)}
           onPurgeMissing={(rootId) => void purgeMissingLibraryRootItems(rootId)}
           onRemap={(rootId) => void remapLibraryRoot(rootId)}
@@ -1600,7 +1616,7 @@ function resetFilters() {
             }}
             onAddLibraryDirectory={() => {
               setIsImportMenuOpen(false);
-              void addAndScanLibraryRoot();
+              setIsDirectoryImportModeOpen(true);
             }}
             onImportZip={() => {
               setIsImportMenuOpen(false);
@@ -10202,6 +10218,82 @@ function GridPromptMosaic({
   );
 }
 
+type DirectoryImportModeDialogProps = {
+  isBusy: boolean;
+  onClose: () => void;
+  onCopy: () => void;
+  onIndex: () => void;
+};
+
+function DirectoryImportModeDialog({ isBusy, onClose, onCopy, onIndex }: DirectoryImportModeDialogProps) {
+  return (
+    <AppDialog
+      overlayClassName="z-[140] px-4 py-8"
+      panelClassName="flex max-h-full w-full max-w-2xl flex-col"
+      onClose={onClose}
+    >
+      <header className="flex items-start justify-between gap-3 border-b border-border px-6 py-5">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold">添加素材目录</h2>
+          <p className="mt-1 text-sm text-muted">请选择目录的使用方式。大目录推荐仅建立索引。</p>
+        </div>
+        <DialogCloseButton onClick={onClose} />
+      </header>
+      <div className="grid gap-4 overflow-y-auto p-6 md:grid-cols-2">
+        <button
+          className="group flex min-h-72 flex-col rounded-2xl border-2 border-primary bg-primary-soft/40 p-5 text-left outline-none transition hover:-translate-y-0.5 hover:shadow-elevated focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isBusy}
+          type="button"
+          onClick={onIndex}
+        >
+          <span className="flex items-center justify-between gap-3">
+            <span className="flex size-11 items-center justify-center rounded-xl bg-primary text-white">
+              <FolderTree size={21} />
+            </span>
+            <span className="rounded-full bg-primary px-2.5 py-1 text-xs font-semibold text-white">推荐大目录</span>
+          </span>
+          <strong className="mt-4 text-base text-foreground">仅建立索引</strong>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            不复制、不修改源文件。软件保存文件名、相对路径、分类、标签、标题、提示词等索引数据，并生成缩略图缓存。
+          </p>
+          <ul className="mt-4 grid gap-2 text-xs leading-5 text-muted">
+            <li>• 导入快，避免软件目录占用大量空间</li>
+            <li>• 源文件移动、改名或删除后会显示缺失</li>
+            <li>• 整体迁移目录后可通过“重新定位”恢复</li>
+          </ul>
+        </button>
+        <button
+          className="group flex min-h-72 flex-col rounded-2xl border border-border bg-background p-5 text-left outline-none transition hover:-translate-y-0.5 hover:border-primary/50 hover:shadow-elevated focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isBusy}
+          type="button"
+          onClick={onCopy}
+        >
+          <span className="flex items-center justify-between gap-3">
+            <span className="flex size-11 items-center justify-center rounded-xl bg-panel text-foreground">
+              <Copy size={21} />
+            </span>
+            <span className="rounded-full border border-border px-2.5 py-1 text-xs font-medium text-muted">独立保存</span>
+          </span>
+          <strong className="mt-4 text-base text-foreground">复制到软件目录</strong>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            将支持的图片和视频复制到软件管理目录。复制完成后，原目录移动或删除不会影响软件中的素材。
+          </p>
+          <ul className="mt-4 grid gap-2 text-xs leading-5 text-muted">
+            <li>• 适合数量较少或需要集中备份的素材</li>
+            <li>• 大目录导入耗时，并占用额外磁盘空间</li>
+            <li>• 会增加软件数据目录的备份与迁移体积</li>
+          </ul>
+        </button>
+      </div>
+      <div className="mx-6 mb-5 flex items-start gap-3 rounded-xl border border-warning/35 bg-warning/10 px-4 py-3 text-xs leading-5 text-muted">
+        <Info className="mt-0.5 shrink-0 text-warning" size={16} />
+        <p>
+          仅索引模式不会把原图写入软件目录；请保留源目录和软件的 <code>data</code> 索引数据。复制模式不会删除或修改源文件。
+        </p>
+      </div>
+    </AppDialog>
+  );
+}
 type LibraryRootsDialogProps = {
   isBusy: boolean;
   roots: readonly LibraryRoot[];

@@ -7,7 +7,7 @@ import type {
   LibraryRoot,
 } from "../../../src/features/library/types/library";
 import { warmLibraryItemThumbnails } from "./imageThumbnails";
-import { readLibraryFile, writeLibraryFile } from "./libraryStore";
+import { updateLibraryFile } from "./libraryStore";
 import { createExternalLibraryItem, isSupportedExternalMediaPath } from "./externalLibraryScanner";
 
 export type ExternalLibraryChangeSet = {
@@ -35,14 +35,18 @@ export async function syncExternalLibraryRoot(
   root: LibraryRoot,
   changes: ExternalLibraryChangeSet,
 ): Promise<ExternalLibraryReconcileResult> {
-  const library = await readLibraryFile();
-  const result = await reconcileExternalLibraryEvents(library, root, changes);
+  const state: { result?: ExternalLibraryReconcileResult } = {};
+  const persisted = await updateLibraryFile(async (library) => {
+    const result = await reconcileExternalLibraryEvents(library, root, changes);
+    state.result = result;
+    return result.changedCount === 0 ? null : result.library;
+  }, { skipNormalize: true });
+  const result = state.result;
 
-  if (result.changedCount === 0) {
-    return result;
+  if (!result) {
+    throw new Error("External library reconciliation did not run.");
   }
 
-  const persisted = await writeLibraryFile(result.library, { skipNormalize: true });
   warmLibraryItemThumbnails(result.importedItems);
   return { ...result, library: persisted };
 }

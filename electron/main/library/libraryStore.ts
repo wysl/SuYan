@@ -10,6 +10,9 @@ import { refreshExternalMediaHealth } from "./externalMediaHealth";
 
 const schemaVersion = 1;
 const defaultSeedMarkerFileName = ".default-library-seeded";
+let libraryMutationQueue: Promise<void> = Promise.resolve();
+let cachedLibraryPath: string | null = null;
+let cachedItemsByImageFileName: Map<string, LibraryItem> | null = null;
 
 export function createEmptyLibrary(): LibraryFile {
   return {
@@ -19,13 +22,26 @@ export function createEmptyLibrary(): LibraryFile {
   };
 }
 
+function enqueueLibraryMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = libraryMutationQueue.then(operation, operation);
+  libraryMutationQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
 export async function ensureLibraryStorage(): Promise<void> {
+  await enqueueLibraryMutation(ensureLibraryStorageUnlocked);
+}
+
+async function ensureLibraryStorageUnlocked(): Promise<void> {
   await fs.mkdir(getImagesDir(), { recursive: true });
 
   try {
     await fs.access(getLibraryPath());
   } catch {
-    await writeInitialLibrary();
+    await writeInitialLibraryUnlocked();
     return;
   }
 
@@ -44,7 +60,7 @@ export async function ensureLibraryStorage(): Promise<void> {
 
   if (isLibraryFile(parsed) && parsed.items.length === 0) {
     if (shouldWriteDefaultSeed()) {
-      await writeDefaultSeedLibrary();
+      await writeDefaultSeedLibraryUnlocked();
       return;
     }
 
@@ -58,8 +74,20 @@ export async function ensureLibraryStorage(): Promise<void> {
 }
 
 export async function readLibraryFile(options?: { refreshExternalHealth?: boolean }): Promise<LibraryFile> {
-  await ensureLibraryStorage();
+  if (options?.refreshExternalHealth) {
+    return updateLibraryFile(async (library) => {
+      const healthyLibrary = await refreshExternalMediaHealth(library);
+      return healthyLibrary === library ? null : healthyLibrary;
+    }, { skipNormalize: true });
+  }
 
+  return enqueueLibraryMutation(async () => {
+    await ensureLibraryStorageUnlocked();
+    return readLibraryFileUnlocked();
+  });
+}
+
+async function readLibraryFileUnlocked(): Promise<LibraryFile> {
   const content = await fs.readFile(getLibraryPath(), "utf8");
   const parsed = JSON.parse(content) as unknown;
 
@@ -67,25 +95,25 @@ export async function readLibraryFile(options?: { refreshExternalHealth?: boolea
     throw new AppError("LIBRARY_SCHEMA_INVALID", "素材库文件结构不合法。");
   }
 
-  const normalizedLibrary = {
+  const library: LibraryFile = {
     ...parsed,
     items: parsed.items.map(normalizeItem),
   };
-
-  if (!options?.refreshExternalHealth) {
-    return normalizedLibrary;
-  }
-
-  const healthyLibrary = await refreshExternalMediaHealth(normalizedLibrary);
-
-  if (healthyLibrary !== normalizedLibrary) {
-    await writeLibraryFile(healthyLibrary, { skipNormalize: true });
-  }
-
-  return healthyLibrary;
+  refreshLibraryLookupCache(library);
+  return library;
 }
 
 export async function writeLibraryFile(library: LibraryFile, options?: { skipNormalize?: boolean }): Promise<LibraryFile> {
+  return enqueueLibraryMutation(async () => {
+    await ensureLibraryStorageUnlocked();
+    return writeLibraryFileUnlocked(library, options);
+  });
+}
+
+async function writeLibraryFileUnlocked(
+  library: LibraryFile,
+  options?: { skipNormalize?: boolean },
+): Promise<LibraryFile> {
   await fs.mkdir(getLibraryDataDir(), { recursive: true });
   await fs.mkdir(getImagesDir(), { recursive: true });
 
@@ -110,17 +138,73 @@ export async function writeLibraryFile(library: LibraryFile, options?: { skipNor
   // 紧凑 JSON 比 pretty-print 更小、更快，删除/导入时写盘更轻。
   await fs.writeFile(tempPath, JSON.stringify(normalized), "utf8");
   await fs.rename(tempPath, getLibraryPath());
+  refreshLibraryLookupCache(normalized);
 
   return normalized;
 }
 
-export async function appendLibraryItems(items: LibraryItem[]): Promise<LibraryFile> {
-  const library = await readLibraryFile();
+export async function updateLibraryFile(
+  updater: (library: LibraryFile) => Promise<LibraryFile | null> | LibraryFile | null,
+  options?: { skipNormalize?: boolean },
+): Promise<LibraryFile> {
+  return enqueueLibraryMutation(async () => {
+    await ensureLibraryStorageUnlocked();
+    const current = await readLibraryFileUnlocked();
+    const next = await updater(current);
+    return next ? writeLibraryFileUnlocked(next, options) : current;
+  });
+}
 
-  return writeLibraryFile({
+/**
+ * Renderer saves are metadata edits based on a possibly stale snapshot. Merge them
+ * with the latest disk state so watcher/import additions are retained and external
+ * path health cannot be overwritten by an older renderer copy.
+ */
+export async function saveLibraryFileFromRenderer(library: LibraryFile): Promise<LibraryFile> {
+  return updateLibraryFile((current) => {
+    const incomingById = new Map(library.items.map((item) => [item.id, normalizeItem(item)]));
+    const items = current.items.map((currentItem) => {
+      const incoming = incomingById.get(currentItem.id);
+
+      if (!incoming) {
+        return currentItem;
+      }
+
+      return {
+        ...incoming,
+        mediaStorage: currentItem.mediaStorage,
+      };
+    });
+
+    return { ...current, items };
+  });
+}
+
+export async function appendLibraryItems(items: LibraryItem[]): Promise<LibraryFile> {
+  return updateLibraryFile((library) => ({
     ...library,
     items: [...items, ...library.items],
-  });
+  }));
+}
+
+export async function findLibraryItemByImageFileName(imageFileName: string): Promise<LibraryItem | null> {
+  const libraryPath = getLibraryPath();
+
+  if (cachedLibraryPath !== libraryPath) {
+    cachedLibraryPath = null;
+    cachedItemsByImageFileName = null;
+  }
+
+  if (!cachedItemsByImageFileName) {
+    await readLibraryFile();
+  }
+
+  return cachedItemsByImageFileName?.get(imageFileName) ?? null;
+}
+
+function refreshLibraryLookupCache(library: LibraryFile): void {
+  cachedLibraryPath = getLibraryPath();
+  cachedItemsByImageFileName = new Map(library.items.map((item) => [item.imageFileName, item]));
 }
 
 export function normalizeItem(item: LibraryItem): LibraryItem {
@@ -333,21 +417,21 @@ function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === "object" && input !== null;
 }
 
-async function writeDefaultSeedLibrary(): Promise<void> {
+async function writeDefaultSeedLibraryUnlocked(): Promise<void> {
   await ensureDefaultSeedImages();
-  await writeLibraryFile(createDefaultLibrary());
+  await writeLibraryFileUnlocked(createDefaultLibrary());
   await markDefaultSeeded();
 }
 
-async function writeInitialLibrary(): Promise<void> {
+async function writeInitialLibraryUnlocked(): Promise<void> {
   // 默认写入空素材库，避免演示提示词组进入开源包/正式包。
   // 仅当显式设置 PROMPT_LIBRARY_ENABLE_SEED=true 时写入内置演示种子。
   if (shouldWriteDefaultSeed()) {
-    await writeDefaultSeedLibrary();
+    await writeDefaultSeedLibraryUnlocked();
     return;
   }
 
-  await writeLibraryFile(createEmptyLibrary());
+  await writeLibraryFileUnlocked(createEmptyLibrary());
   await markDefaultSeeded();
 }
 
