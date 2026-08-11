@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
-import type { LibraryFile, LibraryItem, ExternalMediaStatus } from "../../../src/features/library/types/library";
+import type { ExternalMediaStatus, LibraryFile, LibraryItem, LibraryRoot } from "../../../src/features/library/types/library";
 import { resolveExternalMediaPath } from "../../../src/features/library/utils/externalMediaPath";
 import { readLibraryRoots } from "./libraryRoots";
+import { mapWithConcurrency } from "./asyncMap";
 
 export type ExternalMediaHealth = {
   status: ExternalMediaStatus;
@@ -14,21 +15,29 @@ export async function inspectExternalMedia(
   item: Pick<LibraryItem, "mediaStorage">,
   roots?: Awaited<ReturnType<typeof readLibraryRoots>>,
 ): Promise<ExternalMediaHealth | null> {
+  const availableRoots = roots ?? (await readLibraryRoots());
+  const rootsById = new Map(availableRoots.map((root) => [root.id, root]));
+  return inspectExternalMediaWithRootIndex(item, rootsById);
+}
+
+function inspectExternalMediaWithRootIndex(
+  item: Pick<LibraryItem, "mediaStorage">,
+  rootsById: ReadonlyMap<string, LibraryRoot>,
+): Promise<ExternalMediaHealth | null> {
   const storage = item.mediaStorage;
 
   if (!storage || storage === "managed") {
-    return null;
+    return Promise.resolve(null);
   }
 
-  const availableRoots = roots ?? (await readLibraryRoots());
-  const root = availableRoots.find((candidate) => candidate.id === storage.rootId);
+  const root = rootsById.get(storage.rootId);
 
   if (!root) {
-    return { status: "missing", size: null, mtimeMs: null };
+    return Promise.resolve({ status: "missing", size: null, mtimeMs: null });
   }
 
   if (root.status === "missing") {
-    return { status: "missing", size: null, mtimeMs: null };
+    return Promise.resolve({ status: "missing", size: null, mtimeMs: null });
   }
 
   let sourcePath: string;
@@ -36,20 +45,17 @@ export async function inspectExternalMedia(
   try {
     sourcePath = resolveExternalMediaPath(root.absolutePath, storage.relativePath);
   } catch {
-    return { status: "missing", size: null, mtimeMs: null };
+    return Promise.resolve({ status: "missing", size: null, mtimeMs: null });
   }
 
-  try {
-    const stats = await fs.stat(sourcePath);
-
-    if (!stats.isFile()) {
-      return { status: "missing", size: null, mtimeMs: null };
-    }
-
-    return { status: "available", size: stats.size, mtimeMs: stats.mtimeMs };
-  } catch {
-    return { status: "missing", size: null, mtimeMs: null };
-  }
+  return fs
+    .stat(sourcePath)
+    .then((stats) =>
+      stats.isFile()
+        ? { status: "available" as const, size: stats.size, mtimeMs: stats.mtimeMs }
+        : { status: "missing" as const, size: null, mtimeMs: null },
+    )
+    .catch(() => ({ status: "missing" as const, size: null, mtimeMs: null }));
 }
 
 /** Refreshes external health while preserving object identity when nothing changed. */
@@ -61,8 +67,9 @@ export async function refreshExternalMediaHealth(library: LibraryFile): Promise<
   }
 
   const roots = await readLibraryRoots();
+  const rootsById = new Map(roots.map((root) => [root.id, root]));
   const healthEntries = await mapWithConcurrency(externalItems, 32, async (item) => {
-    return [item.id, await inspectExternalMedia(item, roots)] as const;
+    return [item.id, await inspectExternalMediaWithRootIndex(item, rootsById)] as const;
   });
   const healthById = new Map(healthEntries);
   let changed = false;
@@ -92,24 +99,4 @@ export async function refreshExternalMediaHealth(library: LibraryFile): Promise<
   });
 
   return changed ? { ...library, items } : library;
-}
-
-async function mapWithConcurrency<T, R>(
-  values: readonly T[],
-  concurrency: number,
-  mapper: (value: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(values.length);
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (nextIndex < values.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await mapper(values[index]);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, () => worker()));
-  return results;
 }

@@ -14,6 +14,20 @@ export function getStartupGalleryDir(): string {
   return path.join(getLibraryDataDir(), "startup-gallery");
 }
 
+export function getCanvasReferenceImagesDir(): string {
+  return path.join(getLibraryDataDir(), "canvas-references");
+}
+
+export function getCanvasReferenceImagePath(imageFileName: string): string {
+  const safeFileName = path.basename(imageFileName);
+
+  if (safeFileName !== imageFileName || !safeFileName) {
+    throw new AppError("INVALID_IMAGE_FILE_NAME", "画布参考图文件名不合法。");
+  }
+
+  return path.join(getCanvasReferenceImagesDir(), safeFileName);
+}
+
 export function getStartupGalleryImagePath(imageFileName: string): string {
   const safeFileName = path.basename(imageFileName);
 
@@ -52,6 +66,18 @@ export function getLibraryRootsPath(): string {
 
 export function getLibraryViewSettingsPath(): string {
   return path.join(getLibraryDataDir(), "view-settings.json");
+}
+
+export function getCategoryLexiconPath(): string {
+  return path.join(getLibraryDataDir(), "category-lexicon.json");
+}
+
+export function getTagLexiconPath(): string {
+  return path.join(getLibraryDataDir(), "tag-lexicon.json");
+}
+
+export function getLexiconPathForKind(kind: "categories" | "tags"): string {
+  return kind === "categories" ? getCategoryLexiconPath() : getTagLexiconPath();
 }
 
 export function getAiSettingsPath(): string {

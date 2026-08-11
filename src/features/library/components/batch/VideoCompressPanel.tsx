@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/Button";
 import { BatchProgressBar, formatBytes } from "./BatchProgressBar";
 import type { CompressProgress, CompressResult } from "@/types/suyanApi";
 import { useLibraryStore } from "../../store/useLibraryStore";
+import { hasBuiltinModuleCapability } from "../../utils/moduleRegistry";
+import { VideoRuntimeInstallBanner } from "../VideoRuntimeInstallBanner";
 
 type VideoCompressPanelProps = {
   selectedItemIds: string[];
@@ -44,6 +46,7 @@ export function VideoCompressPanel({
 }: VideoCompressPanelProps) {
   const compressVideos = useLibraryStore((s) => s.compressVideos);
   const cancelCompress = useLibraryStore((s) => s.cancelCompress);
+  const moduleState = useLibraryStore((s) => s.moduleState);
   const [status, setStatus] = useState<CompressStatus>("idle");
   const [resolution, setResolution] = useState<Resolution>("1080p");
   const [crf, setCrf] = useState(23);
@@ -67,6 +70,11 @@ export function VideoCompressPanel({
 
   async function handleStart() {
     if (scopeDisabled) return;
+    if (!hasBuiltinModuleCapability("video-runtime", moduleState)) {
+      setErrorMessage("需要视频运行时（FFmpeg），请先安装后再压缩。");
+      setStatus("error");
+      return;
+    }
     setStatus("compressing");
     setProgress(null);
     setResult(null);
@@ -157,10 +165,15 @@ export function VideoCompressPanel({
     );
   }
 
+  const videoRuntimeAvailable = hasBuiltinModuleCapability("video-runtime", moduleState);
+
   if (status === "error") {
     return (
       <div className="flex flex-col gap-3">
         <p className="text-sm text-danger">{errorMessage || "视频压缩失败，请重试。"}</p>
+        {!videoRuntimeAvailable ? (
+          <VideoRuntimeInstallBanner message="需要视频运行时（FFmpeg），请先安装后再压缩。" />
+        ) : null}
         <div>
           <Button variant="primary" onClick={handleReset}>
             重试
@@ -172,6 +185,9 @@ export function VideoCompressPanel({
 
   return (
     <div className="flex flex-col gap-4">
+      {!videoRuntimeAvailable ? (
+        <VideoRuntimeInstallBanner message="视频压缩需要视频运行时（FFmpeg），请先安装。" />
+      ) : null}
       <div className="grid grid-cols-[1fr_1.3fr_1.4fr_1fr] divide-x divide-border/50">
         <div className="px-6 first:pl-0">
           <div className="mb-4 text-sm font-semibold text-foreground">分辨率与编码</div>
@@ -217,11 +233,12 @@ export function VideoCompressPanel({
             />
             <input
               type="range"
+              aria-label="质量 CRF"
               min={crfMin}
               max={crfMax}
               value={crf}
               onChange={(e) => setCrf(Number(e.target.value))}
-              className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-5 w-full cursor-pointer appearance-none bg-transparent [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-[18px] [&::-webkit-slider-thumb]:h-[18px] [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-progress [&::-webkit-slider-thumb]:shadow-md [&::-webkit-slider-thumb]:shadow-progress/25 [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:hover:scale-110 [&::-moz-range-thumb]:w-[18px] [&::-moz-range-thumb]:h-[18px] [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-progress [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:shadow-md [&::-moz-range-thumb]:cursor-pointer"
+              className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-5 w-full cursor-pointer appearance-none bg-transparent focus-visible:outline-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-[18px] [&::-webkit-slider-thumb]:h-[18px] [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-progress [&::-webkit-slider-thumb]:shadow-md [&::-webkit-slider-thumb]:shadow-progress/25 [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:hover:scale-110 focus-visible:[&::-webkit-slider-thumb]:ring-2 focus-visible:[&::-webkit-slider-thumb]:ring-primary/40 [&::-moz-range-thumb]:w-[18px] [&::-moz-range-thumb]:h-[18px] [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-progress [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:shadow-md [&::-moz-range-thumb]:cursor-pointer focus-visible:[&::-moz-range-thumb]:ring-2 focus-visible:[&::-moz-range-thumb]:ring-primary/40"
             />
           </div>
           <div className="flex justify-between text-xs text-muted">

@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const { createRequire } = require("node:module");
 const path = require("node:path");
 const zlib = require("node:zlib");
 const { build, Platform } = require("electron-builder");
@@ -137,7 +138,7 @@ function removePathRecursive(targetPath) {
   fs.unlinkSync(targetPath);
 }
 
-function syncDirectoryContents(source, destination) {
+function syncDirectoryContents(source, destination, options = {}) {
   assertInsideProject(source);
   assertInsideProject(destination);
 
@@ -148,9 +149,14 @@ function syncDirectoryContents(source, destination) {
   fs.mkdirSync(destination, { recursive: true });
 
   const sourceEntries = new Set(fs.readdirSync(source));
+  const preserveNames = options.preserveNames instanceof Set ? options.preserveNames : new Set();
+  // Nested preserve rules: e.g. win-unpacked -> { data, logs }
+  const nestedPreserve = options.nestedPreserve && typeof options.nestedPreserve === "object"
+    ? options.nestedPreserve
+    : null;
 
   for (const entry of fs.readdirSync(destination, { withFileTypes: true })) {
-    if (sourceEntries.has(entry.name)) {
+    if (sourceEntries.has(entry.name) || preserveNames.has(entry.name)) {
       continue;
     }
 
@@ -174,7 +180,11 @@ function syncDirectoryContents(source, destination) {
         removePathIfExists(destinationChild);
       }
 
-      syncDirectoryContents(sourceChild, destinationChild);
+      const childPreserve =
+        nestedPreserve && nestedPreserve[entry.name] instanceof Set
+          ? { preserveNames: nestedPreserve[entry.name] }
+          : {};
+      syncDirectoryContents(sourceChild, destinationChild, childPreserve);
       continue;
     }
 
@@ -195,14 +205,58 @@ function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
-function copyPackage(packageName, copiedPackages = new Set(), resolvePaths = [projectRoot]) {
+function resolvePackageJsonPath(packageName, resolvePaths = [projectRoot], requestedVersion = null) {
+  try {
+    return require.resolve(`${packageName}/package.json`, { paths: resolvePaths });
+  } catch (primaryError) {
+    // pnpm may have downloaded a platform-specific optional package into its
+    // content-addressed store without creating a symlink on the current host.
+    // Resolve that package directly so Windows sharp binaries are still copied.
+    const pnpmRoot = path.join(projectRoot, "node_modules", ".pnpm");
+    if (!fs.existsSync(pnpmRoot)) {
+      throw primaryError;
+    }
+
+    const encodedName = packageName.replace(/\//g, "+");
+    const prefix = `${encodedName}@`;
+    const versionHint = requestedVersion ? String(requestedVersion).replace(/^[^0-9]*/, "") : "";
+    const candidates = fs
+      .readdirSync(pnpmRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+      .sort((left, right) => {
+        const leftPreferred = versionHint && left.name.startsWith(`${prefix}${versionHint}`) ? 0 : 1;
+        const rightPreferred = versionHint && right.name.startsWith(`${prefix}${versionHint}`) ? 0 : 1;
+        return leftPreferred - rightPreferred || left.name.localeCompare(right.name);
+      });
+
+    for (const candidate of candidates) {
+      const candidatePath = path.join(
+        pnpmRoot,
+        candidate.name,
+        "node_modules",
+        ...packageName.split("/"),
+        "package.json",
+      );
+      if (fs.existsSync(candidatePath)) {
+        return candidatePath;
+      }
+    }
+
+    throw primaryError;
+  }
+}
+
+function copyPackage(
+  packageName,
+  copiedPackages = new Set(),
+  resolvePaths = [projectRoot],
+  requestedVersion = null,
+) {
   if (copiedPackages.has(packageName)) {
     return;
   }
 
-  const packageJsonPath = require.resolve(`${packageName}/package.json`, {
-    paths: resolvePaths,
-  });
+  const packageJsonPath = resolvePackageJsonPath(packageName, resolvePaths, requestedVersion);
   const packageRoot = path.dirname(fs.realpathSync(packageJsonPath));
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
   const destination = path.join(vendorNodeModulesDir, ...packageName.split("/"));
@@ -219,7 +273,7 @@ function copyPackage(packageName, copiedPackages = new Set(), resolvePaths = [pr
 
   for (const dependencyName of Object.keys(dependencies)) {
     try {
-      copyPackage(dependencyName, copiedPackages, [packageRoot, projectRoot]);
+      copyPackage(dependencyName, copiedPackages, [packageRoot, projectRoot], dependencies[dependencyName]);
     } catch (error) {
       if (!packageJson.optionalDependencies?.[dependencyName]) {
         throw error;
@@ -320,7 +374,10 @@ function createVendorPackage() {
   fs.writeFileSync(path.join(vendorDir, "package.cjs"), "module.exports = {};\n", "utf8");
   fs.writeFileSync(
     path.join(vendorDir, "package.json"),
-    `${JSON.stringify({ private: true, dependencies: { jszip: sourcePackage.dependencies.jszip } }, null, 2)}\n`,
+    `${JSON.stringify({ private: true, dependencies: {
+        jszip: sourcePackage.dependencies.jszip,
+        sharp: sourcePackage.dependencies.sharp,
+      } }, null, 2)}\n`,
     "utf8",
   );
 }
@@ -577,7 +634,7 @@ function positiveModulo(value, divisor) {
   return ((value % divisor) + divisor) % divisor;
 }
 
-function promoteStagedRelease(stagedDir, finalDir) {
+function promoteStagedRelease(stagedDir, finalDir, options = {}) {
   assertInsideProject(stagedDir);
   assertInsideProject(finalDir);
 
@@ -587,10 +644,18 @@ function promoteStagedRelease(stagedDir, finalDir) {
 
   // Windows 下 release 目录常被“素言.exe”占用，rename 会 EPERM。
   // 默认直接同步覆盖，避免打包流程被目录锁打断。
-  tryStopLockedReleaseProcesses(finalDir);
+  if (options.stopLockedProcesses !== false) {
+    tryStopLockedReleaseProcesses(finalDir);
+  }
 
   try {
-    syncDirectoryContents(stagedDir, finalDir);
+    // 开发/便携运行时数据写在 win-unpacked/data（及 logs）。
+    // 打包同步时必须保留，否则每次 package:win 都会把用户素材库清空。
+    syncDirectoryContents(stagedDir, finalDir, {
+      nestedPreserve: {
+        "win-unpacked": new Set(["data", "logs"]),
+      },
+    });
   } catch (syncError) {
     throw new Error(
       `Failed to promote staged release to ${path.relative(projectRoot, finalDir)}. The existing release may still be locked by another process. Staged output remains at ${path.relative(projectRoot, stagedDir)}. Sync error: ${formatError(syncError)}`,
@@ -850,8 +915,9 @@ function assertPackagedEmptyShell(winUnpackedDir) {
   assertEmptyShellStartupAssets(path.join(resourcesDir, "startup-assets"));
   assertNoPersonalLibraryPayload(resourcesDir);
 
-  // 安装包旁不得附带用户运行时目录/日志，保持开箱空壳。
-  for (const name of ["library", "logs", "userData"]) {
+  // 安装包旁不得附带用户运行时目录/日志到错误位置，保持开箱空壳。
+  // 注意：win-unpacked/data 是正式运行时数据目录，开发打包后应被保留，不在此处删除/报错。
+  for (const name of ["library", "userData"]) {
     const candidate = path.join(winUnpackedDir, name);
     if (fs.existsSync(candidate)) {
       throw new Error(`Refusing non-empty package shell residue: ${path.relative(projectRoot, candidate)}`);
@@ -874,6 +940,118 @@ function prepareStartupAssetsStage() {
 
   assertEmptyShellStartupAssets(destinationDir);
 }
+
+function prepareRustCoreStage() {
+  const sourcePath = path.join(projectRoot, "native", "suyan-core", "bin", "suyan-core.exe");
+  const destinationDir = path.join(stageDir, "bin");
+  const destinationPath = path.join(destinationDir, "suyan-core.exe");
+
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(
+      "Required Rust Core binary is missing. Run pnpm build:rust-core before packaging.",
+    );
+  }
+
+  fs.mkdirSync(destinationDir, { recursive: true });
+  const header = Buffer.alloc(2);
+  const descriptor = fs.openSync(sourcePath, "r");
+  try {
+    fs.readSync(descriptor, header, 0, 2, 0);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  if (header[0] !== 0x4d || header[1] !== 0x5a) {
+    throw new Error(`Invalid Windows Rust Core binary: ${sourcePath}`);
+  }
+  fs.copyFileSync(sourcePath, destinationPath);
+  console.log("Packaged Rust Core: bin/suyan-core.exe");
+  return true;
+}
+
+function assertVendorRuntimeDependencies() {
+  const expectedPaths = [
+    path.join(vendorNodeModulesDir, "sharp", "package.json"),
+    path.join(vendorNodeModulesDir, "@img", "sharp-win32-x64", "lib", "sharp-win32-x64.node"),
+    path.join(vendorNodeModulesDir, "@img", "sharp-win32-x64", "lib", "libvips-42.dll"),
+    path.join(vendorNodeModulesDir, "@img", "sharp-win32-x64", "lib", "libvips-cpp.dll"),
+  ];
+
+  for (const expectedPath of expectedPaths) {
+    if (!fs.existsSync(expectedPath)) {
+      throw new Error(`Missing packaged runtime dependency before electron-builder: ${path.relative(projectRoot, expectedPath)}`);
+    }
+  }
+
+  // FFmpeg 按需安装：vendor 不得再夹带 ffmpeg-static 或任何 ffmpeg 二进制。
+  const forbiddenVendorPaths = [
+    path.join(vendorNodeModulesDir, "ffmpeg-static"),
+    path.join(vendorNodeModulesDir, "ffmpeg-static", "ffmpeg.exe"),
+    path.join(vendorDir, "ffmpeg.exe"),
+  ];
+  for (const forbiddenPath of forbiddenVendorPaths) {
+    if (fs.existsSync(forbiddenPath)) {
+      throw new Error(
+        `Vendor must not ship FFmpeg (on-demand component only): ${path.relative(projectRoot, forbiddenPath)}`,
+      );
+    }
+  }
+
+  const vendorRequire = createRequire(path.join(vendorDir, "package.cjs"));
+  for (const packageName of ["jszip", "sharp"]) {
+    try {
+      vendorRequire.resolve(packageName);
+    } catch (error) {
+      throw new Error(`Vendor runtime dependency cannot be resolved: ${packageName}. ${formatError(error)}`);
+    }
+  }
+
+  try {
+    const sharp = vendorRequire("sharp");
+    if (typeof sharp !== "function") {
+      throw new Error("sharp did not export a callable image processor");
+    }
+  } catch (error) {
+    throw new Error(`Packaged sharp runtime failed to load: ${formatError(error)}`);
+  }
+}
+
+function assertPackagedRuntimeDependencies(winUnpackedDir) {
+  const resourcesDir = path.join(winUnpackedDir, "resources");
+  const expectedPaths = [
+    path.join(resourcesDir, "bin", "suyan-core.exe"),
+    path.join(resourcesDir, "vendor", "node_modules", "sharp", "package.json"),
+    path.join(resourcesDir, "vendor", "node_modules", "@img", "sharp-win32-x64", "lib", "sharp-win32-x64.node"),
+    path.join(resourcesDir, "vendor", "node_modules", "@img", "sharp-win32-x64", "lib", "libvips-42.dll"),
+    path.join(resourcesDir, "vendor", "node_modules", "@img", "sharp-win32-x64", "lib", "libvips-cpp.dll"),
+  ];
+
+  for (const expectedPath of expectedPaths) {
+    if (!fs.existsSync(expectedPath)) {
+      throw new Error(`Packaged runtime dependency missing: ${path.relative(projectRoot, expectedPath)}`);
+    }
+  }
+
+  const forbiddenPaths = [
+    path.join(resourcesDir, "vendor", "node_modules", "ffmpeg-static"),
+    path.join(resourcesDir, "vendor", "node_modules", "ffmpeg-static", "ffmpeg.exe"),
+    path.join(resourcesDir, "vendor", "ffmpeg.exe"),
+  ];
+  for (const forbiddenPath of forbiddenPaths) {
+    if (fs.existsSync(forbiddenPath)) {
+      throw new Error(
+        `Packaged app must not ship FFmpeg (on-demand component only): ${path.relative(projectRoot, forbiddenPath)}`,
+      );
+    }
+  }
+
+  const vendorRequire = createRequire(path.join(resourcesDir, "vendor", "package.cjs"));
+  try {
+    vendorRequire("sharp");
+  } catch (error) {
+    throw new Error(`Packaged sharp runtime cannot be loaded: ${formatError(error)}`);
+  }
+}
+
 async function main() {
   resetDirectory(stageDir);
 
@@ -885,6 +1063,7 @@ async function main() {
   copyDirectory(path.join(projectRoot, "dist"), path.join(stageDir, "dist"));
   copyDirectory(path.join(projectRoot, "dist-electron"), path.join(stageDir, "dist-electron"));
   prepareStartupAssetsStage();
+  const rustCoreAvailable = prepareRustCoreStage();
   assertNoPersonalLibraryPayload(path.join(stageDir, "dist"));
   assertNoPersonalLibraryPayload(path.join(stageDir, "dist-electron"));
   createStagePackage();
@@ -904,7 +1083,8 @@ async function main() {
   console.log("Verified staged runtime identity and integrity hashes.");
   createVendorPackage();
   copyPackage("jszip");
-  copyPackage("ffmpeg-static");
+  copyPackage("sharp");
+  assertVendorRuntimeDependencies();
   await createAppIcon();
 
   await build({
@@ -938,6 +1118,7 @@ async function main() {
         output: packageOutputDir,
       },
       electronDist,
+      electronLanguages: ["zh-CN", "en-US", "ja"],
       extraResources: [
         {
           from: "vendor",
@@ -947,15 +1128,27 @@ async function main() {
           from: "startup-assets",
           to: "startup-assets",
         },
+        ...(rustCoreAvailable
+          ? [
+              {
+                from: "bin",
+                to: "bin",
+              },
+            ]
+          : []),
       ],
       afterPack: async (context) => {
         copyVendorRuntimeResources(context);
       },
       win: {
         ...sourcePackage.build.win,
+        // NSIS 安装包 + 便携 ZIP 双产物：ZIP 解压即用，无需安装/写注册表。
+        target: ["nsis", "zip"],
         icon: appIconPath,
         legalTrademarks: "素言 SuYan",
       },
+      // 全局命名仅命中未单独配置 artifactName 的目标（此处即 zip）；nsis 用下方自己的命名，不受影响。
+      artifactName: "${productName}-Portable-${version}.${ext}",
       nsis: {
         oneClick: false,
         allowToChangeInstallationDirectory: true,
@@ -971,8 +1164,10 @@ async function main() {
     promoteStagedRelease(packageOutputDir, requestedReleaseDir);
     cleanupReleaseBackups();
     syncPreviewReleaseMirror();
+    assertPackagedRuntimeDependencies(path.join(requestedReleaseDir, "win-unpacked"));
     assertPackagedEmptyShell(path.join(requestedReleaseDir, "win-unpacked"));
   } else {
+    assertPackagedRuntimeDependencies(path.join(packageOutputDir, "win-unpacked"));
     assertPackagedEmptyShell(path.join(packageOutputDir, "win-unpacked"));
   }
 }

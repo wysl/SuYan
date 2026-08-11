@@ -7,6 +7,8 @@ type ConfirmBubbleProps = {
   description: string;
   icon?: ReactNode;
   isBusy?: boolean;
+  /** Label while confirm is in progress. Defaults to "处理中…". */
+  busyLabel?: string;
   placement?: "above" | "below";
   title: string;
   onCancel: () => void;
@@ -20,6 +22,7 @@ export function ConfirmBubble({
   description,
   icon,
   isBusy = false,
+  busyLabel = "处理中…",
   placement = "above",
   title,
   onCancel,
@@ -49,20 +52,22 @@ export function ConfirmBubble({
       </div>
       <div className="relative mt-3 grid grid-cols-2 gap-2">
         <button
-          className="min-h-9 rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition-colors hover:bg-primary-soft"
+          className="flex min-h-9 min-w-0 items-center justify-center rounded-xl border border-border bg-background px-3 py-1.5 text-center text-sm font-medium leading-tight break-words text-foreground transition-colors hover:bg-primary-soft disabled:cursor-not-allowed disabled:opacity-60"
           disabled={isBusy}
+          title={cancelLabel}
           type="button"
           onClick={onCancel}
         >
           {cancelLabel}
         </button>
         <button
-          className="min-h-9 rounded-xl border border-danger bg-danger px-3 text-sm font-medium text-danger-foreground transition-colors hover:bg-danger-strong disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex min-h-9 min-w-0 items-center justify-center rounded-xl border border-danger bg-danger px-3 py-1.5 text-center text-sm font-medium leading-tight break-words text-danger-foreground transition-colors hover:bg-danger-strong disabled:cursor-not-allowed disabled:opacity-60"
           disabled={isBusy}
+          title={isBusy ? busyLabel : confirmLabel}
           type="button"
           onClick={onConfirm}
         >
-          {isBusy ? "删除中" : confirmLabel}
+          {isBusy ? busyLabel : confirmLabel}
         </button>
       </div>
     </div>

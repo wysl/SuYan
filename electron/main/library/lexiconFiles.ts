@@ -5,13 +5,12 @@ import type {
   PromptImageLexiconEntry,
   PromptLexiconEntry,
   PromptLexiconKind,
-  PromptParameterLexiconEntry,
 } from "../../../src/features/library/types/library";
 import { AppError } from "../ipc/errors";
 import { getSafeImportImageExtensionFromPath, writeImportImageBuffer } from "./importedImageWriter";
 import { getImagesDir } from "./libraryPaths";
 
-const lexiconKinds = new Set<PromptLexiconKind>(["parameters", "categories", "tags"]);
+const lexiconKinds = new Set<PromptLexiconKind>(["categories", "tags"]);
 
 type PromptLexiconExportPayload = {
   schemaVersion: 1;
@@ -149,35 +148,7 @@ function normalizeLexiconEntries(kind: PromptLexiconKind, input: unknown): Promp
     return [];
   }
 
-  if (kind === "parameters") {
-    return input.map(normalizeParameterEntry).filter(isPromptParameterLexiconEntry);
-  }
-
   return input.map(normalizeImageEntry).filter(isPromptImageLexiconEntry);
-}
-
-function normalizeParameterEntry(input: unknown): PromptParameterLexiconEntry | null {
-  if (!isRecord(input)) {
-    return null;
-  }
-
-  const id = normalizeRequiredString(input.id) || randomUUID();
-  const label = normalizeRequiredString(input.label);
-  const variable = normalizeRequiredString(input.variable);
-
-  if (!label || !variable) {
-    return null;
-  }
-
-  return {
-    id,
-    group: normalizeOptionalString(input.group),
-    label,
-    sourcePromptId: normalizeOptionalString(input.sourcePromptId) || null,
-    sourcePromptTitle: normalizeOptionalString(input.sourcePromptTitle) || null,
-    variable,
-    value: normalizeOptionalString(input.value),
-  };
 }
 
 function normalizeImageEntry(input: unknown): PromptImageLexiconEntry | null {
@@ -209,28 +180,11 @@ function assertLexiconKind(kind: PromptLexiconKind): void {
 }
 
 function getLexiconKindLabel(kind: PromptLexiconKind): string {
-  if (kind === "parameters") {
-    return "参数词库";
-  }
-
   if (kind === "categories") {
     return "分类词库";
   }
 
   return "标签词库";
-}
-
-function isPromptParameterLexiconEntry(input: unknown): input is PromptParameterLexiconEntry {
-  return (
-    isRecord(input) &&
-    typeof input.id === "string" &&
-    typeof input.group === "string" &&
-    typeof input.label === "string" &&
-    (input.sourcePromptId === null || typeof input.sourcePromptId === "string" || input.sourcePromptId === undefined) &&
-    (input.sourcePromptTitle === null || typeof input.sourcePromptTitle === "string" || input.sourcePromptTitle === undefined) &&
-    typeof input.variable === "string" &&
-    typeof input.value === "string"
-  );
 }
 
 function isPromptImageLexiconEntry(input: unknown): input is PromptImageLexiconEntry {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Check, Cpu, LoaderCircle, RotateCcw, ShieldCheck, X, Zap } from "lucide-react";
+import { Check, Cpu, LoaderCircle, RotateCcw, ShieldCheck, Zap } from "lucide-react";
 import { AppDialog, DialogCloseButton } from "@/components/ui/AppDialog";
 import { Button } from "@/components/ui/Button";
 import {
@@ -16,7 +16,9 @@ import {
 
 type PerformanceSettingsDialogProps = {
   isBusy: boolean;
-  onClose: () => void;
+  /** 嵌入系统设置壳时不渲染 AppDialog 外框。 */
+  embedded?: boolean;
+  onClose?: () => void;
   onNotify?: (message: StatusFeedbackMessage) => void;
 };
 
@@ -62,6 +64,7 @@ const gpuFeatureLabels: Record<string, string> = {
 
 export function PerformanceSettingsDialog({
   isBusy,
+  embedded = false,
   onClose,
   onNotify,
 }: PerformanceSettingsDialogProps) {
@@ -112,9 +115,6 @@ export function PerformanceSettingsDialog({
     });
   }, [feedbackText, onNotify]);
 
-  const hasChanges = status
-    ? draft.hardwareAccelerationMode !== status.settings.hardwareAccelerationMode
-    : false;
   const pendingRestart = status
     ? shouldUseHardwareAcceleration(draft) !== status.effectiveHardwareAcceleration
     : false;
@@ -133,14 +133,14 @@ export function PerformanceSettingsDialog({
     }));
   }, [status]);
 
-  async function handleSave() {
+  async function handleSave(nextDraft = draft) {
     if (isActionBusy) {
       return;
     }
 
     setIsSaving(true);
     setFeedbackText("正在保存启动加速设置...");
-    const result = await window.suyanApi.saveAccelerationSettings(draft);
+    const result = await window.suyanApi.saveAccelerationSettings(nextDraft);
     setIsSaving(false);
 
     if (!result.ok) {
@@ -186,28 +186,8 @@ export function PerformanceSettingsDialog({
     setFeedbackText("已重新启用 GPU，重启软件后生效。");
   }
 
-  return (
-    <AppDialog
-      panelClassName="flex max-h-[92vh] w-full max-w-3xl flex-col"
-      titleId="performance-settings-title"
-      onClose={onClose}
-    >
-      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary-soft text-foreground">
-            <Cpu size={18} />
-          </span>
-          <div className="min-w-0">
-            <h2 className="text-lg font-semibold" id="performance-settings-title">
-              启动加速
-            </h2>
-            <p className="mt-1 text-sm text-muted">重启后应用硬件加速设置</p>
-          </div>
-        </div>
-        <DialogCloseButton onClick={onClose} />
-      </header>
-
-      <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto overscroll-contain px-5 py-5">
+  const body = (
+      <div className={`grid min-h-0 flex-1 gap-4 overflow-y-auto overscroll-contain ${embedded ? "px-1 py-1" : "px-5 py-5"}`}>
         {isLoading ? (
           <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted">
             <LoaderCircle size={16} className="animate-spin" />
@@ -282,9 +262,11 @@ export function PerformanceSettingsDialog({
                       key={option.value}
                       role="radio"
                       type="button"
+                      disabled={isActionBusy}
                       onClick={() => {
-                        setDraft((current) => ({ ...current, hardwareAccelerationMode: option.value }));
-                        setFeedbackText("");
+                        const nextDraft = { ...draft, hardwareAccelerationMode: option.value };
+                        setDraft(nextDraft);
+                        void handleSave(nextDraft);
                       }}
                     >
                       <span className="flex min-w-0 items-center justify-between gap-2">
@@ -351,20 +333,33 @@ export function PerformanceSettingsDialog({
           <p className="rounded-md border border-border bg-panel px-3 py-2 text-sm text-muted">{feedbackText}</p>
         ) : null}
       </div>
+  );
 
-      <footer className="flex flex-wrap justify-end gap-2 border-t border-border px-5 py-4">
-        <Button icon={<X size={16} />} variant="ghost" onClick={onClose}>
-          取消
-        </Button>
-        <Button
-          disabled={isActionBusy || !hasChanges}
-          icon={isSaving ? <LoaderCircle size={16} className="animate-spin" /> : <Check size={16} />}
-          variant="primary"
-          onClick={() => void handleSave()}
-        >
-          保存设置
-        </Button>
-      </footer>
+  if (embedded) {
+    return body;
+  }
+
+  return (
+    <AppDialog
+      panelClassName="flex max-h-[92vh] w-full max-w-3xl flex-col"
+      titleId="performance-settings-title"
+      onClose={onClose ?? (() => undefined)}
+    >
+      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary-soft text-foreground">
+            <Cpu size={18} />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold" id="performance-settings-title">
+              启动加速
+            </h2>
+            <p className="mt-1 text-sm text-muted">重启后应用硬件加速设置</p>
+          </div>
+        </div>
+        <DialogCloseButton onClick={() => onClose?.()} />
+      </header>
+      {body}
     </AppDialog>
   );
 }

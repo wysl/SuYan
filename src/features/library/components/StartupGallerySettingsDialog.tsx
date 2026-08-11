@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Clipboard, ImagePlus, Images, LoaderCircle, Maximize2, RotateCcw, Trash2, X } from "lucide-react";
 import { AppDialog, DialogCloseButton } from "@/components/ui/AppDialog";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import type { StartupGalleryImage } from "@/types/suyanApi";
 import { getStartupGalleryImageSrc } from "../utils/getImageSrc";
 import {
@@ -12,20 +13,29 @@ import {
 
 type StartupGallerySettingsDialogProps = {
   isBusy: boolean;
-  onClose: () => void;
+  /** 嵌入系统设置壳时不渲染 AppDialog 外框。 */
+  embedded?: boolean;
+  onClose?: () => void;
   onNotify?: (message: StatusFeedbackMessage) => void;
 };
 
 type PendingAction = "import" | "paste" | "reset" | `remove:${string}` | null;
 
+type PendingConfirm =
+  | { kind: "remove"; image: StartupGalleryImage }
+  | { kind: "reset" }
+  | null;
+
 export function StartupGallerySettingsDialog({
   isBusy,
+  embedded = false,
   onClose,
   onNotify,
 }: StartupGallerySettingsDialogProps) {
   const [images, setImages] = useState<StartupGalleryImage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm>(null);
   const [feedbackText, setFeedbackText] = useState("");
   const [previewImage, setPreviewImage] = useState<StartupGalleryImage | null>(null);
 
@@ -123,6 +133,7 @@ export function StartupGallerySettingsDialog({
     }
 
     setImages(sortImages(result.data));
+    setPendingConfirm(null);
     const text = "已移除启动页图片。";
     setFeedbackText(text);
     onNotify?.({ text, type: resolveStatusFeedbackTone(text) });
@@ -144,36 +155,15 @@ export function StartupGallerySettingsDialog({
     }
 
     setImages(sortImages(result.data));
+    setPendingConfirm(null);
     const text = "已恢复默认启动页图片。";
     setFeedbackText(text);
     onNotify?.({ text, type: resolveStatusFeedbackTone(text) });
   }
 
-  return (
+  const galleryBody = (
     <>
-      <AppDialog
-      panelClassName="flex max-h-[92vh] w-full max-w-4xl flex-col"
-      titleId="startup-gallery-settings-title"
-      onClose={onClose}
-    >
-      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary-soft text-foreground">
-            <Images size={18} />
-          </span>
-          <div className="min-w-0">
-            <h2 className="text-lg font-semibold" id="startup-gallery-settings-title">
-              启动图库
-            </h2>
-            <p className="mt-1 text-sm text-muted">
-              {images.length} 张轮播图 · 自动生成缩略图
-            </p>
-          </div>
-        </div>
-        <DialogCloseButton onClick={onClose} />
-      </header>
-
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5">
+      <div className={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${embedded ? "px-1 py-1" : "px-5 py-5"}`}>
         {isLoading ? (
           <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted">
             <LoaderCircle size={16} className="animate-spin" />
@@ -217,7 +207,7 @@ export function StartupGallerySettingsDialog({
                       data-tooltip-placement="above"
                       disabled={isActionBusy}
                       type="button"
-                      onClick={() => void handleRemove(image)}
+                      onClick={() => setPendingConfirm({ kind: "remove", image })}
                     >
                       {isRemoving ? <LoaderCircle size={14} className="animate-spin" /> : <Trash2 size={14} />}
                       <span className="icon-tooltip-button__bubble" role="tooltip">
@@ -240,12 +230,12 @@ export function StartupGallerySettingsDialog({
         ) : null}
       </div>
 
-      <footer className="flex flex-wrap justify-end gap-2 border-t border-border px-5 py-4">
+      <footer className={`flex flex-wrap justify-end gap-2 ${embedded ? "border-t border-border/80 px-1 pt-3" : "border-t border-border px-5 py-4"}`}>
         <Button
           disabled={isActionBusy}
           icon={pendingAction === "reset" ? <LoaderCircle size={16} className="animate-spin" /> : <RotateCcw size={16} />}
           variant="ghost"
-          onClick={() => void handleReset()}
+          onClick={() => setPendingConfirm({ kind: "reset" })}
         >
           恢复默认
         </Button>
@@ -265,14 +255,77 @@ export function StartupGallerySettingsDialog({
         >
           粘贴图片
         </Button>
-        <Button icon={<X size={16} />} variant="primary" onClick={onClose}>
-          完成
-        </Button>
+        {!embedded ? (
+          <Button icon={<X size={16} />} variant="primary" onClick={onClose}>
+            完成
+          </Button>
+        ) : null}
       </footer>
-      </AppDialog>
+    </>
+  );
+
+  return (
+    <>
+      {embedded ? (
+        <div className="flex min-h-0 flex-1 flex-col">{galleryBody}</div>
+      ) : (
+        <AppDialog
+          panelClassName="flex max-h-[92vh] w-full max-w-4xl flex-col"
+          titleId="startup-gallery-settings-title"
+          onClose={onClose ?? (() => undefined)}
+        >
+          <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary-soft text-foreground">
+                <Images size={18} />
+              </span>
+              <div className="min-w-0">
+                <h2 className="text-lg font-semibold" id="startup-gallery-settings-title">
+                  启动图库
+                </h2>
+                <p className="mt-1 text-sm text-muted">
+                  {images.length} 张轮播图 · 自动生成缩略图
+                </p>
+              </div>
+            </div>
+            <DialogCloseButton onClick={() => onClose?.()} />
+          </header>
+          {galleryBody}
+        </AppDialog>
+      )}
       {previewImage ? (
         <StartupGalleryPreviewOverlay image={previewImage} onClose={() => setPreviewImage(null)} />
       ) : null}
+      <ConfirmDialog
+        busyLabel={pendingConfirm?.kind === "reset" ? "恢复中…" : "移除中…"}
+        confirmLabel={pendingConfirm?.kind === "reset" ? "恢复默认" : "移除图片"}
+        description={
+          pendingConfirm?.kind === "reset"
+            ? "将清空当前启动页图片并恢复为内置默认图，自定义图片会从启动图库中移除。"
+            : pendingConfirm?.kind === "remove"
+              ? `确定从启动图库移除「${pendingConfirm.image.isDefault ? "默认图片" : "这张自定义图片"}」？`
+              : ""
+        }
+        icon={<Trash2 size={18} />}
+        isBusy={isActionBusy && pendingConfirm !== null}
+        open={pendingConfirm !== null}
+        title={pendingConfirm?.kind === "reset" ? "恢复默认启动图？" : "移除启动页图片？"}
+        onCancel={() => {
+          if (!isActionBusy) {
+            setPendingConfirm(null);
+          }
+        }}
+        onConfirm={() => {
+          if (!pendingConfirm) {
+            return;
+          }
+          if (pendingConfirm.kind === "reset") {
+            void handleReset();
+            return;
+          }
+          void handleRemove(pendingConfirm.image);
+        }}
+      />
     </>
   );
 }

@@ -1,10 +1,12 @@
 import type { LibraryFile, LibraryItem, MediaStorage, VideoKeyframe } from "../types/library";
+import type { CategoryAssignmentSource } from "../types/category";
 import { normalizeNsfwRating } from "./nsfwRating";
 import { normalizePromptType } from "./promptType";
+import { LIBRARY_SCHEMA_VERSION_V2 } from "./categoryMigration";
 
 export function buildLibraryFile(items: LibraryItem[]): LibraryFile {
   return {
-    schemaVersion: 1,
+    schemaVersion: LIBRARY_SCHEMA_VERSION_V2,
     updatedAt: new Date().toISOString(),
     items: items.map((item) => {
       const remoteImageUrl = normalizeOptionalString(item.remoteImageUrl);
@@ -16,6 +18,11 @@ export function buildLibraryFile(items: LibraryItem[]): LibraryFile {
         prompt: item.prompt.trim(),
         negativePrompt: item.negativePrompt.trim(),
         category: normalizeOptionalString(item.category),
+        categoryId: normalizeOptionalString(item.categoryId),
+        genreIds: normalizeGenreIds(item.genreIds, item.categoryId),
+        categoryConfidence: normalizeOptionalConfidence(item.categoryConfidence),
+        categorySource: normalizeCategorySource(item.categorySource),
+        legacyCategory: normalizeOptionalString(item.legacyCategory),
         tags: uniqueTags(item.tags),
         generationMethod: normalizeOptionalString(item.generationMethod),
         promptType: normalizePromptType(item.promptType, item),
@@ -89,8 +96,29 @@ function normalizeStringArray(input: string[] | undefined): string[] {
   return [...new Set(input.filter((entry) => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))];
 }
 
+/** Keep primary categoryId first, then unique secondary genre ids. */
+function normalizeGenreIds(
+  genreIds: string[] | null | undefined,
+  categoryId: string | null | undefined,
+): string[] | null {
+  const primary = typeof categoryId === "string" && categoryId.trim() ? categoryId.trim() : null;
+  const extras = normalizeStringArray(genreIds ?? undefined).filter((id) => id !== primary);
+  if (!primary && extras.length === 0) {
+    return null;
+  }
+  return primary ? [primary, ...extras] : extras;
+}
+
 function normalizeOptionalNumber(input: number | null | undefined): number | null {
   return typeof input === "number" && Number.isFinite(input) && input >= 0 ? input : null;
+}
+
+function normalizeOptionalConfidence(input: number | null | undefined): number | null {
+  return typeof input === "number" && Number.isFinite(input) ? Math.min(1, Math.max(0, input)) : null;
+}
+
+function normalizeCategorySource(input: CategoryAssignmentSource | null | undefined): CategoryAssignmentSource | null {
+  return input === "system" || input === "user" || input === "ai" ? input : null;
 }
 
 export function uniqueTags(tags: string[]): string[] {

@@ -6,8 +6,11 @@ import {
   extractGptImage2GalleryInfo,
   extractJimengWorkInfo,
   extractKnownPromptSiteInfo,
+  extractOpenNanaPromptInfo,
+  extractPromptsChatPromptInfo,
   extractWebToMindPromptInfo,
   extractXmiaomPromptInfo,
+  extractYouMindPromptInfo,
   extractXStatusInfo,
   mergePromptImportDrafts,
   parseAiartPromptPayload,
@@ -17,19 +20,26 @@ import {
   parseJimengItemInfoPayload,
   parseKnownPromptSiteHtml,
   parseJimengWorkHtml,
+  parseOpenNanaPromptHtml,
+  parsePromptsChatApiPayload,
+  parsePromptsChatHtml,
   parsePromptDraftFromHtml,
   parsePromptShareUrl,
   parsePromptText,
   parseWebToMindPromptCaseApiPayload,
   parseWebToMindPromptHtml,
+  parseYouMindPromptHtml,
   parseXmiaomPromptHtml,
   parseXStatusSyndicationPayload,
   type GptImage2GalleryInfo,
   type JimengWorkInfo,
   type KnownPromptSiteInfo,
+  type OpenNanaPromptInfo,
   type PromptImportDraft,
+  type PromptsChatPromptInfo,
   type WebToMindPromptInfo,
   type XmiaomPromptInfo,
+  type YouMindPromptInfo,
   type XStatusInfo,
 } from "../../shared/promptImportParser";
 import { logger } from "../appLogger";
@@ -135,6 +145,42 @@ export async function resolveKnownShareDraftsFromText(
     }
 
     throw new AppError("PROMPT_SHARE_IMPORT_FAILED", "WebToMind 链接解析失败，请检查网络后重试。");
+  }
+
+  const openNanaPromptInfo = extractOpenNanaPromptInfo(text);
+
+  if (openNanaPromptInfo) {
+    const openNanaDraft = await fetchOpenNanaPromptDraft(openNanaPromptInfo, deadline);
+
+    if (openNanaDraft) {
+      return [openNanaDraft];
+    }
+
+    throw new AppError("PROMPT_SHARE_IMPORT_FAILED", "OpenNana 链接解析失败，请检查网络后重试。");
+  }
+
+  const youMindPromptInfo = extractYouMindPromptInfo(text);
+
+  if (youMindPromptInfo) {
+    const youMindDraft = await fetchYouMindPromptDraft(youMindPromptInfo, deadline);
+
+    if (youMindDraft) {
+      return [youMindDraft];
+    }
+
+    throw new AppError("PROMPT_SHARE_IMPORT_FAILED", "YouMind 链接解析失败，请检查网络后重试。");
+  }
+
+  const promptsChatPromptInfo = extractPromptsChatPromptInfo(text);
+
+  if (promptsChatPromptInfo) {
+    const promptsChatDraft = await fetchPromptsChatPromptDraft(promptsChatPromptInfo, deadline);
+
+    if (promptsChatDraft) {
+      return [promptsChatDraft];
+    }
+
+    throw new AppError("PROMPT_SHARE_IMPORT_FAILED", "prompts.chat 链接解析失败，请检查网络后重试。");
   }
 
   const aiartPromptId = extractAiartPromptId(text);
@@ -317,7 +363,157 @@ async function fetchWebToMindPromptDraft(
   const apiDraft = await fetchWebToMindPromptCaseApiDraft(htmlDraft?.sourceUrl ?? promptInfo.sourceUrl, deadline);
   const merged = mergePromptImportDrafts(apiDraft ?? {}, htmlDraft ?? {});
 
-  return merged.prompt ? merged : null;
+  if (!merged.prompt || isSourceOnlyPromptLike(merged.prompt)) {
+    return null;
+  }
+
+  return merged;
+}
+
+async function fetchOpenNanaPromptDraft(
+  promptInfo: OpenNanaPromptInfo,
+  deadline: ImportDeadline,
+): Promise<PromptImportDraft | null> {
+  const controller = new AbortController();
+  const timeout = createImportAbortTimeout(controller, deadline, 12_000);
+
+  try {
+    const response = await net.fetch(promptInfo.sourceUrl, {
+      headers: {
+        accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        referer: "https://opennana.com/?ref=4H8CJGZM",
+      },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const html = await response.text();
+    return parseOpenNanaPromptHtml(html, promptInfo.sourceUrl);
+  } catch {
+    rethrowIfImportTimedOut(deadline);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchYouMindPromptDraft(
+  promptInfo: YouMindPromptInfo,
+  deadline: ImportDeadline,
+): Promise<PromptImportDraft | null> {
+  const controller = new AbortController();
+  const timeout = createImportAbortTimeout(controller, deadline, 12_000);
+
+  try {
+    const response = await net.fetch(promptInfo.sourceUrl, {
+      headers: {
+        accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        referer: "https://youmind.com/zh-CN/seedance-2-0-prompts",
+      },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const html = await response.text();
+    return parseYouMindPromptHtml(html, promptInfo.sourceUrl);
+  } catch {
+    rethrowIfImportTimedOut(deadline);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchPromptsChatPromptDraft(
+  promptInfo: PromptsChatPromptInfo,
+  deadline: ImportDeadline,
+): Promise<PromptImportDraft | null> {
+  const apiDraft = await fetchPromptsChatApiDraft(promptInfo, deadline);
+
+  if (apiDraft) {
+    return apiDraft;
+  }
+
+  const controller = new AbortController();
+  const timeout = createImportAbortTimeout(controller, deadline, 12_000);
+
+  try {
+    const response = await net.fetch(promptInfo.sourceUrl, {
+      headers: {
+        accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        referer: "https://prompts.chat/prompts",
+      },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const html = await response.text();
+    return parsePromptsChatHtml(html, promptInfo.sourceUrl);
+  } catch {
+    rethrowIfImportTimedOut(deadline);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchPromptsChatApiDraft(
+  promptInfo: PromptsChatPromptInfo,
+  deadline: ImportDeadline,
+): Promise<PromptImportDraft | null> {
+  const controller = new AbortController();
+  const timeout = createImportAbortTimeout(controller, deadline, 10_000);
+
+  try {
+    const response = await net.fetch(`https://prompts.chat/api/prompts/${promptInfo.promptId}`, {
+      headers: {
+        accept: "application/json,text/plain,*/*",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        referer: promptInfo.sourceUrl,
+      },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as unknown;
+    return parsePromptsChatApiPayload(payload, promptInfo.sourceUrl);
+  } catch {
+    rethrowIfImportTimedOut(deadline);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isSourceOnlyPromptLike(prompt: string): boolean {
+  return /^来源链接\s*[:：]/u.test(prompt.trim()) || /^https?:\/\//i.test(prompt.trim());
 }
 
 async function fetchWebToMindPromptHtmlDraft(

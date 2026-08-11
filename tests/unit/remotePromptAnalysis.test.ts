@@ -1,730 +1,408 @@
 import { describe, expect, it } from "vitest";
-import { buildPromptAnalysisFromRemote } from "@/features/library/utils/remotePromptAnalysis";
+import { buildPromptAnalysisFromRemote } from "../../src/features/library/utils/remotePromptAnalysis";
+import { remoteAnalysisV2FromLegacy } from "../../src/features/library/utils/remoteAnalysisV2";
+import { buildSystemCategoryTaxonomy } from "../../src/features/library/utils/systemCategoryTaxonomy";
+import type {
+  RemoteAnalysisTagDimension,
+  RemotePromptAnalysis,
+  RemotePromptAnalysisV2,
+} from "../../src/features/library/types/ai";
 
-describe("remotePromptAnalysis", () => {
-  it("maps remote visual sections into replacement chips", () => {
-    const analysis = buildPromptAnalysisFromRemote("水彩手绘风格，近景，16:9 横屏", {
-      title: "水彩人像提示词",
-      category: "插画设计",
-      tags: ["图像风格", "景别"],
-      sections: [
-        {
-          key: "image_style",
-          label: "图像风格",
-          variable: "imageStyle",
-          values: ["水彩手绘风格"],
-        },
-      ],
-      template: "",
-      summary: "",
-    });
+/**
+ * Wrap a flat V1 payload exactly as the live parser does for a legacy response
+ * (lifted to V2 at capped, synthetic confidence). These exercise the
+ * order-preserving, non-gated legacy path so the historical expectations hold.
+ */
+function lifted(flat: RemotePromptAnalysis): RemotePromptAnalysisV2 {
+  return remoteAnalysisV2FromLegacy(flat);
+}
 
-    expect(analysis.primaryCategory).toBe("插画设计");
-    expect(analysis.suggestedTags).toContain("水彩手绘风格");
-    expect(analysis.suggestedTags).not.toContain("图像风格");
-    expect(analysis.sections[0]?.chips[0]?.templateText).toBe("{{imageStyle: 水彩手绘风格}}");
-    expect(analysis.template).toContain("图像风格：{{imageStyle:");
-  });
+/** Build a genuine V2 payload (no legacy warning → confidence gating is active). */
+function genuine(input: {
+  title?: string;
+  summary?: string;
+  categories?: Array<{ label: string; confidence: number; primary?: boolean; evidence?: string[] }>;
+  tags?: Array<{ label: string; confidence: number; dimension?: RemoteAnalysisTagDimension; evidence?: string[] }>;
+}): RemotePromptAnalysisV2 {
+  return {
+    schemaVersion: 2,
+    title: input.title ?? "",
+    summary: input.summary ?? "",
+    categories: (input.categories ?? []).map((candidate) => ({
+      label: candidate.label,
+      confidence: candidate.confidence,
+      // A genuine V2 response cites evidence per candidate; default to a
+      // non-empty phrase so confidence tests are not silently evidence-gated.
+      evidence: candidate.evidence ?? ["依据"],
+      primary: candidate.primary ?? false,
+    })),
+    tags: (input.tags ?? []).map((candidate) => ({
+      label: candidate.label,
+      dimension: candidate.dimension ?? "other",
+      confidence: candidate.confidence,
+      evidence: candidate.evidence ?? ["依据"],
+    })),
+    safety: { rating: "unknown", confidence: 0, evidence: [] },
+    warnings: [],
+  };
+}
 
-  it("normalizes broad remote capsule values into contextual replaceable parameters", () => {
-    const analysis = buildPromptAnalysisFromRemote("不要展开成完整场景全景，下部通过腿部姿态形成强烈张力", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "shot_size",
-          label: "景别",
-          variable: "shotSize",
-          values: ["不要展开成完整场景全景"],
-        },
-        {
-          key: "pose",
-          label: "动作姿态",
-          variable: "pose",
-          values: ["下部通过腿部姿态形成强烈张力"],
-        },
-      ],
-      template: "景别：{{shotSize: 不要展开成完整场景全景}}\n动作姿态：{{pose: 下部通过腿部姿态形成强烈张力}}",
-      summary: "",
-    });
+describe("remotePromptAnalysis genre/tag boundary", () => {
+  const taxonomy = buildSystemCategoryTaxonomy("2026-01-01T00:00:00.000Z");
 
-    expect(analysis.sections.find((section) => section.key === "shot_size")?.values).toEqual(["全景"]);
-    expect(analysis.sections.find((section) => section.key === "leg_pose")?.values).toEqual([
-      "腿部姿态形成强烈张力",
-    ]);
-    expect(analysis.template).toContain("景别：{{shotSize: 全景}}");
-    expect(analysis.template).toContain("腿部体态：{{legPose: 腿部姿态形成强烈张力}}");
-    expect(analysis.template).not.toContain("完整场景全景");
-  });
-
-  it("corrects remote capsule types when values clearly belong to identity", () => {
-    const analysis = buildPromptAnalysisFromRemote("一位美丽少女，刺绣细节", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "hair_accessory",
-          label: "发型头饰",
-          variable: "hairAccessory",
-          values: ["一位美丽少女"],
-        },
-      ],
-      template: "",
-      summary: "",
-    });
-
-    expect(analysis.sections.map((section) => section.key)).toEqual(["identity_attribute"]);
-    expect(analysis.sections[0]).toMatchObject({
-      label: "基础身份属性",
-      variable: "identityAttribute",
-      values: ["一位美丽少女"],
-    });
-    expect(analysis.chips[0]?.templateText).toBe("{{identityAttribute: 一位美丽少女}}");
-    expect(analysis.template).toContain("基础身份属性：{{identityAttribute: 一位美丽少女}}");
-    expect(analysis.template).not.toContain("hairAccessory");
-  });
-
-  it("expands broad remote hair capsules into precise local people and hair parameters", () => {
-    const analysis = buildPromptAnalysisFromRemote("一位美丽少女，珍珠头饰，冷棕长发大波浪", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "hair_accessory",
-          label: "发型头饰",
-          variable: "hairAccessory",
-          values: ["一位美丽少女", "珍珠头饰", "冷棕长发大波浪"],
-        },
-      ],
-      template: "",
-      summary: "",
-    });
-
-    expect(analysis.sections.find((section) => section.key === "identity_attribute")?.values).toEqual([
-      "一位美丽少女",
-    ]);
-    expect(analysis.sections.find((section) => section.key === "head_accessory")?.values).toEqual(["珍珠头饰"]);
-    expect(analysis.sections.find((section) => section.key === "hair_color")?.values).toEqual([
-      "冷棕长发大波浪",
-    ]);
-    expect(analysis.sections.find((section) => section.key === "hair_length")?.values).toEqual([
-      "冷棕长发大波浪",
-    ]);
-    expect(analysis.sections.find((section) => section.key === "hair_style")?.values).toEqual([
-      "冷棕长发大波浪",
-    ]);
-    expect(analysis.sections.find((section) => section.key === "hair_accessory")).toBeUndefined();
-    expect(analysis.template).not.toContain("hairAccessory");
-  });
-
-  it("drops remote capsules that are only generation tool or SEO metadata", () => {
-    const analysis = buildPromptAnalysisFromRemote("使用 GPT Image 2 生成一张，适合 Nano Banana prompts gallery SEO", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "identity_attribute",
-          label: "基础身份属性",
-          variable: "identityAttribute",
-          values: ["使用 GPT Image 2 生成一张", "适合 Nano Banana prompts gallery SEO"],
-        },
-      ],
-      template: "",
-      summary: "",
-    }, "prompt");
-
-    expect(analysis.sections).toEqual([]);
-    expect(analysis.chips).toEqual([]);
-    expect(analysis.template).toBe("");
-  });
-
-  it("keeps subject values after stripping remote generation prefixes", () => {
-    const analysis = buildPromptAnalysisFromRemote("用 GPT Image 2 生成一张少女，写实风格", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "identity_attribute",
-          label: "基础身份属性",
-          variable: "identityAttribute",
-          values: ["用 GPT Image 2 生成一张少女"],
-        },
-      ],
-      template: "",
-      summary: "",
-    }, "prompt");
-
-    expect(analysis.sections.find((section) => section.key === "identity_attribute")?.values).toEqual(["少女"]);
-    expect(analysis.template).toContain("基础身份属性：{{identityAttribute: 少女}}");
-    expect(analysis.template).not.toContain("GPT Image 2");
-  });
-
-  it("keeps AI prompt analysis focused on replaceable core poster parameters", () => {
-    const prompt =
-      "请以我上传的水果照片作为参考图，foodPhysicalForm：保留水梨的种类、外形轮廓、颜色特征、果皮纹理和主体角度，不要把水梨换成其他品种。将这张普通水果照片重新设计成一张 3:4 竖版「冰爽水雾水果广告海报」。画面目标：让水梨看起来像刚从冰箱或冰水里拿出来，表面带有强烈的冰爽感、清凉感和夏日广告感。画面要求：水梨作为画面主体，前景加入一层透明玻璃或亚克力板，玻璃表面布满细密水珠、凝结水雾、流动水痕。背景干净，使用白色、浅灰色、冷绿色或冰蓝色。文字排版：画面上方或左下角保留标题空间。";
-    const analysis = buildPromptAnalysisFromRemote(
-      prompt,
-      {
-        title: "",
-        category: "",
-        tags: [],
-        sections: [
-          {
-            key: "food_physical_form",
-            label: "外形轮廓",
-            variable: "foodPhysicalForm",
-            values: [
-              "保留水梨的种类、外形轮廓、颜色特征、果皮纹理和主体角度",
-              "水梨作为画面主体",
-              "不要把水梨换成其他品种",
-            ],
-          },
-          {
-            key: "image_style",
-            label: "图像风格",
-            variable: "imageStyle",
-            values: ["冰爽水雾水果广告海报", "让水梨看起来像刚从冰箱或冰水里拿出来"],
-          },
-          {
-            key: "aspect_ratio",
-            label: "画面比例",
-            variable: "aspectRatio",
-            values: ["3:4 竖版"],
-          },
-          {
-            key: "foreground_occlusion",
-            label: "前景遮挡",
-            variable: "foregroundOcclusion",
-            values: ["透明玻璃或亚克力板", "水梨可以被水雾轻微遮挡"],
-          },
-          {
-            key: "color_detail",
-            label: "色彩细节",
-            variable: "colorDetail",
-            values: ["使用白色、浅灰色、冷绿色或冰蓝色"],
-          },
-          {
-            key: "text_content",
-            label: "文本内容",
-            variable: "textContent",
-            values: ["画面上方或左下角保留标题空间"],
-          },
-        ],
-        template: "",
-        summary: "",
-      },
-      "prompt",
-    );
-
-    expect(analysis.chips.length).toBeLessThanOrEqual(10);
-    expect(analysis.chips.map((chip) => chip.value)).toEqual(
-      expect.arrayContaining(["水梨作为画面主体", "冰爽水雾水果广告海报", "透明玻璃或亚克力板", "3:4"]),
-    );
-    expect(analysis.chips.some((chip) => /不要|保留|重新设计|让水梨|可以被|使用白色/.test(chip.value))).toBe(
-      false,
-    );
-    expect(analysis.template).not.toContain("不要把水梨换成其他品种");
-  });
-
-  it("strips remote capsule labels while keeping subject verbs in contextual values", () => {
-    const analysis = buildPromptAnalysisFromRemote("面部妆容：她画着清冷优雅的财阀千金妆容，服装：豪华居家服", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "face_makeup",
-          label: "面部妆容",
-          variable: "faceMakeup",
-          values: ["她画着清冷优雅的财阀千金妆容"],
-        },
-        {
-          key: "clothing",
-          label: "服装细节",
-          variable: "clothing",
-          values: ["服装：豪华居家服"],
-        },
-      ],
-      template: "",
-      summary: "",
-    });
-
-    expect(analysis.sections.find((section) => section.key === "face_makeup")?.values).toEqual([
-      "她画着清冷优雅的财阀千金妆容",
-    ]);
-    expect(analysis.sections.find((section) => section.key === "clothing_style")?.values).toEqual(["豪华居家服"]);
-    expect(analysis.template).toContain("她画着清冷优雅的财阀千金妆容");
-    expect(analysis.template).not.toContain("服装：");
-  });
-
-  it("narrows remote values and ignores expression constraints assigned to makeup", () => {
-    const analysis = buildPromptAnalysisFromRemote("", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "photography_style",
-          label: "摄影风格",
-          variable: "style",
-          values: ["真人摄影风格的高端肚皮舞主题时尚大片"],
-        },
-        {
-          key: "face_makeup",
-          label: "面部妆容",
-          variable: "faceMakeup",
-          values: ["整体表情不夸张、不媚俗"],
-        },
-        {
-          key: "lens_equipment",
-          label: "镜头器材",
-          variable: "camera",
-          values: ["使用 24mm–28mm 广角近拍的封面视角"],
-        },
-      ],
-      template: "",
-      summary: "",
-    });
-
-    expect(analysis.sections.find((section) => section.key === "photography_style")).toMatchObject({
-      variable: "photographyStyle",
-      values: ["真人摄影风格"],
-    });
-    expect(analysis.sections.find((section) => section.key === "face_makeup")).toBeUndefined();
-    expect(analysis.sections.find((section) => section.key === "lens_equipment")).toMatchObject({
-      variable: "lensEquipment",
-      values: ["24mm–28mm 广角近拍"],
-    });
-    expect(analysis.template).not.toContain("高端肚皮舞主题");
-    expect(analysis.template).not.toContain("整体表情");
-    expect(analysis.template).not.toContain("{{style:");
-    expect(analysis.template).not.toContain("{{camera:");
-  });
-
-  it("accepts extended A-G portrait sections from remote analysis", () => {
-    const analysis = buildPromptAnalysisFromRemote("85mm定焦，水光透亮底妆，顶层公寓，薄纱前景遮挡", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "lens_equipment",
-          label: "镜头器材",
-          variable: "lensEquipment",
-          values: ["镜头器材：85mm定焦"],
-        },
-        {
-          key: "base_makeup",
-          label: "底妆",
-          variable: "baseMakeup",
-          values: ["底妆：水光透亮底妆"],
-        },
-        {
-          key: "location_scene",
-          label: "场地大类",
-          variable: "locationScene",
-          values: ["场地大类：顶层公寓"],
-        },
-        {
-          key: "foreground_occlusion",
-          label: "前景遮挡",
-          variable: "foregroundOcclusion",
-          values: ["前景遮挡：薄纱前景遮挡"],
-        },
-      ],
-      template: "",
-      summary: "",
-    });
-
-    expect(analysis.sections.map((section) => section.key)).toEqual([
-      "lens_equipment",
-      "base_makeup",
-      "location_scene",
-      "foreground_occlusion",
-    ]);
-    expect(analysis.chips.map((chip) => chip.templateText)).toContain("{{lensEquipment: 85mm定焦}}");
-    expect(analysis.template).toContain("前景遮挡：{{foregroundOcclusion: 薄纱前景遮挡}}");
-  });
-
-  it("accepts twelve-layer portrait sections from remote analysis", () => {
-    const analysis = buildPromptAnalysisFromRemote("单人女性，椭圆脸，细微肌理，左前方柔光", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "subject_position",
-          label: "人物主体定位",
-          variable: "subjectPosition",
-          values: ["单人女性"],
-        },
-        {
-          key: "face_shape",
-          label: "脸型轮廓",
-          variable: "faceShape",
-          values: ["椭圆脸"],
-        },
-        {
-          key: "skin_texture",
-          label: "肤质纹理",
-          variable: "skinTexture",
-          values: ["细微肌理"],
-        },
-        {
-          key: "portrait_lighting_color",
-          label: "人像光影色彩",
-          variable: "portraitLightingColor",
-          values: ["左前方柔光"],
-        },
-      ],
-      template: "",
-      summary: "",
-    });
-
-    expect(analysis.sections.map((section) => section.key)).toEqual([
-      "subject_position",
-      "face_shape",
-      "skin_texture",
-      "portrait_lighting_color",
-    ]);
-    expect(analysis.template).toContain("人物主体定位：{{subjectPosition: 单人女性}}");
-    expect(analysis.template).toContain("人像光影色彩：{{portraitLightingColor: 左前方柔光}}");
-  });
-
-  it("accepts thirteen-layer scene sections from remote analysis", () => {
-    const analysis = buildPromptAnalysisFromRemote("现代极简住宅空间，三层空间结构，右侧大面积窗户自然光", {
-      title: "",
-      category: "",
-      tags: [],
-      sections: [
-        {
-          key: "scene_identity",
-          label: "场景类型定位",
-          variable: "sceneIdentity",
-          values: ["现代极简住宅空间"],
-        },
-        {
-          key: "spatial_structure",
-          label: "空间结构",
-          variable: "spatialStructure",
-          values: ["三层空间结构"],
-        },
-        {
-          key: "scene_lighting",
-          label: "场景光影关系",
-          variable: "sceneLighting",
-          values: ["右侧大面积窗户自然光"],
-        },
-        {
-          key: "scene_micro_details",
-          label: "场景微观细节",
-          variable: "sceneMicroDetails",
-          values: ["轻微使用痕迹"],
-        },
-      ],
-      template: "",
-      summary: "",
-    });
-
-    expect(analysis.sections.map((section) => section.key)).toEqual([
-      "scene_identity",
-      "spatial_structure",
-      "scene_lighting",
-      "scene_micro_details",
-    ]);
-    expect(analysis.template).toContain("场景类型定位：{{sceneIdentity: 现代极简住宅空间}}");
-    expect(analysis.template).toContain("场景光影关系：{{sceneLighting: 右侧大面积窗户自然光}}");
-  });
-
-  it("keeps image category analysis separate from tags and template sections", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "不要读取这段提示词",
-      {
-        title: "",
+  it("maps image-category secondary genres without emitting feature tags", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "luxury perfume advertisement black background soft light",
+      lifted({
+        title: "perfume",
         category: "产品摄影",
-        tags: ["鞋子", "海报"],
-        sections: [
-          {
-            key: "brand",
-            label: "知名品牌",
-            variable: "brand",
-            values: ["Nike 运动品牌感"],
-          },
-        ],
-        template: "知名品牌：{{brand: Nike 运动品牌感}}",
-        summary: "",
-      },
+        tags: ["微距摄影", "高级感", "柔光", "香水"],
+        summary: "perfume ad",
+      }),
       "image-category",
+      { taxonomy },
     );
 
-    expect(analysis.suggestedCategories).toEqual(["电商产品摄影"]);
-    expect(analysis.suggestedTags).toEqual([]);
-    expect(analysis.sections).toEqual([]);
-    expect(analysis.template).toBe("");
+    expect(result.primaryCategory).toBe("产品摄影");
+    expect(result.suggestedCategories).toEqual(expect.arrayContaining(["产品摄影", "微距摄影"]));
+    // Genre path must not leak feature tags
+    expect(result.suggestedTags).toEqual([]);
+    expect(result.taxonomyPrimaryCategoryId).toBeTruthy();
+    expect((result.taxonomySuggestions ?? []).length).toBeGreaterThanOrEqual(1);
   });
 
-  it("keeps all matched image categories up to ten", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "不要读取这段提示词",
-      {
+  it("caps a model that ignores the category count limit", () => {
+    // 模型拿不到有效输入时会把分类目录整片倒回来（曾给一张人像写真返回
+    // 产品摄影/食品摄影/风光摄影…）；截断到提示词里承诺的 6 个上限。
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      lifted({
         title: "",
-        category: "产品摄影",
-        tags: [
-          "广告商业摄影",
-          "美食摄影",
-          "服装穿搭摄影",
-          "建筑地产摄影",
-          "工业产品摄影",
-          "珠宝奢侈品摄影",
-          "活动纪实商业",
-          "婚纱婚礼摄影",
-          "企业形象摄影",
-          "人像写真",
-          "肖像摄影",
-        ],
-        sections: [],
-        template: "",
+        category: "肖像摄影",
+        tags: ["产品摄影", "食品摄影", "风光摄影", "时尚摄影", "街头摄影", "概念摄影", "建筑摄影", "美妆摄影"],
         summary: "",
-      },
+      }),
       "image-category",
+      { taxonomy },
     );
 
-    expect(analysis.suggestedCategories).toHaveLength(10);
-    expect(analysis.suggestedCategories).toEqual([
-      "电商产品摄影",
-      "广告商业摄影",
-      "美食摄影",
-      "服装穿搭摄影",
-      "建筑地产摄影",
-      "工业产品摄影",
-      "珠宝奢侈品摄影",
-      "活动纪实商业",
-      "婚纱婚礼摄影",
-      "企业形象摄影",
-    ]);
-    expect(analysis.primaryCategory).toBe("电商产品摄影");
+    expect(result.primaryCategory).toBe("肖像摄影");
+    expect(result.suggestedCategories.length).toBeLessThanOrEqual(10);
+    // 同一内容类型域内的姊妹分类仍被收敛：商业摄影域最多保留 3 个。
+    // （食品摄影已拆入独立「美食摄影」域，不再与商业姊妹一起收敛。）
+    const commercialSiblings = ["产品摄影", "时尚摄影", "建筑摄影", "美妆摄影"];
+    expect(
+      result.suggestedCategories.filter((name) => commercialSiblings.includes(name)).length,
+    ).toBeLessThanOrEqual(3);
   });
 
-  it("keeps image tag analysis separate from categories and prompt templates", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "不要读取这段提示词",
-      {
+  it("keeps stable retrieval dimensions and drops visual-property categories", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      lifted({
+        title: "",
+        category: "肖像摄影",
+        tags: ["写实主义", "宁静平和", "暖色主导", "浅景深", "个人写真", "中式国风", "复古怀旧", "社交媒体图文", "汉服造型"],
+        summary: "汉服女子在湖边树下的写真",
+      }),
+      "image-category",
+      { taxonomy },
+    );
+
+    expect(result.primaryCategory).toBe("肖像摄影");
+    expect(result.suggestedCategories).toEqual(
+      expect.arrayContaining(["写实主义", "个人写真", "中式国风", "汉服造型"]),
+    );
+    expect(result.suggestedCategories).not.toEqual(expect.arrayContaining(["宁静平和", "暖色主导", "浅景深"]));
+  });
+
+  it("maps prompt-category the same way as image-category", () => {
+    const image = buildPromptAnalysisFromRemote(
+      "street photography rainy night neon",
+      lifted({ title: "", category: "街头摄影", tags: ["城市风光摄影"], summary: "" }),
+      "image-category",
+      { taxonomy },
+    );
+    const prompt = buildPromptAnalysisFromRemote(
+      "street photography rainy night neon",
+      lifted({ title: "", category: "街头摄影", tags: ["城市风光摄影"], summary: "" }),
+      "prompt-category",
+      { taxonomy },
+    );
+    expect(prompt.primaryCategory).toBe(image.primaryCategory);
+    expect(prompt.suggestedCategories).toEqual(image.suggestedCategories);
+  });
+
+  it("keeps image-tags as features and strips genre names", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      lifted({
         title: "",
         category: "产品摄影",
-        tags: ["鞋子", "广告海报", "产品摄影", "图像提示词", "图像风格", "摄影风格", "景别", "识别"],
-        sections: [],
-        template: "",
+        tags: ["香水", "玻璃瓶", "自然光斑", "产品摄影", "高级感", "黑色背景"],
         summary: "",
-      },
+      }),
       "image-tags",
+      { taxonomy },
     );
 
-    expect(analysis.suggestedTags).toEqual(["鞋子", "广告海报"]);
-    expect(analysis.suggestedCategories).toEqual([]);
-    expect(analysis.template).toBe("");
+    expect(result.primaryCategory).toBe("未分类");
+    expect(result.suggestedCategories).toEqual([]);
+    expect(result.suggestedTags).toEqual(expect.arrayContaining(["香水", "玻璃瓶", "自然光斑"]));
+    expect(result.suggestedTags).not.toContain("高级感");
+    expect(result.suggestedTags).not.toContain("产品摄影");
+    // 光线条件已是分类维度，柔光这类词不再从标签通道流出
+    expect(result.suggestedTags).not.toContain("柔光");
   });
 
-  it("keeps image tag analysis concrete instead of saving empty dimensions", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "不要读取这段提示词",
-      {
+  it("never promotes the remote category field into tags", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      lifted({
+        title: "",
+        category: "白花",
+        tags: ["绿叶", "窗景", "流苏耳饰", "前景花枝", "闭眼", "柔光", "浅景深", "视觉参考"],
+        summary: "",
+      }),
+      "image-tags",
+      { taxonomy },
+    );
+
+    expect(result.suggestedTags).toEqual(
+      expect.arrayContaining(["绿叶", "窗景", "流苏耳饰", "前景花枝", "闭眼"]),
+    );
+    expect(result.suggestedTags).not.toEqual(
+      expect.arrayContaining(["白花", "柔光", "浅景深", "视觉参考"]),
+    );
+  });
+
+  it("keeps prompt-tags free of pseudo genres", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "luxury black perfume soft light macro",
+      lifted({
         title: "",
         category: "",
+        tags: ["咖啡摄影", "高级感摄影", "自然光斑", "香水"],
+        summary: "",
+      }),
+      "prompt-tags",
+      { taxonomy },
+    );
+    expect(result.suggestedTags).not.toContain("咖啡摄影");
+    expect(result.suggestedTags).not.toContain("高级感摄影");
+    expect(result.suggestedTags).toEqual(expect.arrayContaining(["自然光斑", "香水"]));
+  });
+
+  it("strips adjective-decorated lighting compounds but keeps optical-product tags", () => {
+    // 远程模型偶尔把「柔和暖调自然光」这类给光线方向/性质加形容词的复合词当特征词吐出。
+    // 光线条件是分类维度，复合修饰后仍归分类，不得从标签通道流出；而「自然光斑」「轮廓光」
+    // 是标签层光学产物（不以规范光线词收尾），必须保留。本地文本分析靠模板拆分把光线短语
+    // 归到参数段，远程通道没有该步，只能靠 sanitize 边界拦截。
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      lifted({
+        title: "",
+        category: "",
+        tags: ["柔和暖调自然光", "自然光斑", "轮廓光", "香水"],
+        summary: "",
+      }),
+      "image-tags",
+      { taxonomy },
+    );
+
+    expect(result.suggestedTags).not.toContain("柔和暖调自然光");
+    expect(result.suggestedTags).toEqual(expect.arrayContaining(["自然光斑", "轮廓光", "香水"]));
+  });
+
+  it("strips adjective-decorated color-dominance and mood compounds but keeps concrete features", () => {
+    // 光线之外的其它分类维度也会被远程模型加形容词拼成复合标签：色彩体系（「低饱和暖色主导」）
+    // 与情绪氛围（「宁静温柔氛围」）是两个收尾无歧义的维度，必须拦回分类；而「香水」「玻璃瓶」是
+    // 具体可指事物，须保留。收尾标记只认「色主导」「氛围」——不波及以「色调/色系」收尾的
+    // 「青绿色调」这类保留标签（见 promptFilters 用例）。
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      lifted({
+        title: "",
+        category: "",
+        tags: ["低饱和暖色主导", "宁静温柔氛围", "香水", "玻璃瓶"],
+        summary: "",
+      }),
+      "image-tags",
+      { taxonomy },
+    );
+
+    expect(result.suggestedTags).not.toContain("低饱和暖色主导");
+    expect(result.suggestedTags).not.toContain("宁静温柔氛围");
+    expect(result.suggestedTags).toEqual(expect.arrayContaining(["香水", "玻璃瓶"]));
+  });
+});
+
+describe("remotePromptAnalysis V2 confidence adjudication", () => {
+  const taxonomy = buildSystemCategoryTaxonomy("2026-01-01T00:00:00.000Z");
+
+  it("drops below-floor padding categories from a genuine V2 result", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      genuine({
+        summary: "汉服女子在湖边写真",
+        categories: [
+          { label: "肖像摄影", confidence: 0.92, primary: true },
+          { label: "汉服造型", confidence: 0.55 },
+          { label: "个人写真", confidence: 0.5 },
+          // Low-signal padding the order-based cap used to let ride along.
+          { label: "产品摄影", confidence: 0.15 },
+        ],
+      }),
+      "image-category",
+      { taxonomy },
+    );
+
+    expect(result.primaryCategory).toBe("肖像摄影");
+    expect(result.suggestedCategories).toEqual(expect.arrayContaining(["汉服造型", "个人写真"]));
+    expect(result.suggestedCategories).not.toContain("产品摄影");
+  });
+
+  it("elects the flagged primary and keeps it even below the confidence floor", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      genuine({
+        categories: [
+          // Higher confidence but not the primary.
+          { label: "产品摄影", confidence: 0.9, primary: false },
+          // Flagged primary sits below the floor yet must survive and lead.
+          { label: "肖像摄影", confidence: 0.3, primary: true },
+        ],
+      }),
+      "image-category",
+      { taxonomy },
+    );
+
+    expect(result.primaryCategory).toBe("肖像摄影");
+    expect(result.suggestedCategories).toEqual(expect.arrayContaining(["肖像摄影", "产品摄影"]));
+  });
+
+  it("ranks feature tags by confidence and drops weak ones for genuine V2", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      genuine({
+        // Deliberately supplied ascending so a pass-through would keep this order.
         tags: [
-          "柔光商业光影",
-          "图像提示词",
-          "图像风格",
-          "摄影风格",
-          "景别",
-          "识别",
-          "银紫色长发",
-          "近景自拍",
-          "中心构图",
+          { label: "玻璃瓶", confidence: 0.4 },
+          { label: "自然光斑", confidence: 0.6 },
+          { label: "香水", confidence: 0.9 },
+          { label: "弱标签", confidence: 0.2 },
         ],
-        sections: [],
-        template: "",
-        summary: "",
-      },
+      }),
       "image-tags",
+      { taxonomy },
     );
 
-    expect(analysis.suggestedTags).toEqual(["柔光商业光影", "银紫色长发", "近景自拍", "中心构图"]);
+    // Confidence-sorted, not input order; the sub-floor tag is gone.
+    expect(result.suggestedTags).toEqual(["香水", "自然光斑", "玻璃瓶"]);
+    expect(result.suggestedTags).not.toContain("弱标签");
   });
 
-  it("removes parameter sentences and model source text from image tags", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "不要读取这段提示词",
-      {
-        title: "",
-        category: "",
+  it("orders genuine V2 feature tags by dimension, not raw confidence", () => {
+    // Concrete dimensions (subject/scene) must lead; an aesthetic lighting tag
+    // sorts last even at the highest confidence, proving dimension grouping
+    // overrides raw score. 自然光斑 is a curated tag-layer lighting word, so it
+    // survives the boundary and simply ranks behind the concrete features.
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      genuine({
         tags: [
-          "GPT Image 2 prompts",
-          "前景加入一层透明玻璃或亚克力板",
-          "放在画面中央偏下位置",
-          "背景可以有轻微虚化",
-          "请以我上传的水果照片作为参考图",
-          "冰爽水雾水果广告海报",
-          "水梨",
-          "清爽夏日氛围",
+          { label: "流苏耳饰", confidence: 0.9, dimension: "subject" },
+          { label: "香水", confidence: 0.6, dimension: "subject" },
+          { label: "窗景", confidence: 0.5, dimension: "scene" },
+          { label: "自然光斑", confidence: 0.95, dimension: "lighting" },
         ],
-        sections: [],
-        template: "",
-        summary: "",
-      },
+      }),
       "image-tags",
+      { taxonomy },
     );
 
-    expect(analysis.suggestedTags).toEqual(["冰爽水雾水果广告海报", "水梨", "清爽夏日氛围"]);
+    expect(result.suggestedTags).toEqual(["流苏耳饰", "香水", "窗景", "自然光斑"]);
   });
 
-  it("keeps visible source avatar tags while removing plain source metadata", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "不要读取这段提示词",
-      {
+  it("does not floor-gate a legacy-lifted result even at low synthetic confidence", () => {
+    // Same shape as the genuine tag test, but lifted from V1: the synthetic
+    // gradient must not trigger gating, so every label survives (order kept).
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      lifted({
         title: "",
         category: "",
+        tags: ["玻璃瓶", "自然光斑", "香水", "银色喷头"],
+        summary: "",
+      }),
+      "image-tags",
+      { taxonomy },
+    );
+
+    expect(result.suggestedTags).toEqual(
+      expect.arrayContaining(["玻璃瓶", "自然光斑", "香水", "银色喷头"]),
+    );
+  });
+});
+
+describe("remotePromptAnalysis V2 evidence adjudication", () => {
+  const taxonomy = buildSystemCategoryTaxonomy("2026-01-01T00:00:00.000Z");
+
+  it("drops a genuine V2 category the model scored but left unjustified (empty evidence)", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      genuine({
+        summary: "汉服女子在湖边写真",
+        categories: [
+          { label: "肖像摄影", confidence: 0.92, primary: true, evidence: ["湖边写真"] },
+          { label: "汉服造型", confidence: 0.6, evidence: ["汉服"] },
+          // Clears the confidence floor, but no evidence → unjustified padding.
+          { label: "产品摄影", confidence: 0.8, evidence: [] },
+        ],
+      }),
+      "image-category",
+      { taxonomy },
+    );
+
+    expect(result.primaryCategory).toBe("肖像摄影");
+    expect(result.suggestedCategories).toEqual(expect.arrayContaining(["汉服造型"]));
+    expect(result.suggestedCategories).not.toContain("产品摄影");
+  });
+
+  it("keeps the elected primary category even when its evidence is empty", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      genuine({
+        categories: [
+          // Primary carries neither high confidence nor evidence, yet must land.
+          { label: "肖像摄影", confidence: 0.3, primary: true, evidence: [] },
+          { label: "产品摄影", confidence: 0.9, evidence: ["产品"] },
+        ],
+      }),
+      "image-category",
+      { taxonomy },
+    );
+
+    expect(result.primaryCategory).toBe("肖像摄影");
+    expect(result.suggestedCategories).toEqual(expect.arrayContaining(["肖像摄影", "产品摄影"]));
+  });
+
+  it("drops a genuine V2 feature tag with no supporting evidence", () => {
+    const result = buildPromptAnalysisFromRemote(
+      "",
+      genuine({
         tags: [
-          "WebToMind",
-          "GPT Image 2 prompts",
-          "WebToMind来源头像",
-          "来源卡片",
-          "站点标识",
-          "域名标签",
-          "暗调人像",
+          { label: "香水", confidence: 0.9, dimension: "subject", evidence: ["瓶身"] },
+          // 玻璃瓶 is normally a kept feature tag; here it is pruned purely for
+          // lacking evidence, not by sanitization.
+          { label: "玻璃瓶", confidence: 0.8, dimension: "subject", evidence: [] },
         ],
-        sections: [],
-        template: "",
-        summary: "",
-      },
+      }),
       "image-tags",
+      { taxonomy },
     );
 
-    expect(analysis.suggestedTags).toEqual(["WebToMind来源头像", "来源卡片", "站点标识", "域名标签", "暗调人像"]);
-  });
-
-  it("keeps all matched image tags up to fifteen", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "不要读取这段提示词",
-      {
-        title: "",
-        category: "",
-        tags: [
-          "柔光",
-          "长发",
-          "白色上衣",
-          "室内",
-          "浅景深",
-          "近景",
-          "自然妆",
-          "窗边",
-          "低饱和",
-          "人像",
-          "胶片感",
-          "侧脸",
-          "回眸",
-          "暖色调",
-          "安静氛围",
-          "多余标签",
-        ],
-        sections: [],
-        template: "",
-        summary: "",
-      },
-      "image-tags",
-    );
-
-    expect(analysis.suggestedTags).toHaveLength(15);
-    expect(analysis.suggestedTags).not.toContain("多余标签");
-  });
-
-  it("keeps image safety analysis separate from prompt tags and templates", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "不要读取这段提示词",
-      {
-        title: "",
-        category: "NSFW",
-        tags: ["NSFW"],
-        sections: [
-          {
-            key: "image_style",
-            label: "图像风格",
-            variable: "imageStyle",
-            values: ["写实摄影"],
-          },
-        ],
-        template: "图像风格：{{imageStyle: 写实摄影}}",
-        summary: "成人内容",
-      },
-      "image-safety",
-    );
-
-    expect(analysis.primaryCategory).toBe("NSFW");
-    expect(analysis.suggestedCategories).toEqual(["NSFW"]);
-    expect(analysis.suggestedTags).toEqual(["NSFW"]);
-    expect(analysis.sections).toEqual([]);
-    expect(analysis.template).toBe("");
-  });
-
-  it("maps prompt option responses into replaceable chips", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "图像风格：{{imageStyle: 水彩手绘风格}}，光影：{{lightShadow: 柔和窗边自然光影}}",
-      {
-        title: "",
-        category: "",
-        tags: [],
-        sections: [
-          {
-            key: "light_shadow",
-            label: "光影",
-            variable: "lightShadow",
-            values: ["霓虹反射光影", "高对比硬光阴影"],
-          },
-        ],
-        template: "",
-        summary: "",
-      },
-      "prompt-options",
-      {
-        optionValue: "柔和窗边自然光影",
-        optionVariable: "lightShadow",
-      },
-    );
-
-    expect(analysis.suggestedTags).toEqual([]);
-    expect(analysis.sections[0]?.variable).toBe("lightShadow");
-    expect(analysis.chips[0]?.templateText).toBe("{{lightShadow: 霓虹反射光影}}");
-  });
-
-  it("filters remote prompt options that do not match the active capsule", () => {
-    const analysis = buildPromptAnalysisFromRemote(
-      "景别：{{shotSize: 近景}}，画面比例：{{aspectRatio: 16:9 横屏}}",
-      {
-        title: "",
-        category: "",
-        tags: [],
-        sections: [
-          {
-            key: "aspect_ratio",
-            label: "画面比例",
-            variable: "aspectRatio",
-            values: ["中景", "竖屏竖构图"],
-          },
-        ],
-        template: "",
-        summary: "",
-      },
-      "prompt-options",
-      {
-        optionValue: "16:9 横屏",
-        optionVariable: "aspectRatio",
-      },
-    );
-
-    expect(analysis.sections[0]?.values).toEqual(["竖屏竖构图"]);
+    expect(result.suggestedTags).toContain("香水");
+    expect(result.suggestedTags).not.toContain("玻璃瓶");
   });
 });

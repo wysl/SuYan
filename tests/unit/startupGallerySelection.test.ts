@@ -33,3 +33,41 @@ describe("startup gallery selection", () => {
     expect(selectRandomStartupGalleryImages([], 6)).toEqual([]);
   });
 });
+
+/**
+ * Keep this helper in sync with LibraryView's carousel offset math.
+ * Extracted here so remount / wrap behavior can be unit-tested without mounting React.
+ */
+function getStartupCarouselOffset(index: number, activeIndex: number, total: number): number {
+  if (total <= 0) {
+    return 0;
+  }
+
+  let offset = index - activeIndex;
+  const half = total / 2;
+
+  if (offset > half) {
+    offset -= total;
+  } else if (offset < -half) {
+    offset += total;
+  }
+
+  return offset;
+}
+
+describe("startup carousel offset", () => {
+  it("advances forward with the shortest circular distance", () => {
+    expect(getStartupCarouselOffset(0, 0, 6)).toBe(0);
+    expect(getStartupCarouselOffset(1, 0, 6)).toBe(1);
+    expect(getStartupCarouselOffset(2, 0, 6)).toBe(2);
+    expect(getStartupCarouselOffset(5, 0, 6)).toBe(-1);
+  });
+
+  it("keeps neighboring slides adjacent after wrapping past the last image", () => {
+    // Active is the last slide (index 5); next slide (0) should sit to the right (+1),
+    // not leap across the whole deck with a linear offset of -5.
+    expect(getStartupCarouselOffset(0, 5, 6)).toBe(1);
+    expect(getStartupCarouselOffset(4, 5, 6)).toBe(-1);
+    expect(getStartupCarouselOffset(5, 5, 6)).toBe(0);
+  });
+});

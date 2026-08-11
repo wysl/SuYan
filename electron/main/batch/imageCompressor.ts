@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 import type { LibraryItem } from "../../../src/features/library/types/library";
@@ -5,6 +6,7 @@ import { isVideoMediaFile } from "../../../src/features/library/utils/mediaFileT
 import { getImagePath, getImageThumbnailPath } from "../library/libraryPaths";
 import { readLibraryFile, writeLibraryFile } from "../library/libraryStore";
 import { getSharp, type Sharp, type SharpPipeline } from "../runtime/imageRuntime";
+import { compressImageViaRust } from "../runtime/rustFileOps";
 import {
   cancelCompress,
   isCompressCanceled,
@@ -19,6 +21,7 @@ export type ImageCompressOptions = {
   quality: number;
   format: "keep" | "webp";
   itemIds?: string[];
+  maxSide?: number;
 };
 
 const maxImageBytes = 50 * 1024 * 1024;
@@ -139,7 +142,8 @@ async function compressSingleImage(
   }
 
   const ext = path.extname(item.imageFileName).toLowerCase();
-  const output = await compressBuffer(buffer, ext, options);
+  // 优先 Rust Sidecar（基于文件路径，避免 Node 全量读入内存）；失败回退 sharp。
+  const output = (await compressImageViaRustOrNull(sourcePath, ext, options)) ?? (await compressBuffer(buffer, ext, options));
 
   if (!output || output.length >= buffer.length) {
     return null;
@@ -174,23 +178,74 @@ async function compressBuffer(
   ext: string,
   options: ImageCompressOptions,
 ): Promise<Buffer | null> {
-  const { quality, format } = options;
+  const { quality, format, maxSide } = options;
 
   const sharp = getSharp();
+  let pipeline = sharp(buffer);
+
+  if (maxSide && maxSide > 0) {
+    pipeline = pipeline.resize({
+      width: maxSide,
+      height: maxSide,
+      fit: "inside",
+      withoutEnlargement: true,
+    });
+  }
 
   if (format === "webp") {
-    return sharp(buffer).webp({ quality }).toBuffer();
+    return pipeline.webp({ quality }).toBuffer();
   }
 
   if (ext === ".jpg" || ext === ".jpeg") {
-    return sharp(buffer).jpeg({ quality, mozjpeg: true }).toBuffer();
+    return pipeline.jpeg({ quality, mozjpeg: true }).toBuffer();
   }
 
   if (ext === ".png") {
-    return sharp(buffer).png({ compressionLevel: 9, palette: true, quality }).toBuffer();
+    return pipeline.png({ compressionLevel: 9, palette: true, quality }).toBuffer();
   }
 
   return null;
+}
+
+/**
+ * 优先走 Rust Sidecar 压缩（基于文件路径，避免 Node 全量读入内存）。
+ * 成功返回输出 Buffer；未启用或不可用时返回 null，由调用方回退 sharp。
+ */
+async function compressImageViaRustOrNull(
+  sourcePath: string,
+  ext: string,
+  options: ImageCompressOptions,
+): Promise<Buffer | null> {
+  const { quality, format, maxSide } = options;
+
+  const outputExt = format === "webp" ? ".webp" : ext;
+  const outputPath = path.join(
+    os.tmpdir(),
+    `suyan-rust-image-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${outputExt}`,
+  );
+
+  try {
+    const result = await compressImageViaRust({
+      sourcePath,
+      outputPath,
+      ext,
+      quality,
+      format,
+      maxSide,
+    });
+
+    if (!result || result.outputBytes === 0) {
+      await removeFile(outputPath);
+      return null;
+    }
+
+    const output = await fs.readFile(outputPath);
+    await removeFile(outputPath);
+    return output;
+  } catch {
+    await removeFile(outputPath).catch(() => undefined);
+    return null;
+  }
 }
 
 async function validateCompressedImage(buffer: Buffer): Promise<void> {

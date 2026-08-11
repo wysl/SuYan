@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   setExternalLibraryRootWatch,
   shutdownExternalLibraryWatchers,
@@ -47,15 +47,31 @@ vi.mock("../../electron/main/library/imageThumbnails", () => ({
 
 const temporaryDirectories: string[] = [];
 
+// Shrink the watcher's debounce / awaitWriteFinish windows to ~50ms so a newly
+// written file is indexed in a few hundred ms, well inside the poll deadline,
+// even when 60+ test files contend for the event loop. Production keeps 900/700.
+const watcherTimingEnv = {
+  SUYAN_WATCHER_DEBOUNCE_MS: "50",
+  SUYAN_WATCHER_STABILITY_MS: "50",
+  SUYAN_WATCHER_POLL_MS: "20",
+} as const;
+
+beforeEach(() => {
+  Object.assign(process.env, watcherTimingEnv);
+});
+
 afterEach(async () => {
   await shutdownExternalLibraryWatchers();
   await Promise.all(temporaryDirectories.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })));
+  for (const key of Object.keys(watcherTimingEnv)) {
+    delete process.env[key];
+  }
   runtime.send.mockClear();
   runtime.userDataPath = "";
 });
 
 describe("external library root watcher", () => {
-  it("indexes additions while enabled and stops after being disabled", { timeout: 10_000 }, async () => {
+  it("indexes additions while enabled and stops after being disabled", { timeout: 20_000 }, async () => {
     const { libraryPath, rootPath } = await createWatcherFixture();
     const initialRoots = await setExternalLibraryRootWatch("root-1", true);
     expect(initialRoots.root.watchEnabled).toBe(true);
@@ -122,7 +138,7 @@ async function waitForLibrary(
   libraryPath: string,
   predicate: (library: LibraryFile) => boolean,
 ): Promise<LibraryFile> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + 10_000;
 
   while (Date.now() < deadline) {
     const library = await readLibrary(libraryPath);

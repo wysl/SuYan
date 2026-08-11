@@ -14,6 +14,8 @@ import { supportedImportVisualMediaExtensions } from "./importedImageWriter";
 import { warmLibraryItemThumbnails } from "./imageThumbnails";
 import { readLibraryFile, updateLibraryFile } from "./libraryStore";
 import { readLibraryRoots, updateLibraryRoot } from "./libraryRoots";
+import { mapWithConcurrency } from "./asyncMap";
+import { scanMediaFilesViaRustStream } from "../runtime/rustFileOps";
 
 export type ExternalScanProgress = {
   current: number;
@@ -28,6 +30,13 @@ export type ExternalScanResult = {
   skippedCount: number;
 };
 
+export type ScannedExternalMediaFile = {
+  absolutePath: string;
+  relativePath: string;
+  size: number;
+  mtimeMs: number;
+};
+
 const supportedExtensions = new Set<string>(supportedImportVisualMediaExtensions.map((extension) => `.${extension}`));
 
 export function isSupportedExternalMediaPath(filePath: string): boolean {
@@ -38,6 +47,7 @@ export async function createExternalLibraryItem(
   root: LibraryRoot,
   absolutePath: string,
   now = new Date().toISOString(),
+  knownStats?: Pick<ScannedExternalMediaFile, "size" | "mtimeMs">,
 ): Promise<LibraryItem> {
   const rootPath = path.resolve(root.absolutePath);
   const resolvedPath = path.resolve(absolutePath);
@@ -55,7 +65,7 @@ export async function createExternalLibraryItem(
   const extension = path.extname(resolvedPath).toLowerCase();
   const id = randomUUID();
   const draft = await readPngMetadataDraft(resolvedPath);
-  const fileStats = await fs.stat(resolvedPath);
+  const fileStats = knownStats ?? await fs.stat(resolvedPath);
   const imageFileName = `${id}${extension}`;
 
   return {
@@ -110,7 +120,7 @@ export async function scanExternalLibraryRoot(
     throw new AppError("LIBRARY_ROOT_UNAVAILABLE", "素材目录不可访问，请检查磁盘或目录权限。");
   }
 
-  const mediaPaths = await collectMediaPaths(rootPath, root.recursive);
+  const mediaFiles = await collectMediaFiles(rootPath, root.recursive);
   const library = await readLibraryFile({ refreshExternalHealth: true });
   const knownPaths = new Set(
     library.items
@@ -120,21 +130,24 @@ export async function scanExternalLibraryRoot(
       }),
   );
   const now = new Date().toISOString();
-  const items: LibraryItem[] = [];
+  const candidates: ScannedExternalMediaFile[] = [];
   let skippedCount = 0;
 
-  for (let index = 0; index < mediaPaths.length; index += 1) {
-    const absolutePath = mediaPaths[index];
-    const relativePath = path.relative(rootPath, absolutePath);
-    onProgress?.({ current: index + 1, total: mediaPaths.length, currentFile: relativePath });
+  for (let index = 0; index < mediaFiles.length; index += 1) {
+    const mediaFile = mediaFiles[index];
+    onProgress?.({ current: index + 1, total: mediaFiles.length, currentFile: mediaFile.relativePath });
 
-    if (!relativePath || knownPaths.has(relativePath)) {
+    if (!mediaFile.relativePath || knownPaths.has(mediaFile.relativePath)) {
       skippedCount += 1;
       continue;
     }
 
-    items.push(await createExternalLibraryItem(root, absolutePath, now));
+    candidates.push(mediaFile);
   }
+
+  const items = await mapWithConcurrency(candidates, 4, (mediaFile) =>
+    createExternalLibraryItem(root, mediaFile.absolutePath, now, mediaFile),
+  );
 
   let importedItems: LibraryItem[] = [];
   const nextLibrary = items.length > 0
@@ -161,7 +174,7 @@ export async function scanExternalLibraryRoot(
     rootId: root.id,
     importedCount: importedItems.length,
     skippedCount,
-    total: mediaPaths.length,
+    total: mediaFiles.length,
   });
 
   return { library: nextLibrary, root: updatedRoot, importedCount: importedItems.length, skippedCount };
@@ -169,28 +182,73 @@ export async function scanExternalLibraryRoot(
 
 export async function collectMediaPaths(rootPath: string, recursive: boolean): Promise<string[]> {
   const paths: string[] = [];
+  const directoryConcurrency = recursive ? 8 : 1;
+  let directories = [rootPath];
 
-  async function visit(directory: string): Promise<void> {
-    const entries = await fs.readdir(directory, { withFileTypes: true });
+  while (directories.length > 0) {
+    const currentDirectories = directories;
+    directories = [];
+    const batches = await mapWithConcurrency(currentDirectories, directoryConcurrency, async (directory) => {
+      const entries = await fs.readdir(directory, { withFileTypes: true });
+      const childDirectories: string[] = [];
+      const mediaPaths: string[] = [];
 
-    for (const entry of entries) {
-      const entryPath = path.join(directory, entry.name);
+      for (const entry of entries) {
+        const entryPath = path.join(directory, entry.name);
 
-      if (entry.isDirectory()) {
-        if (recursive) {
-          await visit(entryPath);
+        if (entry.isDirectory()) {
+          if (recursive) {
+            childDirectories.push(entryPath);
+          }
+          continue;
         }
-        continue;
+
+        if (entry.isFile() && isSupportedExternalMediaPath(entry.name)) {
+          mediaPaths.push(entryPath);
+        }
       }
 
-      if (entry.isFile() && isSupportedExternalMediaPath(entry.name)) {
-        paths.push(entryPath);
-      }
+      return { childDirectories, mediaPaths };
+    });
+
+    for (const batch of batches) {
+      paths.push(...batch.mediaPaths);
+      directories.push(...batch.childDirectories);
     }
   }
 
-  await visit(rootPath);
   return paths.sort((left, right) => left.localeCompare(right));
+}
+
+export async function collectMediaFiles(rootPath: string, recursive: boolean): Promise<ScannedExternalMediaFile[]> {
+  // Rust 实现启用时优先走 Sidecar（流式分页，避免单条 NDJSON 超 4MB 上限）；
+  // 不可用则回退 Node。
+  const rustResult = await scanMediaFilesViaRustStream(rootPath, recursive, supportedImportVisualMediaExtensions);
+  if (rustResult) {
+    return rustResult.files.map((file) => ({
+      absolutePath: file.absolutePath,
+      relativePath: file.relativePath,
+      size: file.size,
+      mtimeMs: file.mtimeMs,
+    }));
+  }
+
+  const mediaPaths = await collectMediaPaths(rootPath, recursive);
+  const scanned = await mapWithConcurrency(mediaPaths, 8, async (absolutePath) => {
+    const stats = await fs.stat(absolutePath).catch(() => null);
+    if (!stats?.isFile()) {
+      return null;
+    }
+
+    return {
+      absolutePath,
+      relativePath: path.relative(path.resolve(rootPath), absolutePath),
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+    } satisfies ScannedExternalMediaFile;
+  });
+
+  return scanned.filter((entry): entry is ScannedExternalMediaFile => entry !== null);
 }
 
 async function readPngMetadataDraft(filePath: string): Promise<PromptImportDraft> {

@@ -9,9 +9,12 @@ import type {
   PromptImageLexiconEntry,
   PromptLexiconEntry,
   PromptLexiconSettings,
-  PromptParameterLexiconEntry,
   ThemeMode,
+  CategoryWorkspaceState,
 } from "../../../src/features/library/types/library";
+import type { CategoryTaxonomy } from "../../../src/features/library/types/category";
+import { createEmptyCategoryTaxonomy } from "../../../src/features/library/utils/categoryTaxonomy";
+import { defaultCanvasDraftSettings, normalizeCanvasDraftSettings } from "../../../src/features/library/utils/canvasGeneration";
 import type { BuiltinModuleStatePatch } from "../../../src/features/library/utils/moduleRegistry";
 import {
   isBuiltinModuleState,
@@ -23,7 +26,12 @@ import {
   normalizeNsfwGradingSpeed,
 } from "../../../src/features/library/utils/nsfwGradingSpeed";
 import { AppError } from "../ipc/errors";
-import { getLibraryDataDir, getLibraryViewSettingsPath } from "./libraryPaths";
+import {
+  getCategoryLexiconPath,
+  getLibraryDataDir,
+  getLibraryViewSettingsPath,
+  getTagLexiconPath,
+} from "./libraryPaths";
 
 const defaultMasonryColumnCount = 4;
 const minMasonryColumnCount = 2;
@@ -32,19 +40,40 @@ const maxMasonryColumnCount = 10;
 export async function readLibraryViewSettings(): Promise<LibraryViewSettings> {
   await fs.mkdir(getLibraryDataDir(), { recursive: true });
 
-  let content: string;
+  const [content, categoryLexicon, tagLexicon] = await Promise.all([
+    readJsonFile(getLibraryViewSettingsPath()),
+    readJsonFile(getCategoryLexiconPath()),
+    readJsonFile(getTagLexiconPath()),
+  ]);
 
-  try {
-    content = await fs.readFile(getLibraryViewSettingsPath(), "utf8");
-  } catch {
-    return createDefaultViewSettings();
+  const settings = normalizeLibraryViewSettings(content);
+  const legacyLexicons = readLegacyLexiconsFromSettings(content);
+
+  // One-time migration: older versions stored both lexicons inside view-settings.json.
+  // Split them into standalone files and persist the cleaned settings so the next
+  // read does not pay the migration path again.
+  if (legacyLexicons) {
+    const migrated = normalizeLibraryViewSettings({
+      ...settings,
+      promptLexicons: legacyLexicons,
+    });
+    await Promise.all([
+      writeLexiconFile(getCategoryLexiconPath(), migrated.promptLexicons?.categories ?? []),
+      writeLexiconFile(getTagLexiconPath(), migrated.promptLexicons?.tags ?? []),
+    ]);
+    await writeLibraryViewSettingsCore(migrated);
+    return migrated;
   }
 
-  try {
-    return normalizeLibraryViewSettings(JSON.parse(content) as unknown);
-  } catch {
-    return createDefaultViewSettings();
-  }
+  // Standalone files win when present; they are the source of truth for the current
+  // version. Missing files fall back to the legacy field (already migrated above).
+  const categories = categoryLexicon === null ? [] : (categoryLexicon as unknown[]).map(normalizeImageLexiconEntry).filter(isPromptImageLexiconEntry);
+  const tags = tagLexicon === null ? [] : (tagLexicon as unknown[]).map(normalizeImageLexiconEntry).filter(isPromptImageLexiconEntry);
+
+  return normalizeLibraryViewSettings({
+    ...settings,
+    promptLexicons: { categories, tags },
+  });
 }
 
 export async function writeLibraryViewSettings(
@@ -57,22 +86,70 @@ export async function writeLibraryViewSettings(
   }
 
   const normalized = normalizeLibraryViewSettings(settings);
-  const tempPath = `${getLibraryViewSettingsPath()}.tmp`;
+  const { categories, tags } = normalized.promptLexicons ?? { categories: [], tags: [] };
 
-  await fs.writeFile(tempPath, JSON.stringify(normalized, null, 2), "utf8");
-  await fs.rename(tempPath, getLibraryViewSettingsPath());
+  await Promise.all([
+    writeLexiconFile(getCategoryLexiconPath(), categories),
+    writeLexiconFile(getTagLexiconPath(), tags),
+  ]);
+  await writeLibraryViewSettingsCore(normalized);
 
   return normalized;
 }
 
-function normalizeLibraryViewSettings(input: unknown): LibraryViewSettings {
+async function writeLibraryViewSettingsCore(settings: LibraryViewSettings): Promise<void> {
+  const { promptLexicons: _promptLexicons, ...mainSettings } = settings;
+  const tempPath = `${getLibraryViewSettingsPath()}.tmp`;
+  await fs.writeFile(tempPath, JSON.stringify(mainSettings, null, 2), "utf8");
+  await fs.rename(tempPath, getLibraryViewSettingsPath());
+}
+
+async function writeLexiconFile(filePath: string, entries: readonly PromptImageLexiconEntry[]): Promise<void> {
+  const tempPath = `${filePath}.tmp`;
+  await fs.writeFile(tempPath, JSON.stringify(entries, null, 2), "utf8");
+  await fs.rename(tempPath, filePath);
+}
+
+async function readJsonFile(filePath: string): Promise<unknown> {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function readLegacyLexiconsFromSettings(input: unknown): PromptLexiconSettings | null {
+  if (!isRecord(input) || input.promptLexicons === null || input.promptLexicons === undefined) {
+    return null;
+  }
+
+  const legacy = input.promptLexicons;
+  if (!isRecord(legacy)) {
+    return null;
+  }
+
+  const categories = Array.isArray(legacy.categories) ? legacy.categories : [];
+  const tags = Array.isArray(legacy.tags) ? legacy.tags : [];
+  if (categories.length === 0 && tags.length === 0) {
+    return null;
+  }
+
+  return {
+    categories: categories.map(normalizeImageLexiconEntry).filter(isPromptImageLexiconEntry),
+    tags: tags.map(normalizeImageLexiconEntry).filter(isPromptImageLexiconEntry),
+  };
+}
+
+export function normalizeLibraryViewSettings(input: unknown): LibraryViewSettings {
   if (!isRecord(input)) {
     return createDefaultViewSettings();
   }
 
   return {
+    canvasDraft: normalizeCanvasDraftSettings(input.canvasDraft),
     tagOrder: Array.isArray(input.tagOrder) ? uniqueStrings(input.tagOrder) : [],
     likedImageIds: Array.isArray(input.likedImageIds) ? uniqueStrings(input.likedImageIds) : [],
+    starredRecommendations: Array.isArray(input.starredRecommendations) ? uniqueStrings(input.starredRecommendations) : [],
     generationModelOrder: Array.isArray(input.generationModelOrder) ? uniqueStrings(input.generationModelOrder) : [],
     hiddenGenerationModels: Array.isArray(input.hiddenGenerationModels) ? uniqueStrings(input.hiddenGenerationModels) : [],
     themeMode: normalizeThemeMode(input.themeMode),
@@ -85,22 +162,28 @@ function normalizeLibraryViewSettings(input: unknown): LibraryViewSettings {
     materialBrowserSortMode: normalizeMaterialBrowserSortMode(input.materialBrowserSortMode),
     materialBrowserSortDirection: normalizeMaterialBrowserSortDirection(input.materialBrowserSortDirection),
     materialBrowserRandomSeed: normalizeMaterialBrowserRandomSeed(input.materialBrowserRandomSeed),
+    materialBrowserScrollTop: normalizeMaterialBrowserScrollTop(input.materialBrowserScrollTop),
     networkMaterialImportMode: normalizeNetworkMaterialImportMode(input.networkMaterialImportMode),
     promptLexicons:
       input.promptLexicons === null || input.promptLexicons === undefined
         ? null
         : normalizePromptLexiconSettings(input.promptLexicons),
     moduleState: normalizeBuiltinModuleState(input.moduleState),
+    categoryWorkspace: normalizeCategoryWorkspace(input.categoryWorkspace),
   };
 }
 
 function isLibraryViewSettings(input: unknown): input is LibraryViewSettings {
   return (
     isRecord(input) &&
+    isRecord(input.canvasDraft) &&
     Array.isArray(input.tagOrder) &&
     input.tagOrder.every((tag) => typeof tag === "string") &&
     Array.isArray(input.likedImageIds) &&
     input.likedImageIds.every((itemId) => typeof itemId === "string") &&
+    (input.starredRecommendations === undefined ||
+      (Array.isArray(input.starredRecommendations) &&
+        input.starredRecommendations.every((url) => typeof url === "string"))) &&
     Array.isArray(input.generationModelOrder) &&
     input.generationModelOrder.every((model) => typeof model === "string") &&
     Array.isArray(input.hiddenGenerationModels) &&
@@ -116,16 +199,22 @@ function isLibraryViewSettings(input: unknown): input is LibraryViewSettings {
     isMaterialBrowserSortDirection(input.materialBrowserSortDirection) &&
     typeof input.materialBrowserRandomSeed === "number" &&
     Number.isFinite(input.materialBrowserRandomSeed) &&
+    typeof input.materialBrowserScrollTop === "number" &&
+    Number.isFinite(input.materialBrowserScrollTop) &&
     isNetworkMaterialImportMode(input.networkMaterialImportMode) &&
-    (input.promptLexicons === null || isPromptLexiconSettings(input.promptLexicons)) &&
+    (input.promptLexicons === null ||
+      input.promptLexicons === undefined ||
+      isPromptLexiconSettings(input.promptLexicons)) &&
     isBuiltinModuleState(input.moduleState)
   );
 }
 
 function createDefaultViewSettings(): LibraryViewSettings {
   return {
+    canvasDraft: { ...defaultCanvasDraftSettings },
     tagOrder: [],
     likedImageIds: [],
+    starredRecommendations: [],
     generationModelOrder: [],
     hiddenGenerationModels: [],
     themeMode: "light",
@@ -138,10 +227,56 @@ function createDefaultViewSettings(): LibraryViewSettings {
     materialBrowserSortMode: "importedAt",
     materialBrowserSortDirection: "desc",
     materialBrowserRandomSeed: 0,
+    materialBrowserScrollTop: 0,
     networkMaterialImportMode: "download",
     promptLexicons: null,
     moduleState: resolveBuiltinModuleState(),
+    categoryWorkspace: {
+      taxonomy: createEmptyCategoryTaxonomy(),
+      inbox: [],
+      candidates: [],
+      learningEvents: [],
+    },
   };
+}
+
+function normalizeCategoryWorkspace(input: unknown): CategoryWorkspaceState {
+  if (!isRecord(input)) {
+    return {
+      taxonomy: createEmptyCategoryTaxonomy(),
+      inbox: [],
+      candidates: [],
+      learningEvents: [],
+    };
+  }
+
+  return {
+    taxonomy: isCategoryTaxonomy(input.taxonomy) ? input.taxonomy : createEmptyCategoryTaxonomy(),
+    inbox: Array.isArray(input.inbox) ? input.inbox.filter(isCategoryInboxItem) : [],
+    candidates: Array.isArray(input.candidates) ? input.candidates.filter(isCategoryCandidate) : [],
+    learningEvents: Array.isArray(input.learningEvents) ? input.learningEvents.filter(isCategoryLearningEvent) : [],
+  };
+}
+
+function isCategoryTaxonomy(input: unknown): input is CategoryTaxonomy {
+  return (
+    isRecord(input) &&
+    input.schemaVersion === 1 &&
+    typeof input.updatedAt === "string" &&
+    Array.isArray(input.nodes)
+  );
+}
+
+function isCategoryInboxItem(input: unknown): boolean {
+  return isRecord(input) && typeof input.itemId === "string" && typeof input.reason === "string";
+}
+
+function isCategoryCandidate(input: unknown): boolean {
+  return isRecord(input) && typeof input.id === "string" && typeof input.proposedName === "string";
+}
+
+function isCategoryLearningEvent(input: unknown): boolean {
+  return isRecord(input) && typeof input.id === "string" && typeof input.itemId === "string";
 }
 
 function normalizeBuiltinModuleState(input: unknown): LibraryViewSettings["moduleState"] {
@@ -151,46 +286,18 @@ function normalizeBuiltinModuleState(input: unknown): LibraryViewSettings["modul
 function normalizePromptLexiconSettings(input: unknown): PromptLexiconSettings {
   if (!isRecord(input)) {
     return {
-      parameters: [],
       categories: [],
       tags: [],
     };
   }
 
   return {
-    parameters: Array.isArray(input.parameters)
-      ? input.parameters.map(normalizeParameterLexiconEntry).filter(isPromptParameterLexiconEntry)
-      : [],
     categories: Array.isArray(input.categories)
       ? input.categories.map(normalizeImageLexiconEntry).filter(isPromptImageLexiconEntry)
       : [],
     tags: Array.isArray(input.tags)
       ? input.tags.map(normalizeImageLexiconEntry).filter(isPromptImageLexiconEntry)
       : [],
-  };
-}
-
-function normalizeParameterLexiconEntry(input: unknown): PromptParameterLexiconEntry | null {
-  if (!isRecord(input)) {
-    return null;
-  }
-
-  const id = normalizeRequiredString(input.id);
-  const label = normalizeRequiredString(input.label);
-  const variable = normalizeRequiredString(input.variable);
-
-  if (!id || !label || !variable) {
-    return null;
-  }
-
-  return {
-    id,
-    group: normalizeOptionalString(input.group),
-    label,
-    sourcePromptId: normalizeOptionalString(input.sourcePromptId) || null,
-    sourcePromptTitle: normalizeOptionalString(input.sourcePromptTitle) || null,
-    variable,
-    value: normalizeOptionalString(input.value),
   };
 }
 
@@ -222,25 +329,10 @@ function normalizeImageLexiconEntry(input: unknown): PromptImageLexiconEntry | n
 function isPromptLexiconSettings(input: unknown): input is PromptLexiconSettings {
   return (
     isRecord(input) &&
-    Array.isArray(input.parameters) &&
-    input.parameters.every(isPromptParameterLexiconEntry) &&
     Array.isArray(input.categories) &&
     input.categories.every(isPromptImageLexiconEntry) &&
     Array.isArray(input.tags) &&
     input.tags.every(isPromptImageLexiconEntry)
-  );
-}
-
-function isPromptParameterLexiconEntry(input: unknown): input is PromptParameterLexiconEntry {
-  return (
-    isRecord(input) &&
-    typeof input.id === "string" &&
-    typeof input.group === "string" &&
-    typeof input.label === "string" &&
-    (input.sourcePromptId === null || typeof input.sourcePromptId === "string" || input.sourcePromptId === undefined) &&
-    (input.sourcePromptTitle === null || typeof input.sourcePromptTitle === "string" || input.sourcePromptTitle === undefined) &&
-    typeof input.variable === "string" &&
-    typeof input.value === "string"
   );
 }
 
@@ -277,6 +369,14 @@ function normalizeMaterialBrowserSortDirection(input: unknown): MaterialBrowserS
 }
 
 function normalizeMaterialBrowserRandomSeed(input: unknown): number {
+  if (typeof input !== "number" || !Number.isFinite(input)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.trunc(input));
+}
+
+function normalizeMaterialBrowserScrollTop(input: unknown): number {
   if (typeof input !== "number" || !Number.isFinite(input)) {
     return 0;
   }

@@ -6,8 +6,10 @@ import type { LibraryItem } from "../../../src/features/library/types/library";
 import { isVideoMediaFile } from "../../../src/features/library/utils/mediaFileTypes";
 import { getImagePath } from "../library/libraryPaths";
 import { readLibraryFile, writeLibraryFile } from "../library/libraryStore";
+import { AppError } from "../ipc/errors";
 import { getFfmpegPath } from "../runtime/videoRuntime";
 import { resolveVideoEncoderPlans } from "../runtime/ffmpegEncoders";
+import { compressVideoViaRust } from "../runtime/rustFileOps";
 import {
   isCompressCanceled,
   resetCompressCancellation,
@@ -37,6 +39,11 @@ export async function compressVideos(
   onProgress?: (progress: CompressProgress) => void,
 ): Promise<CompressResult> {
   resetCompressCancellation();
+
+  // 解绑后 ffmpeg 按需安装：批量入口先 fail-fast，避免逐条静默失败。
+  if (!getFfmpegPath()) {
+    throw new AppError("FFMPEG_BINARY_NOT_FOUND", "ffmpeg 可执行文件不可用，请先安装视频运行时。");
+  }
 
   const library = await readLibraryFile();
   const targetItems = selectVideoTargetItems(library.items, options.itemIds);
@@ -147,10 +154,7 @@ async function compressSingleVideo(
 
     for (let index = 0; index < plans.length; index += 1) {
       const args = buildFfmpegArgs(sourcePath, tempPath, options, plans[index].videoArgs);
-      const runResult = await runFfmpegCompression(args, duration, reportProgress).then(
-        () => true,
-        () => false,
-      );
+      const runResult = await runFfmpegWithFallback(args, duration, reportProgress);
 
       if (runResult) {
         produced = true;
@@ -230,6 +234,50 @@ async function probeVideoDuration(inputPath: string): Promise<number> {
   const seconds = parseFloat(match[3]);
 
   return hours * 3600 + minutes * 60 + seconds;
+}
+
+/**
+ * 优先走 Rust Sidecar 执行 ffmpeg（后台线程 + 进度事件 + 取消），
+ * 未启用或不可用时回退 Node `runFfmpeg`。
+ * 返回 true 表示成功产出压缩文件。
+ */
+async function runFfmpegWithFallback(
+  args: string[],
+  duration: number,
+  reportProgress: (fraction: number) => void,
+): Promise<boolean> {
+  const ffmpegPath = getFfmpegPath();
+  if (!ffmpegPath) {
+    // 入口已 fail-fast；此处兜底防止单测/内部直调时静默失败。
+    throw new AppError("FFMPEG_BINARY_NOT_FOUND", "ffmpeg 可执行文件不可用，请先安装视频运行时。");
+  }
+
+  let lastFraction = 0;
+  const reportIfNew = (fraction: number) => {
+    if (fraction > lastFraction) {
+      lastFraction = fraction;
+      reportProgress(fraction);
+    }
+  };
+
+  const rustResult = await compressVideoViaRust({
+    ffmpegPath,
+    args,
+    timeoutMs: ffmpegTimeoutMs,
+    duration,
+    onProgress: duration > 0 ? reportIfNew : undefined,
+  });
+
+  if (rustResult) {
+    if (rustResult.code !== 0) {
+      throw new Error(`视频压缩失败，ffmpeg 退出码 ${rustResult.code}`);
+    }
+    return true;
+  }
+
+  // 回退 Node 实现。
+  await runFfmpegCompression(args, duration, reportProgress);
+  return true;
 }
 
 async function runFfmpegCompression(

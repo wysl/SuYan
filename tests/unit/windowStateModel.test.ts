@@ -15,8 +15,8 @@ describe("windowStateModel", () => {
         isMaximized: true,
       }),
     ).toEqual({
-      width: 1040,
-      height: 680,
+      width: 900,
+      height: 560,
       x: 120,
       y: 81,
       isMaximized: true,

@@ -4,6 +4,7 @@ import { aiSettingsGeneralActions } from "../../src/features/library/utils/aiSet
 import {
   defaultAiProviderSettings,
   mergeAiProviderSettingsPayload,
+  normalizeAiSettingsActionOrder,
   normalizeAiProviderSettings,
   resolveAiActionCustomInstructions,
   toPersistedAiSettingsFile,
@@ -21,7 +22,8 @@ describe("aiSettingsModel", () => {
     for (const action of aiFeatureActions) {
       expect(aiFeatureActionMeta[action].defaultRulePreset.label).toBeTruthy();
       expect(aiFeatureActionMeta[action].defaultRulePreset.instructions.length).toBeGreaterThan(20);
-      if (action === "prompt") {
+      // image-generation 为模型选择型动作，rulePresets 仅作辅助说明，不强制结构化预设
+      if (action === "image-generation") {
         expect(aiFeatureActionMeta[action].rulePresets.length).toBe(1);
       } else {
         expect(aiFeatureActionMeta[action].rulePresets.length).toBeGreaterThanOrEqual(3);
@@ -33,8 +35,42 @@ describe("aiSettingsModel", () => {
     }
   });
 
+  it("persists a user-defined AI settings entry order without duplicates", () => {
+    const order = normalizeAiSettingsActionOrder([
+      "image-generation",
+      "prompt-optimization",
+      "image-generation",
+      "prompt-optimization",
+    ]);
+    expect(order).toEqual(["image-generation", "prompt-optimization"]);
+
+    const profile = defaultAiProviderSettings.profiles[0];
+    const settings = mergeAiProviderSettingsPayload(defaultAiProviderSettings, {
+      activeProfileId: profile.id,
+      actionOrder: order,
+      profiles: [
+        {
+          id: profile.id,
+          name: profile.name,
+          enabled: profile.enabled,
+          baseUrl: profile.baseUrl,
+          model: profile.model,
+          models: profile.models,
+        },
+      ],
+    });
+
+    expect(settings.actionOrder).toEqual(order);
+    expect(toPublicAiProviderSettings(settings).actionOrder).toEqual(order);
+    expect(toPersistedAiSettingsFile(settings, () => "").actionOrder).toEqual(order);
+  });
+
   it("keeps every preset rule in the structured rule format", () => {
     for (const action of aiFeatureActions) {
+      // image-generation 是模型选择动作，其 rulePresets 仅为辅助说明，不走结构化格式
+      if (action === "image-generation") {
+        continue;
+      }
       for (const preset of aiFeatureActionMeta[action].rulePresets) {
         expect(preset.instructions).toContain("=====");
         expect(preset.instructions).toContain("【核心宗旨】");
@@ -44,72 +80,17 @@ describe("aiSettingsModel", () => {
     }
   });
 
-  it("uses the structured analysis rule as the default prompt analysis preset", () => {
-    const promptMeta = aiFeatureActionMeta.prompt;
-
-    expect(promptMeta.defaultRulePreset.id).toBe("prompt-structured-analysis");
-    expect(promptMeta.defaultRulePreset.label).toBe("结构化提示词分析");
-    expect(promptMeta.rulePresets.map((preset) => preset.label)).toEqual(["结构化提示词分析"]);
-    expect(promptMeta.defaultRulePreset.instructions.length).toBeLessThan(4200);
-    expect(promptMeta.defaultRulePreset.instructions).toContain("多维度结构化分析方法");
-    expect(promptMeta.defaultRulePreset.instructions).toContain("普通分析最多 10 个胶囊");
-    expect(promptMeta.defaultRulePreset.instructions).toContain("只返回系统要求的 JSON");
-    expect(promptMeta.defaultRulePreset.instructions).toContain("不得臆造原文没有的主体");
-    expect(promptMeta.defaultRulePreset.instructions).toContain("Role-Background-Attention");
-  });
-
-  it("exposes prompt optimization and prompt parameter analysis as separate visible settings actions", () => {
-    expect(aiSettingsGeneralActions).toContain("prompt");
+  it("exposes prompt optimization as a visible settings action", () => {
     expect(aiSettingsGeneralActions).toContain("prompt-optimization");
     expect(aiFeatureActionMeta["prompt-optimization"].label).toBe("提示词优化");
     expect(aiFeatureActionMeta["prompt-optimization"].description).toContain("优化结构");
-    expect(aiFeatureActionMeta.prompt.label).toBe("提示词参数分析");
-    expect(aiFeatureActionMeta.prompt.description).toContain("拆解胶囊");
   });
 
   it("applies the default rule when an action has no explicit rule selection", () => {
-    const instructions = resolveAiActionCustomInstructions(defaultAiProviderSettings, "prompt");
+    const instructions = resolveAiActionCustomInstructions(defaultAiProviderSettings, "prompt-optimization");
 
-    expect(instructions).toContain("【结构化提示词分析】");
-    expect(instructions).toContain("结构化提示词分析规则");
-    expect(instructions.length).toBeLessThan(4200);
-  });
-
-  it("migrates saved legacy prompt analysis defaults to the reliable compact preset", () => {
-    const settings = normalizeAiProviderSettings({
-      activeProfileId: "main",
-      actionPreferences: {
-        prompt: {
-          rules: [
-            {
-              id: "prompt-parameterization-system",
-              label: "提示词分析-参数化系统",
-              instructions: "旧版长规则。复杂叙事型 Prompt 胶囊边界。foodPhysicalForm: foodPhysicalForm:",
-            },
-          ],
-          rulePresetIds: ["prompt-parameterization-system"],
-        },
-      },
-      profiles: [
-        {
-          id: "main",
-          name: "主接口",
-          enabled: true,
-          baseUrl: "https://api.example.com/v1",
-          apiKey: "sk-main",
-          model: "text-model",
-          models: [model("text-model", ["text"])],
-        },
-      ],
-    });
-    const promptPreference = settings.actionPreferences.prompt;
-    const rules = promptPreference?.rules ?? [];
-
-    expect(promptPreference?.rulePresetIds).toEqual(["prompt-structured-analysis"]);
-    expect(rules[0]?.id).toBe("prompt-structured-analysis");
-    expect(rules[0]?.label).toBe("结构化提示词分析");
-    expect(rules[0]?.instructions.length).toBeLessThan(3600);
-    expect(rules[0]?.instructions).not.toContain("foodPhysicalForm: foodPhysicalForm:");
+    expect(instructions).toContain("【提示词优化-通用】");
+    expect(instructions).toContain("提示词优化-通用规则");
   });
 
   it("includes the portrait pixel reverse rule for image reverse", () => {
@@ -286,6 +267,7 @@ describe("aiSettingsModel", () => {
       toPublicAiProviderSettings({
         activeProfileId: "main",
         actionPreferences: {},
+        recognitionSourcePreferences: {},
         profiles: [
           {
             id: "main",
@@ -301,6 +283,7 @@ describe("aiSettingsModel", () => {
     ).toEqual({
       activeProfileId: "main",
       actionPreferences: {},
+      recognitionSourcePreferences: {},
       profiles: [
         {
           id: "main",
@@ -327,6 +310,7 @@ describe("aiSettingsModel", () => {
         {
           activeProfileId: "main",
           actionPreferences: {},
+          recognitionSourcePreferences: {},
           profiles: [
             {
               id: "main",
@@ -342,6 +326,7 @@ describe("aiSettingsModel", () => {
         {
           activeProfileId: "main",
           actionPreferences: {},
+          recognitionSourcePreferences: {},
           profiles: [
             {
               id: "main",
@@ -357,6 +342,7 @@ describe("aiSettingsModel", () => {
     ).toEqual({
       activeProfileId: "main",
       actionPreferences: {},
+      recognitionSourcePreferences: {},
       profiles: [
         {
           id: "main",
@@ -412,6 +398,7 @@ describe("aiSettingsModel", () => {
         {
           activeProfileId: "main",
           actionPreferences: {},
+          recognitionSourcePreferences: {},
           profiles: [
             {
               id: "main",
@@ -430,6 +417,7 @@ describe("aiSettingsModel", () => {
       schemaVersion: 3,
       activeProfileId: "main",
       actionPreferences: {},
+      recognitionSourcePreferences: {},
       profiles: [
         {
           id: "main",
@@ -450,6 +438,7 @@ describe("aiSettingsModel", () => {
         {
           activeProfileId: "main",
           actionPreferences: {},
+          recognitionSourcePreferences: {},
           profiles: [
             {
               id: "main",
@@ -472,6 +461,7 @@ describe("aiSettingsModel", () => {
       {
         activeProfileId: "main",
         actionPreferences: {},
+        recognitionSourcePreferences: {},
         profiles: [
           {
             id: "main",
@@ -520,11 +510,61 @@ describe("aiSettingsModel", () => {
     });
   });
 
+  it("persists quick recognition source preferences", () => {
+    const settings = mergeAiProviderSettingsPayload(
+      {
+        activeProfileId: "main",
+        actionPreferences: {},
+        recognitionSourcePreferences: {},
+        profiles: [
+          {
+            id: "main",
+            name: "主接口",
+            enabled: true,
+            baseUrl: "https://api.example.com/v1",
+            apiKey: "sk-main",
+            model: "vision-model",
+            models: [model("vision-model", ["vision"])],
+          },
+        ],
+      },
+      {
+        activeProfileId: "main",
+        recognitionSourcePreferences: {
+          category: "image",
+          tags: "prompt",
+        },
+        profiles: [
+          {
+            id: "main",
+            name: "主接口",
+            enabled: true,
+            baseUrl: "https://api.example.com/v1",
+            model: "vision-model",
+            models: [model("vision-model", ["vision"])],
+          },
+        ],
+      },
+    );
+
+    expect(toPublicAiProviderSettings(settings).recognitionSourcePreferences).toEqual({
+      category: "image",
+      tags: "prompt",
+    });
+    expect(
+      toPersistedAiSettingsFile(settings, (apiKey) => `encrypted:${apiKey.length}`).recognitionSourcePreferences,
+    ).toEqual({
+      category: "image",
+      tags: "prompt",
+    });
+  });
+
   it("persists selected rule presets and combines them with custom instructions", () => {
     const settings = mergeAiProviderSettingsPayload(
       {
         activeProfileId: "main",
         actionPreferences: {},
+        recognitionSourcePreferences: {},
         profiles: [
           {
             id: "main",
@@ -575,6 +615,7 @@ describe("aiSettingsModel", () => {
       {
         activeProfileId: "main",
         actionPreferences: {},
+        recognitionSourcePreferences: {},
         profiles: [
           {
             id: "main",
@@ -621,6 +662,7 @@ describe("aiSettingsModel", () => {
       {
         activeProfileId: "main",
         actionPreferences: {},
+        recognitionSourcePreferences: {},
         profiles: [
           {
             id: "main",
@@ -683,6 +725,7 @@ describe("aiSettingsModel", () => {
     ).toEqual({
       activeProfileId: "default",
       actionPreferences: {},
+      recognitionSourcePreferences: {},
       profiles: [
         {
           id: "default",

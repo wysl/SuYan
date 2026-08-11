@@ -7,29 +7,37 @@ import type { LibraryRoot } from "../../../src/features/library/types/library";
 import { validateExternalRemap } from "../../../src/features/library/utils/externalMediaPath";
 import { AppError } from "../ipc/errors";
 import { getLibraryDataDir, getLibraryRootsPath } from "./libraryPaths";
+import { orderLibraryRoots } from "./libraryRootOrder";
 
 type LibraryRootsFile = {
   schemaVersion: 1;
   roots: LibraryRoot[];
 };
 
-export async function readLibraryRoots(): Promise<LibraryRoot[]> {
-  try {
-    const content = await fs.readFile(getLibraryRootsPath(), "utf8");
-    const parsed = JSON.parse(content) as unknown;
+type ReadLibraryRootsOptions = {
+  refreshStatus?: boolean;
+};
 
-    if (!isRootsFile(parsed)) {
-      return [];
-    }
+let cachedRootsPath: string | null = null;
+let cachedRootsMtimeMs: number | null = null;
+let cachedNormalizedRoots: LibraryRoot[] | null = null;
+let cachedRootsById: Map<string, LibraryRoot> | null = null;
 
-    return Promise.all(parsed.roots.map(async (root) => withRootStatus(normalizeRoot(root))));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
+export async function readLibraryRoots(options?: ReadLibraryRootsOptions): Promise<LibraryRoot[]> {
+  const normalizedRoots = await readNormalizedLibraryRoots();
 
-    throw new AppError("LIBRARY_ROOTS_INVALID", "素材目录配置无法读取。");
+  if (options?.refreshStatus === false) {
+    return normalizedRoots.map((root) => ({ ...root }));
   }
+
+  return Promise.all(normalizedRoots.map((root) => withRootStatus(root)));
+}
+
+/** Fast lookup for path resolution; root availability status is intentionally not refreshed here. */
+export async function findLibraryRootById(rootId: string): Promise<LibraryRoot | null> {
+  await readNormalizedLibraryRoots();
+  const root = cachedRootsById?.get(rootId);
+  return root ? { ...root } : null;
 }
 
 export async function writeLibraryRoots(roots: LibraryRoot[]): Promise<LibraryRoot[]> {
@@ -38,7 +46,16 @@ export async function writeLibraryRoots(roots: LibraryRoot[]): Promise<LibraryRo
   const tempPath = `${getLibraryRootsPath()}.tmp`;
   await fs.writeFile(tempPath, JSON.stringify({ schemaVersion: 1, roots: normalized } satisfies LibraryRootsFile), "utf8");
   await fs.rename(tempPath, getLibraryRootsPath());
+  invalidateRootsCache();
   return normalized;
+}
+
+export async function reorderLibraryRoots(rootIds: readonly string[]): Promise<LibraryRoot[]> {
+  const roots = await readLibraryRoots({ refreshStatus: false });
+  const orderedRoots = orderLibraryRoots(roots, rootIds);
+
+  await writeLibraryRoots(orderedRoots);
+  return readLibraryRoots();
 }
 
 export async function chooseAndAddLibraryRoot(ownerWindow?: BrowserWindow | null): Promise<{
@@ -142,6 +159,47 @@ export async function removeLibraryRoot(rootId: string): Promise<LibraryRoot[]> 
 
   await writeLibraryRoots(roots.filter((root) => root.id !== rootId));
   return readLibraryRoots();
+}
+
+async function readNormalizedLibraryRoots(): Promise<LibraryRoot[]> {
+  const rootsPath = getLibraryRootsPath();
+
+  try {
+    const stats = await fs.stat(rootsPath);
+
+    if (
+      cachedRootsPath === rootsPath &&
+      cachedRootsMtimeMs === stats.mtimeMs &&
+      cachedNormalizedRoots &&
+      cachedRootsById
+    ) {
+      return cachedNormalizedRoots;
+    }
+
+    const content = await fs.readFile(rootsPath, "utf8");
+    const parsed = JSON.parse(content) as unknown;
+    const normalizedRoots = isRootsFile(parsed) ? parsed.roots.map(normalizeRoot) : [];
+
+    cachedRootsPath = rootsPath;
+    cachedRootsMtimeMs = stats.mtimeMs;
+    cachedNormalizedRoots = normalizedRoots;
+    cachedRootsById = new Map(normalizedRoots.map((root) => [root.id, root]));
+    return normalizedRoots;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      invalidateRootsCache();
+      return [];
+    }
+
+    throw new AppError("LIBRARY_ROOTS_INVALID", "素材目录配置无法读取。");
+  }
+}
+
+function invalidateRootsCache(): void {
+  cachedRootsPath = null;
+  cachedRootsMtimeMs = null;
+  cachedNormalizedRoots = null;
+  cachedRootsById = null;
 }
 
 function isRootsFile(input: unknown): input is LibraryRootsFile {

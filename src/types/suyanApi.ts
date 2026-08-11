@@ -8,6 +8,9 @@ import type {
 } from "../features/library/types/library";
 import type {
   AiAnalyzePromptData,
+  AiGeneratedImage,
+  AiImageGenerationData,
+  AiImageGenerationPayload,
   AiAnalyzePromptPayload,
   AiListProviderModelsData,
   AiOptimizePromptData,
@@ -15,11 +18,17 @@ import type {
   AiReverseImagePromptData,
   AiReverseImagePromptPayload,
   AiSettingsTestData,
+  AiSummarizePromptTitleData,
+  AiSummarizePromptTitlePayload,
   AiTranslatePromptData,
   AiTranslatePromptPayload,
   PublicAiProviderSettings,
   SaveAiProviderSettingsPayload,
 } from "../features/library/types/ai";
+import type {
+  DoubaoWebCanvasBounds,
+  DoubaoWebCanvasStatus,
+} from "../features/library/types/canvas";
 import type { ProxyDetectionData, ProxySettings, ProxyTestData } from "../features/library/types/proxy";
 import type {
   AppAccelerationSettings,
@@ -36,12 +45,30 @@ export type ImportProgress = {
   currentFile: string;
 };
 
+export type CanvasReferenceImageData = {
+  dataUrl: string;
+  fileName: string;
+  height: number;
+  title: string;
+  width: number;
+};
+
+export type ImportPromptGroupSummary = {
+  groupKey: string;
+  title: string;
+  promptPreview: string;
+  imageCount: number;
+  hasPromptContent: boolean;
+};
+
 export type ImportImagesData = {
   library: LibraryFile;
   importedCount: number;
   importedPromptCount?: number;
   importedImageCount?: number;
   skippedDuplicateCount?: number;
+  /** Drag/buffer multi-image import: one entry per distinct prompt group. */
+  importGroups?: ImportPromptGroupSummary[];
   canceled?: boolean;
 };
 
@@ -98,6 +125,30 @@ export type ExternalLibrarySyncData = {
 export type ImportImageBufferInput = {
   name: string;
   data: ArrayBuffer;
+};
+
+export type ImportGeneratedImagesPayload = {
+  images: AiGeneratedImage[];
+  metadata: {
+    title: string;
+    prompt: string;
+    negativePrompt: string;
+    generationMethod: string;
+    /**
+     * 「传送到画布」且提示词未改动时，继承来源提示词组的身份字段，
+     * 使新图与原组的分组键一致、归入原组。省略即按新组处理。
+     */
+    tags?: string[];
+    category?: string | null;
+    categoryId?: string | null;
+    genreIds?: string[];
+    categoryConfidence?: number | null;
+    categorySource?: "system" | "user" | "ai" | null;
+  };
+};
+
+export type ImportGeneratedImagesData = ImportImagesData & {
+  importedItemIds: string[];
 };
 
 export type ImportWordDocumentData = {
@@ -194,6 +245,7 @@ export type ImageCompressOptions = {
   quality: number;
   format: "keep" | "webp";
   itemIds?: string[];
+  maxSide?: number;
 };
 
 export type VideoCompressOptions = {
@@ -223,6 +275,12 @@ export type ModuleInstallProgress = {
   phase: "downloading" | "extracting" | "verifying" | "done" | "failed";
   bytesDownloaded: number;
   totalBytes: number;
+  message: string;
+};
+
+/** FFmpeg 按需组件安装进度（下载/离线导入共用）。phase 与主进程 InstallPhase 对齐。 */
+export type FfmpegInstallProgress = {
+  phase: "verifying" | "downloading" | "extracting" | "self-check" | "done";
   message: string;
 };
 
@@ -289,6 +347,7 @@ export type SuyanApi = {
   notifyStartupScreenReady: () => void;
   logStartupEvent: (event: string, details?: Record<string, unknown>) => void;
   openExternalUrl: (url: string) => Promise<IpcResult<{ opened: true }>>;
+  openDataDirectory: () => Promise<IpcResult<{ opened: true; path: string }>>;
   checkForUpdates: () => Promise<IpcResult<AppUpdateCheckData>>;
   readAccelerationStatus: () => Promise<IpcResult<AppAccelerationStatus>>;
   saveAccelerationSettings: (settings: AppAccelerationSettings) => Promise<IpcResult<AppAccelerationStatus>>;
@@ -297,6 +356,7 @@ export type SuyanApi = {
   readLibraryViewSettings: () => Promise<IpcResult<LibraryViewSettings>>;
   saveLibraryViewSettings: (settings: LibraryViewSettings) => Promise<IpcResult<LibraryViewSettings>>;
   listLibraryRoots: () => Promise<IpcResult<LibraryRoot[]>>;
+  reorderLibraryRoots: (rootIds: string[]) => Promise<IpcResult<LibraryRoot[]>>;
   chooseAndScanLibraryRoot: () => Promise<IpcResult<ExternalLibraryScanData>>;
   chooseAndImportLibraryDirectory: () => Promise<IpcResult<ManagedDirectoryImportData>>;
   scanLibraryRoot: (rootId: string) => Promise<IpcResult<ExternalLibraryScanData>>;
@@ -313,6 +373,7 @@ export type SuyanApi = {
   resetStartupGallery: () => Promise<IpcResult<StartupGalleryImage[]>>;
   importImageFiles: () => Promise<IpcResult<ImportImagesData>>;
   importImageBuffers: (images: ImportImageBufferInput[]) => Promise<IpcResult<ImportImagesData>>;
+  importGeneratedImages: (payload: ImportGeneratedImagesPayload) => Promise<IpcResult<ImportGeneratedImagesData>>;
   importImageFilesForItem: (itemId: string) => Promise<IpcResult<ImportImageFilesForItemData>>;
   onImportProgress: (callback: (progress: ImportProgress) => void) => () => void;
   cancelImport: () => Promise<IpcResult<{ canceled: true }>>;
@@ -322,9 +383,19 @@ export type SuyanApi = {
   downloadRemoteMaterial: (itemId: string) => Promise<IpcResult<DownloadRemoteMaterialData>>;
   copyImage: (imageFileName: string) => Promise<IpcResult<{ copied: true }>>;
   exportImage: (imageFileName: string) => Promise<IpcResult<ExportImageData>>;
+  getImageFileSize: (imageFileName: string) => Promise<IpcResult<{ size: number }>>;
   resolveImageThumbnail: (imageFileName: string) => Promise<IpcResult<ResolvedImageSourceData>>;
   resolveImageThumbnails: (imageFileNames: string[]) => Promise<IpcResult<ResolvedImageSourcesData>>;
   writeClipboardText: (text: string) => Promise<IpcResult<{ copied: true }>>;
+  readClipboardText: () => Promise<IpcResult<{ text: string }>>;
+  readClipboardImage: () => Promise<IpcResult<{ dataUrl: string; width: number; height: number }>>;
+  saveCanvasReferenceImage: (
+    dataUrl: string,
+    sourceFileName?: string,
+    previousFileName?: string,
+  ) => Promise<IpcResult<CanvasReferenceImageData>>;
+  readCanvasReferenceImage: (fileName: string) => Promise<IpcResult<CanvasReferenceImageData>>;
+  removeCanvasReferenceImage: (fileName: string) => Promise<IpcResult<{ removed: boolean }>>;
   importPromptLexiconImage: () => Promise<IpcResult<ImportPromptLexiconImageData>>;
   exportPromptLexicon: (
     kind: PromptLexiconKind,
@@ -351,12 +422,23 @@ export type SuyanApi = {
   readAiSettings: () => Promise<IpcResult<PublicAiProviderSettings>>;
   saveAiSettings: (settings: SaveAiProviderSettingsPayload) => Promise<IpcResult<PublicAiProviderSettings>>;
   copyAiApiKey: (profileId: string) => Promise<IpcResult<{ copied: true }>>;
+  readAiApiKey: (profileId: string) => Promise<IpcResult<{ apiKey: string }>>;
   testAiSettings: (settings: SaveAiProviderSettingsPayload) => Promise<IpcResult<AiSettingsTestData>>;
   listAiModels: (settings: SaveAiProviderSettingsPayload) => Promise<IpcResult<AiListProviderModelsData>>;
   analyzePromptWithAi: (payload: AiAnalyzePromptPayload) => Promise<IpcResult<AiAnalyzePromptData>>;
   optimizePromptWithAi: (payload: AiOptimizePromptPayload) => Promise<IpcResult<AiOptimizePromptData>>;
+  summarizePromptTitleWithAi: (
+    payload: AiSummarizePromptTitlePayload,
+  ) => Promise<IpcResult<AiSummarizePromptTitleData>>;
   translatePromptWithAi: (payload: AiTranslatePromptPayload) => Promise<IpcResult<AiTranslatePromptData>>;
   reverseImagePromptWithAi: (payload: AiReverseImagePromptPayload) => Promise<IpcResult<AiReverseImagePromptData>>;
+  generateImagesWithAi: (payload: AiImageGenerationPayload) => Promise<IpcResult<AiImageGenerationData>>;
+  prepareDoubaoWebCanvas: () => Promise<IpcResult<DoubaoWebCanvasStatus>>;
+  refreshDoubaoWebCanvasAuth: () => Promise<IpcResult<DoubaoWebCanvasStatus>>;
+  setDoubaoWebCanvasBounds: (bounds: DoubaoWebCanvasBounds) => Promise<IpcResult<{ updated: true }>>;
+  showDoubaoWebCanvas: () => Promise<IpcResult<{ visible: true }>>;
+  hideDoubaoWebCanvas: () => Promise<IpcResult<{ visible: false }>>;
+  generateImagesWithDoubaoWeb: (payload: AiImageGenerationPayload) => Promise<IpcResult<AiImageGenerationData>>;
   readProxySettings: () => Promise<IpcResult<ProxySettings>>;
   saveProxySettings: (settings: ProxySettings) => Promise<IpcResult<ProxySettings>>;
   testProxySettings: (settings: ProxySettings) => Promise<IpcResult<ProxyTestData>>;
@@ -371,6 +453,15 @@ export type SuyanApi = {
   installModuleFromLocal: (moduleId: string) => Promise<IpcResult<{ installed: boolean }>>;
   installModuleFromGithub: (moduleId: string, githubOwner: string) => Promise<IpcResult<{ installed: boolean }>>;
   onModuleInstallProgress: (callback: (progress: ModuleInstallProgress) => void) => () => void;
+  /** FFmpeg 按需组件：在线下载安装（固定 Release，内置验签）。 */
+  installFfmpegComponentFromDownload: () => Promise<
+    IpcResult<{ installed: boolean; version?: string; canceled?: boolean }>
+  >;
+  /** FFmpeg 按需组件：离线导入（用户选 manifest.json + .sig + zip 三件，内置验签）。 */
+  installFfmpegComponentFromLocal: () => Promise<
+    IpcResult<{ installed: boolean; version?: string; canceled?: boolean }>
+  >;
+  onFfmpegInstallProgress: (callback: (progress: FfmpegInstallProgress) => void) => () => void;
   minimizeWindow: () => Promise<IpcResult<{ minimized: true }>>;
   toggleMaximizeWindow: () => Promise<IpcResult<{ maximized: boolean }>>;
   closeWindow: () => Promise<IpcResult<{ closed: true }>>;

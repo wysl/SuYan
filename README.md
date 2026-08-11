@@ -8,7 +8,7 @@
 
 帮你把效果图和提示词收在一起，随时找、随时改、随时带走
 
-[GitHub](https://github.com/guliacer/SuYan) · [核心亮点](#-核心亮点) · [功能全景](#-功能全景) · [快速开始](#-快速开始) · [常见问题](#-常见问题) · [收费公示](#-收费公示)
+[GitHub](https://github.com/guliacer/SuYan) · [核心亮点](#-核心亮点) · [功能全景](#-功能全景) · [快速开始](#-快速开始) · [更新日志](#-更新日志) · [常见问题](#-常见问题) · [收费公示](#-收费公示) · [致谢](#-致谢)
 
 **永久免费 · 开源分享 · 遇收费请 [举报](https://github.com/guliacer/SuYan/issues)**
 
@@ -192,12 +192,44 @@ Key 只存在本机并加密保存，不会打进安装包或仓库。
 ### 安装步骤
 
 1. **下载** [GitHub Releases](https://github.com/guliacer/SuYan/releases) 中的最新安装包（如 `SuYan-Setup-x.y.z.exe`），或便携 ZIP 解压后的 `素言.exe`  
-   （软件本身免费；当前版本为 `v0.2.0`，首版 `v0.1.0` 仍独立保留、互不覆盖。若别处收费，请 [举报](https://github.com/guliacer/SuYan/issues)）
+   （软件本身免费；当前版本为 `v0.2.10`，首版 `v0.1.0` 仍独立保留、互不覆盖。若别处收费，请 [举报](https://github.com/guliacer/SuYan/issues)）
 2. **安装或打开** 按向导安装，或直接跑便携版
 3. **导入素材** 左侧「导入素材」：图片、粘贴、文档或分享包都行  
    （可对照上方 [本地导入](#本地导入) / [网络导入](#网络导入)）
 4. **开始整理** 瀑布流里浏览，点进详情改提示词；要用 AI 时再配接口  
    （可对照 [AI 创作助手](#-ai-创作助手) / [模型配置](#模型配置)）
+
+---
+
+## 📝 更新日志
+
+### v0.2.10
+
+**新增功能**
+
+- **目录直挂** — 可把磁盘上已有的图片 / 视频目录挂到库中，不再二次拷贝原始媒体。感谢群友 [@wysl](https://github.com/wysl) 的贡献，详见 [PR #1](https://github.com/guliacer/SuYan/pull/1)
+- **内置画布** — 配置 API 后可直接在软件内生成图像
+- **默认识别来源** — 分类识别、标签识别可分别指定默认从「提示词」或「效果图」分析，点星标一键切换
+- **更多提示词网站** — 新增站点推荐与对应的导入适配
+- **更多资源推荐** — 有需要可自行查看
+
+**体验优化**
+
+- **分享功能** — 落实「打包分享」原意，分享包内容更完整
+- **数据存放** — 理顺便携版与安装版的数据存放规则
+- **分栏菜单** — 修复部分分辨率下无法看到全部分栏菜单的问题
+- **拖入归纳** — 优化多张图像拖入时自动归纳为提示词组的逻辑
+- **原生弹窗** — 统一各处原生弹窗的样式与交互
+- **分类 / 标签** — 重构分类与标签功能，识别更准确、也更易理解
+- **AI 提示** — 优化 API 错误提示，增强推理模型（如 GLM、DeepSeek）的识别稳定性
+- **技术栈** — 升级项目技术栈，便于后续迭代
+- **界面布局** — 优化多处布局细节
+
+**接下来的目标**
+
+1. 现有参数词库不够好用，优化后再次上线
+2. 评估纯文本提示词保存功能的必要性
+3. 评估在 ComfyUI 中使用的可能性
 
 ---
 
@@ -315,6 +347,52 @@ ZIP 分享会只读外链源文件并把媒体内容写入分享包，不要求�
 3. 能复现的步骤（如果有）
 
 ---
+
+## 🙏 致谢
+
+素言使用并感谢以下开源项目。本节列出项目直接依赖、构建 / 测试工具，以及随正式包使用的核心开源组件；具体版本以 [`package.json`](./package.json) 和 [`pnpm-lock.yaml`](./pnpm-lock.yaml) 为准。各项目的版权和许可证归原作者所有，使用时遵循其许可证条款。
+
+### 功能参考与实现来源
+
+下列项目用于功能、交互或底层技术参考。除特别说明外，素言没有直接复制这些项目的源代码；具体实现仍以本仓库代码为准。
+
+| 功能 | 参考 / 使用项目 | 说明 |
+| --- | --- | --- |
+| 创意画布 | [CookSleep/gpt_image_playground](https://github.com/CookSleep/gpt_image_playground) | 画布交互与布局参考 |
+| 图像压缩 | [meowtec/Imagine](https://github.com/meowtec/Imagine) | 压缩功能交互参考；实际图像处理由 [Sharp](https://github.com/lovell/sharp) 完成 |
+| 图像去重 | [Node.js](https://github.com/nodejs/node) | 当前实现使用 `node:crypto` 的 SHA-256 对文件内容做精确匹配，没有引入独立的第三方图像去重项目 |
+| 视频压缩 | [FFmpeg](https://ffmpeg.org/) / [eugeneware/ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) | 使用 FFmpeg 编码；FFmpeg 二进制在首次用到视频功能时按需下载并验签安装，不再随包分发 |
+
+### 运行时与核心能力
+
+| 项目 | 在素言中的用途 | 许可证 | 项目地址 |
+| --- | --- | --- | --- |
+| [Electron](https://github.com/electron/electron) | 跨平台桌面运行时 | MIT | [electron/electron](https://github.com/electron/electron) |
+| [Node.js](https://github.com/nodejs/node) | Electron 提供的主进程 Node API | MIT | [nodejs/node](https://github.com/nodejs/node) |
+| [React / React DOM](https://github.com/facebook/react) | 界面渲染与组件体系 | MIT | [facebook/react](https://github.com/facebook/react) |
+| [Zustand](https://github.com/pmndrs/zustand) | 渲染层状态管理 | MIT | [pmndrs/zustand](https://github.com/pmndrs/zustand) |
+| [Lucide](https://github.com/lucide-icons/lucide) | 界面图标（`lucide-react`） | ISC | [lucide-icons/lucide](https://github.com/lucide-icons/lucide) |
+| [JSZip](https://github.com/Stuk/jszip) | ZIP 分享包、日志包和文档读取 | MIT / GPL-3.0-or-later | [Stuk/jszip](https://github.com/Stuk/jszip) |
+| [Sharp](https://github.com/lovell/sharp) | 图片压缩、缩略图和图像处理 | Apache-2.0 | [lovell/sharp](https://github.com/lovell/sharp) |
+| [libvips](https://github.com/libvips/libvips) | Sharp 使用的高性能图像处理底层库 | LGPL-3.0-or-later | [libvips/libvips](https://github.com/libvips/libvips) |
+| [Chokidar](https://github.com/paulmillr/chokidar) | 外部素材目录监视 | MIT | [paulmillr/chokidar](https://github.com/paulmillr/chokidar) |
+| [uuid](https://github.com/uuidjs/uuid) | 素材和数据记录的唯一 ID | MIT | [uuidjs/uuid](https://github.com/uuidjs/uuid) |
+| [FFmpeg](https://ffmpeg.org/) | 视频压缩、关键帧处理；二进制按需下载验签安装（`ffmpeg-static` 仅用于构建期开发与测试） | GPL-3.0-or-later | [ffmpeg.org](https://ffmpeg.org/) |
+
+### 构建、测试与发布工具
+
+| 项目 | 在素言中的用途 | 许可证 | 项目地址 |
+| --- | --- | --- | --- |
+| [Vite](https://github.com/vitejs/vite) | 渲染层开发与构建 | MIT | [vitejs/vite](https://github.com/vitejs/vite) |
+| [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react) | Vite 的 React 编译插件 | MIT | [vitejs/vite-plugin-react](https://github.com/vitejs/vite-plugin-react) |
+| [Tailwind CSS](https://github.com/tailwindlabs/tailwindcss) / `@tailwindcss/vite` | 样式系统与 Vite 集成 | MIT | [tailwindlabs/tailwindcss](https://github.com/tailwindlabs/tailwindcss) |
+| [TypeScript](https://github.com/microsoft/TypeScript) | 类型检查与 Electron 构建 | Apache-2.0 | [microsoft/TypeScript](https://github.com/microsoft/TypeScript) |
+| [Vitest](https://github.com/vitest-dev/vitest) | 单元测试与回归验证 | MIT | [vitest-dev/vitest](https://github.com/vitest-dev/vitest) |
+| [electron-builder](https://github.com/electron-userland/electron-builder) | Windows 安装包和便携包构建 | MIT | [electron-userland/electron-builder](https://github.com/electron-userland/electron-builder) |
+| [javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator) | 正式包 Electron 代码保护 | BSD-2-Clause | [javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator) |
+| [DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) | `@types/node`、`@types/react` 和 `@types/react-dom` 类型声明 | MIT | [DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| [Go](https://github.com/golang/go) | 构建文件复制 helper（仅使用标准库） | BSD-3-Clause | [golang/go](https://github.com/golang/go) |
+| [pnpm](https://github.com/pnpm/pnpm) | 依赖安装和锁文件管理 | MIT | [pnpm/pnpm](https://github.com/pnpm/pnpm) |
 
 ## 免责声明
 

@@ -40,6 +40,22 @@ export type WebToMindPromptInfo = {
   sourceUrl: string;
 };
 
+export type OpenNanaPromptInfo = {
+  sourceUrl: string;
+  slug: string;
+};
+
+export type YouMindPromptInfo = {
+  sourceUrl: string;
+  promptId?: string | null;
+};
+
+export type PromptsChatPromptInfo = {
+  sourceUrl: string;
+  promptId: string;
+  slug?: string | null;
+};
+
 export type XmiaomPromptInfo = {
   sourceUrl: string;
   imageId: string;
@@ -146,8 +162,29 @@ const knownPromptSiteDefinitions: KnownPromptSiteDefinition[] = [
   {
     hosts: ["youmind.com"],
     siteName: "YouMind",
-    siteUrl: "https://youmind.com/zh-CN/gpt-image-2-prompts",
-    tags: ["GPT Image 2", "案例合集", "中文页面"],
+    siteUrl: "https://youmind.com/zh-CN/seedance-2-0-prompts",
+    siteIconUrl: "https://marketing-assets.youmind.com/logo-128.png",
+    tags: ["Seedance 2.0", "视频提示词", "案例合集"],
+  },
+  {
+    hosts: ["opennana.com", "img.opennana.com"],
+    siteName: "OpenNana",
+    siteUrl: "https://opennana.com/?ref=4H8CJGZM",
+    siteIconUrl: "https://opennana.com/favicon.ico",
+    tags: ["Nano Banana", "GPT Image 2", "提示词图库"],
+  },
+  {
+    hosts: ["prompts.chat"],
+    siteName: "prompts.chat",
+    siteUrl: "https://prompts.chat/prompts",
+    siteIconUrl: "https://prompts.chat/favicon/favicon.svg",
+    tags: ["Prompt 社区", "文本提示词", "案例分享"],
+  },
+  {
+    hosts: ["kookaigc.top"],
+    siteName: "KookAIGC",
+    siteUrl: "https://kookaigc.top/?view=gallery",
+    tags: ["AIGC 图库", "效果参考", "提示词灵感"],
   },
   {
     hosts: ["gpt-image2.canghe.ai"],
@@ -583,6 +620,113 @@ export function extractWebToMindPromptInfo(input: string): WebToMindPromptInfo |
 
   return {
     sourceUrl: url.href,
+  };
+}
+
+export function extractOpenNanaPromptInfo(input: string): OpenNanaPromptInfo | null {
+  const value = extractFirstHttpUrl(input) ?? input.trim();
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  if (!["http:", "https:"].includes(url.protocol) || !isOpenNanaHostname(url.hostname)) {
+    return null;
+  }
+
+  const slug =
+    url.pathname.match(/\/awesome-prompt-gallery\/([a-z0-9][a-z0-9-]{2,160})\/?/i)?.[1] ??
+    url.pathname.match(/\/prompt(?:s)?\/([a-z0-9][a-z0-9-]{2,160})\/?/i)?.[1] ??
+    "";
+
+  if (!slug || /^(image|video|explore|search|tags?|categories?)$/i.test(slug)) {
+    return null;
+  }
+
+  return {
+    sourceUrl: `https://opennana.com/awesome-prompt-gallery/${slug}`,
+    slug,
+  };
+}
+
+export function extractYouMindPromptInfo(input: string): YouMindPromptInfo | null {
+  const value = extractFirstHttpUrl(input) ?? input.trim();
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  if (!["http:", "https:"].includes(url.protocol) || !isYouMindHostname(url.hostname)) {
+    return null;
+  }
+
+  const videoPromptMatch = url.pathname.match(/\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?video-prompts\/([a-z0-9][a-z0-9-]{2,200})\/?/i);
+  const seedanceMatch = url.pathname.match(/\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?seedance-2-0-prompts\/?/i);
+  const promptIdFromPath = videoPromptMatch?.[1]?.match(/-(\d{2,10})$/)?.[1] ?? null;
+  const promptIdFromQuery = getUrlParameter(url, "id");
+  const promptId = promptIdFromPath || (promptIdFromQuery && /^\d{2,10}$/.test(promptIdFromQuery) ? promptIdFromQuery : null);
+
+  if (!videoPromptMatch && !seedanceMatch && !promptId) {
+    // Keep generic youmind.com pages for known-site HTML parsing.
+    return null;
+  }
+
+  if (videoPromptMatch?.[1]) {
+    return {
+      sourceUrl: `https://youmind.com/zh-CN/video-prompts/${videoPromptMatch[1]}`,
+      promptId,
+    };
+  }
+
+  if (seedanceMatch) {
+    return {
+      sourceUrl: promptId
+        ? `https://youmind.com/zh-CN/seedance-2-0-prompts?id=${promptId}`
+        : "https://youmind.com/zh-CN/seedance-2-0-prompts",
+      promptId,
+    };
+  }
+
+  return promptId
+    ? {
+        sourceUrl: url.href,
+        promptId,
+      }
+    : null;
+}
+
+export function extractPromptsChatPromptInfo(input: string): PromptsChatPromptInfo | null {
+  const value = extractFirstHttpUrl(input) ?? input.trim();
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  if (!["http:", "https:"].includes(url.protocol) || !isPromptsChatHostname(url.hostname)) {
+    return null;
+  }
+
+  const pathMatch = url.pathname.match(/^\/prompts\/([a-z0-9]{10,40})(?:[_-]([a-z0-9][a-z0-9-]{0,160}))?\/?$/i);
+  const promptId = pathMatch?.[1] ?? getUrlParameter(url, "id") ?? getUrlParameter(url, "promptId") ?? "";
+
+  if (!/^[a-z0-9]{10,40}$/i.test(promptId)) {
+    return null;
+  }
+
+  const slug = pathMatch?.[2] ?? null;
+  return {
+    sourceUrl: slug ? `https://prompts.chat/prompts/${promptId}_${slug}` : `https://prompts.chat/prompts/${promptId}`,
+    promptId,
+    slug,
   };
 }
 
@@ -1672,6 +1816,38 @@ export function parseKnownPromptSiteHtml(html: string, siteInfo: KnownPromptSite
     }
   }
 
+  if (isOpenNanaSite(siteInfo)) {
+    const openNanaDraft = parseOpenNanaPromptHtml(html, siteInfo.sourceUrl);
+
+    if (openNanaDraft) {
+      return openNanaDraft;
+    }
+  }
+
+  if (isYouMindSite(siteInfo)) {
+    const youMindDraft = parseYouMindPromptHtml(html, siteInfo.sourceUrl);
+
+    if (youMindDraft) {
+      return youMindDraft;
+    }
+  }
+
+  if (isPromptsChatSite(siteInfo)) {
+    const promptsChatDraft = parsePromptsChatHtml(html, siteInfo.sourceUrl);
+
+    if (promptsChatDraft) {
+      return promptsChatDraft;
+    }
+  }
+
+  if (isKookAigcSite(siteInfo)) {
+    const kookDraft = parseKookAigcHtml(html, siteInfo.sourceUrl);
+
+    if (kookDraft) {
+      return kookDraft;
+    }
+  }
+
   const canonicalUrl = extractKnownSiteCanonicalUrl(html, siteInfo.sourceUrl);
   const genericDraft = parsePromptDraftFromHtml(html, canonicalUrl);
   const sourceImageUrls = filterKnownPromptSiteImageUrls(
@@ -1713,6 +1889,274 @@ function isJimengSite(siteInfo: KnownPromptSiteInfo): boolean {
   } catch {
     return siteInfo.siteName === "即梦AI";
   }
+}
+
+function isOpenNanaSite(siteInfo: KnownPromptSiteInfo): boolean {
+  return siteInfo.siteName === "OpenNana" || /opennana\.com/i.test(siteInfo.sourceUrl);
+}
+
+function isYouMindSite(siteInfo: KnownPromptSiteInfo): boolean {
+  return siteInfo.siteName === "YouMind" || /youmind\.com/i.test(siteInfo.sourceUrl);
+}
+
+function isPromptsChatSite(siteInfo: KnownPromptSiteInfo): boolean {
+  return siteInfo.siteName === "prompts.chat" || /prompts\.chat/i.test(siteInfo.sourceUrl);
+}
+
+function isKookAigcSite(siteInfo: KnownPromptSiteInfo): boolean {
+  return siteInfo.siteName === "KookAIGC" || /kookaigc\.top/i.test(siteInfo.sourceUrl);
+}
+
+export function parseOpenNanaPromptHtml(html: string, sourceUrl: string): PromptImportDraft | null {
+  const sourceInfo = extractOpenNanaPromptInfo(sourceUrl) ?? extractOpenNanaPromptInfo(extractKnownSiteCanonicalUrl(html, sourceUrl));
+
+  if (!sourceInfo) {
+    return null;
+  }
+
+  const title =
+    cleanSingleLine(extractHtmlTitle(html)).replace(/\s*[|｜].*$/u, "") ||
+    cleanSingleLine(extractMetaPropertyContent(html, "og:title")).replace(/\s*[|｜].*$/u, "") ||
+    sourceInfo.slug;
+  const decodedHtml = decodeNextFlightPayloads(html);
+  const promptBlock = extractOpenNanaPromptBlock(decodedHtml) || extractOpenNanaPromptBlock(html);
+  const { prompt, negativePrompt } = splitOpenNanaPromptAndNegative(promptBlock);
+  const usablePrompt = normalizeImportText(prompt);
+
+  if (!usablePrompt || !isPromptCandidate(usablePrompt)) {
+    return null;
+  }
+
+  const mediaUrls = uniqueStrings([
+    ...extractOpenNanaEffectImageUrls(html, sourceInfo.sourceUrl),
+    ...extractOpenNanaEffectImageUrls(decodedHtml, sourceInfo.sourceUrl),
+    getRemoteImageUrl(extractMetaPropertyContent(html, "og:image"), sourceInfo.sourceUrl) ?? "",
+    getRemoteImageUrl(extractMetaContent(html, "twitter:image"), sourceInfo.sourceUrl) ?? "",
+  ]).filter((url) => !/sponsor|favicon|logo|avatar|og-default/i.test(url));
+
+  const keywords = uniqueTags([
+    ...extractKeywords(html),
+    ...(extractMetaContent(html, "keywords")
+      .split(/[,，]/u)
+      .map((item) => item.trim())
+      .filter(Boolean) ?? []),
+  ]);
+
+  return {
+    title: cleanSingleLine(title).slice(0, maxTitleLength) || createTitleFromPrompt(usablePrompt),
+    prompt: usablePrompt,
+    negativePrompt: normalizeImportText(negativePrompt),
+    tags: uniqueTags(["网页分享", "OpenNana", "图像提示词", "Nano Banana", ...keywords]),
+    generationMethod: guessGenerationMethodFromText([title, usablePrompt, keywords.join(" ")].join("\n")) ?? "OpenNana",
+    sourceUrl: sourceInfo.sourceUrl,
+    sourceImageUrl: mediaUrls[0] ?? null,
+    sourceImageUrls: mediaUrls.slice(0, 4),
+    authorName: "OpenNana",
+    authorUrl: "https://opennana.com/?ref=4H8CJGZM",
+    authorAvatarUrl: "https://opennana.com/favicon.ico",
+  };
+}
+
+export function parseYouMindPromptHtml(html: string, sourceUrl: string): PromptImportDraft | null {
+  const sourceInfo = extractYouMindPromptInfo(sourceUrl) ?? extractYouMindPromptInfo(extractKnownSiteCanonicalUrl(html, sourceUrl));
+  const canonicalUrl = sourceInfo?.sourceUrl ?? extractKnownSiteCanonicalUrl(html, sourceUrl);
+  const title =
+    cleanSingleLine(extractHtmlTitle(html))
+      .replace(/\s*-\s*Seedance.*$/iu, "")
+      .replace(/\s*[|｜].*YouMind.*$/iu, "")
+      .trim() || cleanSingleLine(extractMetaPropertyContent(html, "og:title"));
+  const decodedHtml = decodeNextFlightPayloads(html);
+  const promptCandidates = [
+    ...extractYouMindPromptContents(decodedHtml),
+    ...extractYouMindPromptContents(html),
+    cleanSingleLine(extractMetaContent(html, "description")),
+    cleanSingleLine(extractMetaPropertyContent(html, "og:description")),
+  ]
+    .map((value) => normalizeImportText(value.replace(/\s*-\s*YouMind\s*$/iu, "")))
+    .filter((value) => value && isPromptCandidate(value))
+    .sort((left, right) => right.length - left.length);
+  const prompt = promptCandidates[0] ?? "";
+
+  if (!prompt) {
+    return null;
+  }
+
+  const videoUrls = uniqueStrings([
+    ...extractYouMindMediaUrls(html),
+    ...extractYouMindMediaUrls(decodedHtml),
+  ]).filter((url) => isImportableRemoteVideoUrl(url) || /\.mp4(?:$|[?#])/i.test(url) || /Seedance|media\/\d+_/i.test(url));
+  const coverUrls = uniqueStrings([
+    ...extractYouMindMediaUrls(html).filter((url) => /video-cover|\.(?:jpg|jpeg|png|webp)(?:$|[?#])/i.test(url)),
+    getRemoteImageUrl(extractMetaPropertyContent(html, "og:image"), canonicalUrl) ?? "",
+    getRemoteImageUrl(extractMetaContent(html, "twitter:image"), canonicalUrl) ?? "",
+  ]).filter(Boolean);
+  // Prefer actual effect video when available; keep cover as fallback thumbnail.
+  const sourceMediaUrls = uniqueStrings([
+    ...videoUrls.map((url) => (/\.mp4(?:$|[?#])/i.test(url) || isImportableRemoteVideoUrl(url) ? url : `${url}`)),
+    ...coverUrls,
+  ]);
+  // If source is extensionless cms media path, still treat it as video asset for import pipeline.
+  const normalizedMediaUrls = sourceMediaUrls.map((url) => url);
+  const isVideo = videoUrls.length > 0 || /seedance|video-prompts/i.test(canonicalUrl);
+  const authorMatch =
+    html.match(/@([A-Za-z0-9_一-鿿]{2,40})/)?.[1] ??
+    decodedHtml.match(/@([A-Za-z0-9_一-鿿]{2,40})/)?.[1] ??
+    "";
+
+  return {
+    title: cleanSingleLine(title).slice(0, maxTitleLength) || createTitleFromPrompt(prompt),
+    prompt,
+    negativePrompt: "",
+    tags: uniqueTags([
+      "网页分享",
+      "YouMind",
+      isVideo ? "视频提示词" : "图像提示词",
+      /seedance/i.test(canonicalUrl + title + prompt) ? "Seedance 2.0" : "",
+      ...extractKeywords(html),
+    ]),
+    generationMethod: /seedance/i.test(canonicalUrl + title + prompt) ? "Seedance 2.0" : "YouMind",
+    sourceUrl: canonicalUrl,
+    sourceImageUrl: normalizedMediaUrls[0] ?? null,
+    sourceImageUrls: normalizedMediaUrls.slice(0, 4),
+    authorName: authorMatch ? `@${authorMatch}` : "YouMind",
+    authorUrl: "https://youmind.com/zh-CN/seedance-2-0-prompts",
+    authorAvatarUrl: "https://marketing-assets.youmind.com/logo-128.png",
+  };
+}
+
+export function parsePromptsChatHtml(html: string, sourceUrl: string): PromptImportDraft | null {
+  const sourceInfo = extractPromptsChatPromptInfo(sourceUrl) ?? extractPromptsChatPromptInfo(extractKnownSiteCanonicalUrl(html, sourceUrl));
+  const title =
+    cleanSingleLine(extractHtmlTitle(html)).replace(/\s*[|｜].*$/u, "") ||
+    cleanSingleLine(extractMetaPropertyContent(html, "og:title"));
+  const decodedHtml = decodeNextFlightPayloads(html);
+  const prompt =
+    extractPromptsChatContent(decodedHtml) ||
+    extractPromptsChatContent(html) ||
+    normalizeImportText(extractMetaPropertyContent(html, "og:description"));
+
+  if (!prompt || !isPromptCandidate(prompt)) {
+    return null;
+  }
+
+  const mediaUrls = uniqueStrings([
+    ...extractPromptsChatMediaUrls(html),
+    ...extractPromptsChatMediaUrls(decodedHtml),
+    getRemoteImageUrl(extractMetaPropertyContent(html, "og:image"), sourceUrl) ?? "",
+  ]).filter((url) => !/\/og\.png$/i.test(url) && !/favicon|logo\.svg/i.test(url));
+  const isVideo = mediaUrls.some((url) => isImportableRemoteVideoUrl(url));
+
+  return {
+    title: cleanSingleLine(title).slice(0, maxTitleLength) || createTitleFromPrompt(prompt),
+    prompt,
+    negativePrompt: "",
+    tags: uniqueTags([
+      "网页分享",
+      "prompts.chat",
+      isVideo ? "视频提示词" : mediaUrls.length > 0 ? "图像提示词" : "文本提示词",
+      ...extractKeywords(html),
+    ]),
+    generationMethod: guessGenerationMethodFromText([title, prompt].join("\n")) ?? "prompts.chat",
+    sourceUrl: sourceInfo?.sourceUrl ?? extractKnownSiteCanonicalUrl(html, sourceUrl),
+    sourceImageUrl: mediaUrls[0] ?? null,
+    sourceImageUrls: mediaUrls.slice(0, 4),
+    authorName: extractPromptsChatAuthor(html) ?? "prompts.chat",
+    authorUrl: "https://prompts.chat/prompts",
+    authorAvatarUrl: "https://prompts.chat/favicon/favicon.svg",
+  };
+}
+
+export function parsePromptsChatApiPayload(payload: unknown, sourceUrl: string): PromptImportDraft | null {
+  const sourceInfo = extractPromptsChatPromptInfo(sourceUrl);
+  const record = isRecord(payload) ? payload : null;
+
+  if (!record) {
+    return null;
+  }
+
+  const prompt = normalizeImportText(getLocalizedString(record.content) || getLocalizedString(record.prompt) || "");
+  if (!prompt || !isPromptCandidate(prompt)) {
+    return null;
+  }
+
+  const title = cleanSingleLine(getLocalizedString(record.title) || getLocalizedString(record.name) || createTitleFromPrompt(prompt));
+  const mediaUrl =
+    getRemoteImageUrl(record.mediaUrl, sourceUrl) ??
+    getRemoteImageUrl(record.imageUrl, sourceUrl) ??
+    getRemoteImageUrl(record.coverUrl, sourceUrl);
+  const tags = uniqueTags([
+    "网页分享",
+    "prompts.chat",
+    mediaUrl ? (isImportableRemoteVideoUrl(mediaUrl) ? "视频提示词" : "图像提示词") : "文本提示词",
+    ...parseUnknownTags(record.tags),
+    getLocalizedString(isRecord(record.category) ? record.category.name : record.category),
+  ]);
+  const authorName =
+    cleanSingleLine(
+      getLocalizedString(isRecord(record.author) ? record.author.name || record.author.username : record.author),
+    ) || "prompts.chat";
+  const authorAvatarUrl = getRemoteImageUrl(isRecord(record.author) ? record.author.avatar : null, sourceUrl);
+  const slug = getLocalizedString(record.slug);
+  const id = getLocalizedString(record.id) || sourceInfo?.promptId || "";
+
+  return {
+    title: title.slice(0, maxTitleLength),
+    prompt,
+    negativePrompt: "",
+    tags,
+    generationMethod: guessGenerationMethodFromText([title, prompt].join("\n")) ?? "prompts.chat",
+    sourceUrl:
+      sourceInfo?.sourceUrl ||
+      (id ? `https://prompts.chat/prompts/${id}${slug ? `_${slug}` : ""}` : sourceUrl),
+    sourceImageUrl: mediaUrl,
+    sourceImageUrls: mediaUrl ? [mediaUrl] : [],
+    authorName,
+    authorUrl: "https://prompts.chat/prompts",
+    authorAvatarUrl: authorAvatarUrl ?? "https://prompts.chat/favicon/favicon.svg",
+  };
+}
+
+export function parseKookAigcHtml(html: string, sourceUrl: string): PromptImportDraft | null {
+  const title =
+    cleanSingleLine(extractHtmlTitle(html)).replace(/\s*[|｜].*$/u, "") ||
+    cleanSingleLine(extractMetaPropertyContent(html, "og:title")) ||
+    "KookAIGC 图库作品";
+  const decodedHtml = decodeNextFlightPayloads(html);
+  const promptCandidates = [
+    ...extractEmbeddedPromptCandidates(decodedHtml),
+    ...extractEmbeddedPromptCandidates(html),
+    cleanSingleLine(extractMetaPropertyContent(html, "og:description")),
+    cleanSingleLine(extractMetaContent(html, "description")),
+  ]
+    .map((value) => normalizeImportText(value))
+    .filter((value) => value && isPromptCandidate(value) && !isSourceOnlyPrompt(value))
+    .sort((left, right) => right.length - left.length);
+  const prompt = promptCandidates[0] ?? "";
+
+  if (!prompt) {
+    return null;
+  }
+
+  const mediaUrls = uniqueStrings([
+    ...extractRemoteMediaUrlsFromText(html, sourceUrl),
+    ...extractRemoteMediaUrlsFromText(decodedHtml, sourceUrl),
+    getRemoteImageUrl(extractMetaPropertyContent(html, "og:image"), sourceUrl) ?? "",
+  ]).filter((url) => !isLikelyAvatarOrIconUrl(url));
+  const isVideo = mediaUrls.some((url) => isImportableRemoteVideoUrl(url));
+
+  return {
+    title: cleanSingleLine(title).slice(0, maxTitleLength) || createTitleFromPrompt(prompt),
+    prompt,
+    negativePrompt: "",
+    tags: uniqueTags(["网页分享", "KookAIGC", isVideo ? "视频提示词" : "图像提示词", "AIGC 图库"]),
+    generationMethod: guessGenerationMethodFromText([title, prompt].join("\n")) ?? "KookAIGC",
+    sourceUrl: extractKnownSiteCanonicalUrl(html, sourceUrl),
+    sourceImageUrl: mediaUrls[0] ?? null,
+    sourceImageUrls: mediaUrls.slice(0, 4),
+    authorName: "KookAIGC",
+    authorUrl: "https://kookaigc.top/?view=gallery",
+    authorAvatarUrl: createSiteIconUrl("https://kookaigc.top"),
+  };
 }
 
 /**
@@ -3010,6 +3454,235 @@ function isWebToMindHostname(hostname: string): boolean {
   return hostname.toLowerCase().replace(/^www\./, "") === "webtomind.com";
 }
 
+function isOpenNanaHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^www\./, "");
+  return normalized === "opennana.com" || normalized.endsWith(".opennana.com");
+}
+
+function isYouMindHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^www\./, "");
+  return normalized === "youmind.com" || normalized.endsWith(".youmind.com");
+}
+
+function isPromptsChatHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^www\./, "");
+  return normalized === "prompts.chat" || normalized.endsWith(".prompts.chat");
+}
+
+function isKookAigcHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^www\./, "");
+  return normalized === "kookaigc.top" || normalized.endsWith(".kookaigc.top");
+}
+
+function decodeNextFlightPayloads(html: string): string {
+  const marker = 'self.__next_f.push([1,"';
+  const chunks: string[] = [];
+  let pos = 0;
+
+  while (pos < html.length) {
+    const start = html.indexOf(marker, pos);
+    if (start < 0) {
+      break;
+    }
+
+    let index = start + marker.length;
+    let escape = false;
+    let raw = "";
+
+    while (index < html.length) {
+      const char = html[index] ?? "";
+
+      if (escape) {
+        raw += char;
+        escape = false;
+      } else if (char === "\\") {
+        raw += char;
+        escape = true;
+      } else if (char === '"') {
+        break;
+      } else {
+        raw += char;
+      }
+
+      index += 1;
+    }
+
+    chunks.push(decodeJsonStringLiteral(raw));
+    pos = index + 1;
+  }
+
+  return chunks.join("\n");
+}
+
+function decodeJsonStringLiteral(value: string): string {
+  try {
+    return JSON.parse(`"${value.replace(/"/g, '\\"')}"`) as string;
+  } catch {
+    return value
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+}
+
+function extractOpenNanaPromptBlock(text: string): string {
+  const patterns = [
+    /(Hyper-realistic[\s\S]{80,8000}?Negative:\s*[^\n]+)/i,
+    /((?:Style|Subject|Scene|Camera|Pose)[\s\S]{80,8000}?Negative:\s*[^\n]+)/i,
+    /((?:超写实|电影感|一位|Create |Generate )[\s\S]{80,8000}?)(?:\n{2,}|$)/u,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern)?.[1]?.trim();
+    if (match && match.length >= 40) {
+      return match;
+    }
+  }
+
+  // Fallback: longest line-ish English/Chinese visual description.
+  const candidates = text
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 80 && !item.startsWith("self.__next_f") && !item.includes("static/chunks"));
+
+  return candidates.sort((left, right) => right.length - left.length)[0] ?? "";
+}
+
+function splitOpenNanaPromptAndNegative(block: string): { prompt: string; negativePrompt: string } {
+  const normalized = normalizeImportText(block);
+  const match = normalized.match(/([\s\S]*?)\n?Negative:\s*([\s\S]+)$/i);
+
+  if (!match) {
+    return { prompt: normalized, negativePrompt: "" };
+  }
+
+  return {
+    prompt: normalizeImportText(match[1] ?? ""),
+    negativePrompt: normalizeImportText(match[2] ?? ""),
+  };
+}
+
+function extractOpenNanaEffectImageUrls(text: string, baseUrl: string): string[] {
+  const urls = Array.from(
+    text.matchAll(/https?:\/\/img\.opennana\.com\/(?:pthumbs\/)?prompts\/assets\/[A-Za-z0-9_./%-]+/g),
+  ).map((match) => {
+    const raw = match[0].replace(/\\+$/g, "");
+    // Prefer full assets over thumbnails.
+    return raw.replace("/pthumbs/prompts/", "/prompts/").replace(/-480(?=\.(?:jpg|jpeg|png|webp))/i, "");
+  });
+
+  return uniqueStrings(
+    urls
+      .map((url) => resolveRemoteUrl(url, baseUrl) ?? url)
+      .filter((url) => !/sponsor|logo|favicon|avatar|og-default/i.test(url)),
+  );
+}
+
+function extractYouMindPromptContents(text: string): string[] {
+  const values: string[] = [];
+  const patterns = [
+    /promptContent"\s*:\s*"((?:\\.|[^"\\])*)"/g,
+    /"promptContent":"((?:\\.|[^"\\])*)"/g,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const decoded = decodeJsonStringLiteral(match[1] ?? "");
+      if (decoded.trim()) {
+        values.push(decoded);
+      }
+    }
+  }
+
+  // Visible long description paragraph often holds a dense summary.
+  for (const match of text.matchAll(/<p[^>]*>([^<]{80,4000})<\/p>/giu)) {
+    values.push(match[1] ?? "");
+  }
+
+  return uniqueStrings(values.map((value) => normalizeImportText(value)).filter(Boolean));
+}
+
+function extractYouMindMediaUrls(text: string): string[] {
+  const urls = Array.from(text.matchAll(/https?:\/\/cms-assets\.youmind\.com\/media\/[A-Za-z0-9_./%-]+/g)).map(
+    (match) => match[0].replace(/\\+$/g, ""),
+  );
+  const mp4s = Array.from(text.matchAll(/https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+\.mp4(?:\?[^\s"'<>]*)?/gi)).map(
+    (match) => match[0],
+  );
+
+  return uniqueStrings([...urls, ...mp4s]);
+}
+
+function extractPromptsChatContent(text: string): string {
+  const patterns = [
+    /"content"\s*:\s*"((?:\\.|[^"\\]){20,})"/g,
+    /"prompt"\s*:\s*"((?:\\.|[^"\\]){20,})"/g,
+  ];
+  const values: string[] = [];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const decoded = normalizeImportText(decodeJsonStringLiteral(match[1] ?? ""));
+      if (decoded && isPromptCandidate(decoded)) {
+        values.push(decoded);
+      }
+    }
+  }
+
+  return values.sort((left, right) => right.length - left.length)[0] ?? "";
+}
+
+function extractPromptsChatMediaUrls(text: string): string[] {
+  const urls = Array.from(
+    text.matchAll(/https?:\/\/(?:prompts-chat-space[^"'\\\s]+|cdn\.prompts\.chat[^"'\\\s]+|[^"'\\\s]*prompt-media[^"'\\\s]+)/gi),
+  ).map((match) => match[0].replace(/\\+$/g, ""));
+
+  return uniqueStrings(urls.filter((url) => /\.(?:jpg|jpeg|png|webp|gif|mp4|webm|mov)(?:$|[?#])/i.test(url)));
+}
+
+function extractPromptsChatAuthor(html: string): string | null {
+  const username =
+    html.match(/"username"\s*:\s*"([^"]{2,60})"/)?.[1] ??
+    html.match(/"name"\s*:\s*"([^"]{2,60})"/)?.[1] ??
+    null;
+
+  return username ? cleanSingleLine(username) : null;
+}
+
+function extractEmbeddedPromptCandidates(text: string): string[] {
+  const values: string[] = [];
+  const patterns = [
+    /"(?:prompt|promptText|prompt_text|content|positivePrompt|positive_prompt)"\s*:\s*"((?:\\.|[^"\\]){20,})"/gi,
+    /(?:提示词|Prompt)\s*[:：]\s*([^\n]{20,2000})/giu,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      values.push(decodeJsonStringLiteral(match[1] ?? ""));
+    }
+  }
+
+  return uniqueStrings(values.map((value) => normalizeImportText(value)).filter(Boolean));
+}
+
+function extractRemoteMediaUrlsFromText(text: string, baseUrl: string): string[] {
+  const urls = Array.from(text.matchAll(/https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/g)).map((match) =>
+    match[0].replace(/[),.;]+$/g, ""),
+  );
+
+  return uniqueStrings(
+    urls
+      .map((url) => resolveRemoteUrl(url, baseUrl) ?? url)
+      .filter(
+        (url) =>
+          isImportableRemoteVideoUrl(url) ||
+          /\.(?:jpg|jpeg|png|webp|gif|bmp|avif|mp4|webm|mov|m4v)(?:$|[?#])/i.test(url),
+      ),
+  );
+}
+
 function isWebToMindPromptPath(pathname: string): boolean {
   const path = pathname.replace(/\/+$/, "") || "/";
 
@@ -3468,6 +4141,11 @@ function isImportableRemoteVideoUrl(url: string): boolean {
       /\.(mp4|webm|mov|m4v|ogv|ogg|mkv|avi|wmv|flv|3gp|3g2|ts|mts|m2ts|mpeg|mpg|asf|f4v)$/i.test(pathname) ||
       hostname === "vlabvod.com" ||
       hostname.endsWith(".vlabvod.com") ||
+      // YouMind Seedance effect videos are often extensionless under cms-assets.
+      (hostname === "cms-assets.youmind.com" &&
+        mediaHint.includes("/media/") &&
+        !/\.(?:jpg|jpeg|png|webp|gif|avif|svg)$/i.test(pathname) &&
+        !mediaHint.includes("video-cover")) ||
       mediaHint.includes("video_mp4") ||
       mediaHint.includes("mime_type=video") ||
       /[?&](?:type|mime|format)=video(?:\/|\b)/i.test(mediaHint) ||

@@ -28,13 +28,16 @@ import {
   ImageIcon,
   ImagePlus,
   ExternalLink,
+  Minimize2,
   Languages,
+  Loader2,
   Pause,
   Pencil,
   Play,
   Music2,
   Plus,
   ScanSearch,
+  Send,
   Share2,
   Sparkles,
   Search,
@@ -53,6 +56,7 @@ import { Button } from "@/components/ui/Button";
 import { ConfirmBubble } from "@/components/ui/ConfirmBubble";
 import { IconTooltipButton } from "@/components/ui/IconTooltipButton";
 import { TextArea } from "@/components/ui/TextArea";
+import { CAPSULE_TONES, type CapsuleTone } from "@/components/ui/capsuleTones";
 import { NsfwImage } from "./NsfwImage";
 import { VideoDetailSection } from "./video/VideoDetailSection";
 import type {
@@ -61,6 +65,9 @@ import type {
   AiAnalyzeTarget,
   AiFeatureAction,
   AiProviderModelCapability,
+  AiRecognitionKind,
+  AiRecognitionSource,
+  AiRecognitionSourcePreferences,
   AiOptimizePromptPayload,
   AiPromptTranslationLanguage,
   AiReverseImagePromptPayload,
@@ -73,26 +80,24 @@ import type {
 import {
   aiFeatureActionMeta,
   buildAiActionInstructions,
+  normalizeAiRecognitionSourcePreferences,
   normalizeAiRulePresetIds,
   resolveAiActionRules,
 } from "../types/ai";
-import type { LibraryItem, PromptContentType, PromptLexiconSettings } from "../types/library";
+import type { LibraryItem, PromptContentType } from "../types/library";
 import {
   addTags,
   applyAnalysisInlineChips,
-  buildGeneratedPromptOptionValues,
-  buildPromptOptionAnalysis,
   buildPromptAnalysisFromSavedCapsules,
-  getNegativePromptValues,
-  filterPromptOptionValues,
   isGenericPromptLabel,
   moveNegativePromptValuesFromPrompt,
   normalizeConcretePromptTags,
   omitNegativeAnalysisSections,
   splitNegativePromptFromPrompt,
   type PromptAnalysisResult,
+  type PromptAnalysisSection,
 } from "../utils/promptAnalysis";
-import { mergePromptAnalysisTagsPreservingCategories } from "../utils/promptAnalysisMetadata";
+import { maxAnalysisResultCount, mergeAnalysisLabelsWithFitCap } from "../utils/analysisMergeCap";
 import type { PromptAnalysisRunResult } from "../utils/remotePromptAnalysis";
 import {
   getGenerationModelOptions,
@@ -104,7 +109,13 @@ import {
 } from "../utils/generationModels";
 import { normalizePromptText } from "../utils/normalizePromptText";
 import { isNsfwItem } from "../utils/nsfwRating";
-import { normalizePhotographyCategorySuggestions } from "../utils/photographyCategories";
+import {
+  isHiddenAiCategoryLabel,
+  normalizeAiCategorySuggestions,
+  normalizePhotographyCategorySuggestions,
+} from "../utils/photographyCategories";
+import { resolveCategoryIdFromLegacyName, resolveCategoryName } from "../utils/categoryTaxonomy";
+import type { CategoryTaxonomy } from "../types/category";
 import { getPromptTypeLabel } from "../utils/promptType";
 import { getImageSrc, getImageThumbnailSrc } from "../utils/getImageSrc";
 import { buildAuthorAvatarSources } from "../utils/authorAvatarSources";
@@ -121,15 +132,10 @@ import {
 } from "../utils/videoPlaybackPrefs";
 import { createPortal } from "react-dom";
 import { MediaFullscreenOverlay } from "./MediaFullscreenOverlay";
-import { hasBuiltinModuleCapability, isBuiltinModuleInstalled } from "../utils/moduleRegistry";
+import { hasBuiltinModuleCapability } from "../utils/moduleRegistry";
 import { useLibraryStore } from "../store/useLibraryStore";
+import { VideoRuntimeInstallBanner } from "./VideoRuntimeInstallBanner";
 import type { PromptCardData } from "../utils/promptFilters";
-import {
-  getPromptParameterLexiconValueScopes,
-  mergePromptAnalysisParametersIntoLexicon,
-  mergePromptParameterValuesIntoLexicon,
-  type PromptParameterLexiconValue,
-} from "../utils/promptLexicons";
 import {
   normalizePromptSectionValue,
   parsePromptTemplateSegments,
@@ -146,6 +152,10 @@ type PromptDetailSavePatch = Partial<
     | "negativePrompt"
     | "tags"
     | "category"
+    | "categoryId"
+    | "genreIds"
+    | "categorySource"
+    | "categoryConfidence"
     | "generationMethod"
     | "promptType"
     | "authorName"
@@ -153,24 +163,11 @@ type PromptDetailSavePatch = Partial<
     | "authorAvatarUrl"
   >
 >;
-type PromptCapsuleField = "prompt" | "negativePrompt";
-
 type EditingChipState =
   | { kind: "category"; originalValue: string; value: string }
   | { kind: "tag"; originalValue: string; value: string };
 
-type ActivePromptCapsule = {
-  field: PromptCapsuleField;
-  label: string;
-  menuPosition: { left: number; top: number };
-  parameterIndex: number;
-  value: string;
-  variable: string;
-};
-
 type AiProfileAction = Exclude<AiFeatureAction, "image-safety">;
-type AiRecognitionKind = "category" | "tags";
-type AiRecognitionSource = "image" | "prompt";
 
 type ActiveAiProfileMenu = {
   action: AiProfileAction;
@@ -200,9 +197,22 @@ type PromptDraftSnapshot = {
   negativePrompt: string;
 };
 
-const maxAiCategoryCount = 10;
-const maxAiTagCount = 15;
+/**
+ * 分类 / 标签 / 参数三类分析结果的统一上限。
+ *
+ * AI 分析只做新增、不替换既有内容，因此必须有硬上限兜住累积增长。
+ */
+const maxAiCategoryCount = maxAnalysisResultCount;
+const maxAiTagCount = maxAnalysisResultCount;
 const originalDetailImageDelayMs = 350;
+/** 文件大小超过此阈值（5MB）时在效果图右上角显示黄色感叹号提醒。 */
+const largeImageThreshold = 5 * 1024 * 1024;
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 const detailInfoCardTone = {
   article: "border-capsule-sage-border hover:border-capsule-sage-border",
   header: "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground",
@@ -225,7 +235,6 @@ type PromptDetailDialogProps = {
   blurNsfwImages: boolean;
   isImageLiked: boolean;
   knownCategories: string[];
-  promptLexicons: PromptLexiconSettings | null;
   onAnalyzePrompt: (payload: AiAnalyzePromptPayload) => Promise<PromptAnalysisRunResult>;
   onClose: () => void;
   onCopyImage: () => void;
@@ -234,18 +243,26 @@ type PromptDetailDialogProps = {
   onExportImage: () => void;
   onImportClipboardImage: () => void;
   onImportImages: () => void;
+  onPushToCanvas: (prompt: string, negativePrompt: string) => void;
+  onPushPromptToCanvas: (prompt: string, negativePrompt: string) => void;
   onNavigateNext: () => void;
   onNavigatePrevious: () => void;
+  /** Export the whole prompt group (zip) — used when the detail has multiple effect images. */
+  onShareGroup?: () => void;
   onSave: (patch: PromptDetailSavePatch) => Promise<void>;
   onSaveGenerationModelPreferences: (patch: {
     generationModelOrder?: string[];
     hiddenGenerationModels?: string[];
   }) => void;
+  onSaveAiActionModelPreference: (
+    action: AiProfileAction,
+    selection: AiModelSelection,
+  ) => Promise<boolean>;
+  onSaveAiRecognitionSourcePreferences: (preferences: AiRecognitionSourcePreferences) => Promise<boolean>;
   onOptimizePrompt: (payload: AiOptimizePromptPayload) => Promise<string | null>;
   onTranslatePrompt: (payload: AiTranslatePromptPayload) => Promise<AiTranslatePromptData | null>;
   onReverseImagePrompt: (payload: AiReverseImagePromptPayload) => Promise<string | null>;
-  onSavePromptLexicons: (promptLexicons: PromptLexiconSettings) => Promise<boolean>;
-  onShareText: (text: string) => void;
+  onShareText?: (text: string) => void;
   onToggleImageLike: () => void;
   onGenerateVideoFrames: (itemId: string) => Promise<boolean>;
   onImportVideoReferenceImages: (itemId: string) => Promise<boolean>;
@@ -265,7 +282,6 @@ export function PromptDetailDialog({
   isBusy,
   isImageLiked,
   knownCategories,
-  promptLexicons,
   onAnalyzePrompt,
   onClose,
   onCopyImage,
@@ -274,14 +290,18 @@ export function PromptDetailDialog({
   onExportImage,
   onImportClipboardImage,
   onImportImages,
+  onPushToCanvas,
+  onPushPromptToCanvas,
   onNavigateNext,
   onNavigatePrevious,
+  onShareGroup,
   onSave,
   onSaveGenerationModelPreferences,
+  onSaveAiActionModelPreference,
+  onSaveAiRecognitionSourcePreferences,
   onOptimizePrompt,
   onTranslatePrompt,
   onReverseImagePrompt,
-  onSavePromptLexicons,
   onShareText,
   onToggleImageLike,
   onGenerateVideoFrames,
@@ -297,6 +317,9 @@ export function PromptDetailDialog({
   const [titleDraft, setTitleDraft] = useState(item.title);
   const [categoryDraft, setCategoryDraft] = useState("");
   const [savedCategory, setSavedCategory] = useState(item.category);
+  // 次分类的唯一存储位置。曾经借道 tags 传递，但 saveItem 会对 tags 跑
+  // normalizeConcretePromptTags（剥掉一切能解析为分类的词），导致次分类每次保存都被清空。
+  const [savedGenreIds, setSavedGenreIds] = useState<string[]>(item.genreIds ?? []);
   const [savedGenerationMethod, setSavedGenerationMethod] = useState(item.generationMethod);
   const [savedPromptType, setSavedPromptType] = useState<PromptContentType>(item.promptType);
   const [moduleNoticeText, setModuleNoticeText] = useState("");
@@ -316,19 +339,13 @@ export function PromptDetailDialog({
   const [isReversingImagePrompt, setIsReversingImagePrompt] = useState(false);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<PromptAnalysisResult | null>(null);
-  const [localPromptLexicons, setLocalPromptLexicons] = useState(promptLexicons);
-  const [analysisSourceLabel, setAnalysisSourceLabel] = useState("");
   const [editingChip, setEditingChip] = useState<EditingChipState | null>(null);
-  const [activeCapsule, setActiveCapsule] = useState<ActivePromptCapsule | null>(null);
-  const [generatedCapsuleOptions, setGeneratedCapsuleOptions] = useState<Record<string, string[]>>({});
-  const [isGeneratingCapsuleOptions, setIsGeneratingCapsuleOptions] = useState(false);
   const [isNegativePromptVisible, setIsNegativePromptVisible] = useState(false);
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
-  const [recognitionSourceByKind, setRecognitionSourceByKind] = useState<Record<AiRecognitionKind, AiRecognitionSource>>({
-    category: "prompt",
-    tags: "prompt",
-  });
+  const [recognitionSourceByKind, setRecognitionSourceByKind] = useState<Record<AiRecognitionKind, AiRecognitionSource>>(
+    () => getRecognitionSourceByKind(aiSettings),
+  );
   const [selectedAiModelByAction, setSelectedAiModelByAction] = useState<
     Partial<Record<AiProfileAction, AiModelSelection>>
   >({});
@@ -346,16 +363,26 @@ export function PromptDetailDialog({
     typeof window === "undefined" ? 0 : window.innerHeight,
   );
   const [isMediaFullscreen, setIsMediaFullscreen] = useState(false);
+  const [imageFileSize, setImageFileSize] = useState(0);
+  const [isCompressingImage, setIsCompressingImage] = useState(false);
+  const [compressFeedback, setCompressFeedback] = useState<{ originalSize: number; compressedSize: number } | null>(null);
+  const [compressSettingsOpen, setCompressSettingsOpen] = useState(false);
+  const [compressQuality, setCompressQuality] = useState(80);
+  const [compressFormat, setCompressFormat] = useState<"keep" | "webp">("keep");
+  const [compressMaxSide, setCompressMaxSide] = useState(0);
+  const compressSettingsRef = useRef<HTMLDivElement | null>(null);
   const [isReferenceImagePopoverOpen, setIsReferenceImagePopoverOpen] = useState(false);
   const [referenceImagePreview, setReferenceImagePreview] = useState<string | null>(null);
   const [isImportingReferenceImage, setIsImportingReferenceImage] = useState(false);
   const [deletingReferenceImage, setDeletingReferenceImage] = useState<string | null>(null);
   const deleteActionRef = useRef<HTMLDivElement | null>(null);
-  const capsuleMenuRef = useRef<HTMLDivElement | null>(null);
   const aiProfileMenuRef = useRef<HTMLDivElement | null>(null);
+  const recognitionSourceSaveRevisionRef = useRef(0);
+  const aiModelPreferenceSaveRevisionRef = useRef<Partial<Record<AiProfileAction, number>>>({});
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modelButtonRef = useRef<HTMLButtonElement | null>(null);
   const promptTextAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  const promptDraftRef = useRef(promptDraft);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const referenceImagePopoverRef = useRef<HTMLDivElement | null>(null);
   const isAnalyzing = analyzingTarget !== null;
@@ -363,8 +390,10 @@ export function PromptDetailDialog({
   const currentIndexText = imageIndex >= 0 ? `${imageIndex + 1}/${imageCount}` : `1/${imageCount || 1}`;
   const isCurrentImageRevealed = revealedNsfwImageIds.has(item.id);
   const moduleState = useLibraryStore((state) => state.moduleState);
-  const canUseVideoPromptModule = hasBuiltinModuleCapability("video-prompt-card", moduleState);
-  const isCurrentMediaVideo = canUseVideoPromptModule && item.imageFileName ? isVideoMediaFile(item.imageFileName) : false;
+  const categoryTaxonomy = useLibraryStore((state) => state.categoryTaxonomy);
+  const videoRuntimeAvailable = hasBuiltinModuleCapability("video-runtime", moduleState);
+  const isCurrentMediaVideoFile = Boolean(item.imageFileName && isVideoMediaFile(item.imageFileName));
+  const isCurrentMediaVideo = videoRuntimeAvailable && item.imageFileName ? isVideoMediaFile(item.imageFileName) : false;
   const isCurrentMediaLandscape = isCurrentMediaVideo && videoOrientation === "landscape";
   const currentMediaSrc = item.imageFileName ? getImageSrc(item.imageFileName, item.updatedAt) : "";
   const shouldBlurCurrentMedia = blurNsfwImages && isNsfwItem(item) && !isCurrentImageRevealed;
@@ -413,8 +442,8 @@ export function PromptDetailDialog({
     [modelLabel, modelPreferences, modelSearch],
   );
   const categoryChips = useMemo(
-    () => getCategoryChips(savedCategory, tagDrafts, knownCategories),
-    [knownCategories, savedCategory, tagDrafts],
+    () => getCategoryChips(savedCategory, savedGenreIds, categoryTaxonomy),
+    [categoryTaxonomy, savedCategory, savedGenreIds],
   );
   const visibleTagDrafts = useMemo(
     () => getVisibleTagDrafts(tagDrafts, categoryChips),
@@ -451,6 +480,17 @@ export function PromptDetailDialog({
   }, [item.id]);
 
   useEffect(() => {
+    promptDraftRef.current = promptDraft;
+  }, [promptDraft]);
+
+  useEffect(() => {
+    setRecognitionSourceByKind(getRecognitionSourceByKind(aiSettings));
+  }, [
+    aiSettings.recognitionSourcePreferences.category,
+    aiSettings.recognitionSourcePreferences.tags,
+  ]);
+
+  useEffect(() => {
     setIsAuthorHidden(false);
     setIsAuthorEditing(false);
     setAuthorNameDraft(item.author ?? "");
@@ -458,10 +498,12 @@ export function PromptDetailDialog({
     setTitleDraft(item.title);
     setCategoryDraft("");
     setSavedCategory(item.category);
+    setSavedGenreIds(item.genreIds ?? []);
     setSavedGenerationMethod(item.generationMethod);
     setSavedPromptType(item.promptType);
     setTagDrafts(item.tags);
     setNewTagDraft("");
+    promptDraftRef.current = item.prompt;
     setPromptDraft(item.prompt);
     setNegativePromptDraft(item.negativePrompt);
     setPromptUndoSnapshot(null);
@@ -474,15 +516,18 @@ export function PromptDetailDialog({
     setIsReversingImagePrompt(false);
     setIsDeleteConfirmOpen(false);
     setAnalysisResult(null);
-    setAnalysisSourceLabel("");
     setEditingChip(null);
-    setActiveCapsule(null);
-    setGeneratedCapsuleOptions({});
-    setIsGeneratingCapsuleOptions(false);
     setIsNegativePromptVisible(false);
     setIsModelMenuOpen(false);
     setModelSearch("");
   }, [item.id]);
+
+  // 打开已是视频类型的素材时，若视频运行时缺失则直接给出安装提示。
+  useEffect(() => {
+    if (item.promptType === "video" && !videoRuntimeAvailable) {
+      setModuleNoticeText("视频媒体功能需要视频运行时（FFmpeg），请先安装。");
+    }
+  }, [item.id, videoRuntimeAvailable]);
 
   useEffect(() => {
     let isCanceled = false;
@@ -499,9 +544,7 @@ export function PromptDetailDialog({
         return;
       }
 
-      setAnalysisResult(savedCapsuleAnalysis);
-      setAnalysisSourceLabel(savedCapsuleAnalysis ? "已保存" : "");
-      logPromptDetailEvent("detail-analysis:ready", {
+      setAnalysisResult(savedCapsuleAnalysis);      logPromptDetailEvent("detail-analysis:ready", {
         durationMs: Math.round(performance.now() - startedAt),
         hasAnalysis: Boolean(savedCapsuleAnalysis),
         itemId: item.id,
@@ -519,10 +562,6 @@ export function PromptDetailDialog({
   }, [item.id, item.prompt, item.negativePrompt, knownCategories]);
 
   useEffect(() => {
-    setLocalPromptLexicons(promptLexicons);
-  }, [promptLexicons]);
-
-  useEffect(() => {
     setPromptTranslationDraft(null);
     setPromptLanguageVersion(detectPromptLanguage(promptDraft, negativePromptDraft));
   }, [negativePromptDraft, promptDraft]);
@@ -530,8 +569,10 @@ export function PromptDetailDialog({
   useEffect(() => {
     setDetailImageSource("thumbnail");
     setVideoOrientation(null);
+    setCompressFeedback(null);
 
     if (!item.imageFileName || isVideoMediaFile(item.imageFileName)) {
+      setImageFileSize(0);
       return;
     }
 
@@ -541,6 +582,25 @@ export function PromptDetailDialog({
 
     return () => {
       window.clearTimeout(timer);
+    };
+  }, [item.imageFileName]);
+
+  // 获取效果图文件大小，用于判断是否需要显示"文件过大"提醒。
+  useEffect(() => {
+    if (!item.imageFileName || isVideoMediaFile(item.imageFileName)) {
+      setImageFileSize(0);
+      return;
+    }
+
+    let isCanceled = false;
+    void window.suyanApi.getImageFileSize(item.imageFileName).then((result) => {
+      if (!isCanceled && result.ok) {
+        setImageFileSize(result.data.size);
+      }
+    });
+
+    return () => {
+      isCanceled = true;
     };
   }, [item.imageFileName]);
 
@@ -786,23 +846,19 @@ export function PromptDetailDialog({
   }, [activeAiProfileMenu]);
 
   useEffect(() => {
-    if (!activeCapsule) {
+    if (!compressSettingsOpen) {
       return;
     }
 
     function handlePointerDown(event: PointerEvent) {
-      const target = event.target as Element;
-
-      if (capsuleMenuRef.current?.contains(target) || target.closest("[data-prompt-capsule='true']")) {
-        return;
+      if (!compressSettingsRef.current?.contains(event.target as Node)) {
+        setCompressSettingsOpen(false);
       }
-
-      setActiveCapsule(null);
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setActiveCapsule(null);
+        setCompressSettingsOpen(false);
       }
     }
 
@@ -813,7 +869,7 @@ export function PromptDetailDialog({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeCapsule]);
+  }, [compressSettingsOpen]);
 
   function commitTitle() {
     const nextTitle = titleDraft.trim();
@@ -844,16 +900,72 @@ export function PromptDetailDialog({
     setIsAuthorEditing(false);
   }
 
-  function commitCategoryChips(nextCategories: readonly string[], nextVisibleTags = visibleTagDrafts) {
-    const normalizedCategories = normalizeCategorySuggestions(nextCategories, knownCategories).slice(0, maxAiCategoryCount);
+  async function handleCompressCurrentImage() {
+    if (!item.imageFileName || isCompressingImage || isCurrentMediaVideo) {
+      return;
+    }
+
+    const originalSize = imageFileSize;
+    setIsCompressingImage(true);
+    setCompressFeedback(null);
+    setCompressSettingsOpen(false);
+
+    try {
+      const result = await window.suyanApi.compressImages({
+        quality: compressQuality,
+        format: compressFormat,
+        itemIds: [item.id],
+        maxSide: compressMaxSide > 0 ? compressMaxSide : undefined,
+      });
+
+      if (result.ok && result.data.processedCount > 0) {
+        const compressedSize = result.data.totalCompressedBytes;
+        setCompressFeedback({ originalSize, compressedSize });
+        // 刷新文件大小
+        const sizeResult = await window.suyanApi.getImageFileSize(item.imageFileName);
+        if (sizeResult.ok) {
+          setImageFileSize(sizeResult.data.size);
+        }
+      } else if (!result.ok) {
+        setCompressFeedback(null);
+      }
+    } finally {
+      setIsCompressingImage(false);
+    }
+  }
+
+  /**
+   * 分类胶囊落库：主分类写 category/categoryId，次分类写 genreIds。
+   *
+   * 绝不能再把次分类塞进 tags —— saveItem 会对 tags 做标签清洗，
+   * 分类名会被整体剥掉（本次「关闭卡片后只剩一个分类」的根因）。
+   */
+  function commitCategoryChips(
+    nextCategories: readonly string[],
+    extraPatch: PromptDetailSavePatch = {},
+  ) {
+    const normalizedCategories = normalizeCategorySuggestions(nextCategories, knownCategories).slice(
+      0,
+      maxAiCategoryCount,
+    );
     const nextCategory = normalizedCategories[0] ?? "未分类";
-    const nextTags = buildStoredTagsFromVisibleTags(nextVisibleTags, normalizedCategories);
+    const nextGenreIds = categoryTaxonomy
+      ? normalizedCategories
+          .map((label) => resolveCategoryIdFromLegacyName(categoryTaxonomy, label))
+          .filter((id): id is string => Boolean(id))
+      : [];
+    const nextCategoryId = nextGenreIds[0] ?? null;
 
     setEditingChip(null);
     setCategoryDraft("");
     setSavedCategory(nextCategory);
-    setTagDrafts(nextTags);
-    void onSave({ category: nextCategory, tags: nextTags });
+    setSavedGenreIds(nextGenreIds);
+    void onSave({
+      category: nextCategory,
+      categoryId: nextCategoryId,
+      genreIds: nextGenreIds.length > 0 ? nextGenreIds : null,
+      ...extraPatch,
+    });
   }
 
   function addCategoryChip(nextValue = categoryDraft) {
@@ -882,10 +994,10 @@ export function PromptDetailDialog({
   }
 
   function commitVisibleTags(nextVisibleTags: readonly string[]) {
-    const normalizedVisibleTags = normalizeConcretePromptTags(nextVisibleTags)
+    // tags 现在只存特征标签；分类一律走 category/genreIds，不再夹带。
+    const nextTags = normalizeConcretePromptTags(nextVisibleTags)
       .filter((tag) => !categoryChips.some((category) => isSameLabel(category, tag)))
       .slice(0, maxAiTagCount);
-    const nextTags = buildStoredTagsFromVisibleTags(normalizedVisibleTags, categoryChips);
 
     setTagDrafts(nextTags);
     void onSave({ tags: nextTags });
@@ -902,13 +1014,10 @@ export function PromptDetailDialog({
   }
 
   function commitPromptType(nextPromptType: PromptContentType) {
-    if (nextPromptType === "video" && !canUseVideoPromptModule) {
-      const isInstalled = isBuiltinModuleInstalled("video-prompt", moduleState);
-      setModuleNoticeText(
-        isInstalled
-          ? "视频模块未启用，请先在模块管理中启用。"
-          : "视频模块未安装，请先在模块管理中安装。",
-      );
+    if (nextPromptType === "video" && !videoRuntimeAvailable) {
+      setSavedPromptType(nextPromptType);
+      void onSave({ promptType: nextPromptType });
+      setModuleNoticeText("视频媒体功能需要视频运行时（FFmpeg），请先安装。");
       return;
     }
 
@@ -917,6 +1026,7 @@ export function PromptDetailDialog({
     void onSave({ promptType: nextPromptType });
   }
 
+  
   function hideModelOption(model: string) {
     onSaveGenerationModelPreferences({
       hiddenGenerationModels: hideGenerationModelOption(hiddenGenerationModels, model),
@@ -1056,12 +1166,19 @@ export function PromptDetailDialog({
   }
 
   function selectAiRecognitionSource(kind: AiRecognitionKind, source: AiRecognitionSource) {
-    const action = getRecognitionAction(kind, source);
+    if (isCurrentMediaVideoFile && source === "image") {
+      return;
+    }
 
-    setRecognitionSourceByKind((currentSources) => ({
-      ...currentSources,
+    const action = getRecognitionAction(kind, source);
+    const nextSources = {
+      ...recognitionSourceByKind,
       [kind]: source,
-    }));
+    };
+    const revision = recognitionSourceSaveRevisionRef.current + 1;
+
+    recognitionSourceSaveRevisionRef.current = revision;
+    setRecognitionSourceByKind(nextSources);
     setActiveAiProfileMenu((currentMenu) =>
       currentMenu && currentMenu.recognitionKind === kind
         ? {
@@ -1070,14 +1187,38 @@ export function PromptDetailDialog({
           }
         : currentMenu,
     );
+
+    void onSaveAiRecognitionSourcePreferences(nextSources).then((saved) => {
+      if (!saved && recognitionSourceSaveRevisionRef.current === revision) {
+        setRecognitionSourceByKind(getRecognitionSourceByKind(aiSettings));
+      }
+    });
   }
 
   function selectAiModel(action: AiProfileAction, selection: AiModelSelection) {
+    const revision = (aiModelPreferenceSaveRevisionRef.current[action] ?? 0) + 1;
+
+    aiModelPreferenceSaveRevisionRef.current[action] = revision;
     setSelectedAiModelByAction((currentSelections) => ({
       ...currentSelections,
       [action]: selection,
     }));
     setActiveAiProfileMenu(null);
+
+    void onSaveAiActionModelPreference(action, selection).then(() => {
+      if (aiModelPreferenceSaveRevisionRef.current[action] !== revision) {
+        return;
+      }
+
+      setSelectedAiModelByAction((currentSelections) => {
+        const nextSelections = { ...currentSelections };
+
+        // Success now comes from aiSettings.actionPreferences; failure falls back to
+        // the store-restored preference. Either way, remove the transient override.
+        delete nextSelections[action];
+        return nextSelections;
+      });
+    });
   }
 
   function toggleAiRuleSelection(action: AiProfileAction, ruleId: string) {
@@ -1109,12 +1250,31 @@ export function PromptDetailDialog({
     });
   }
 
+  /**
+   * 「从提示词分析」在提示词为空时等于把空输入交给模型，模型会拿分类目录硬凑答案。
+   * 素材有效果图时自动改走视觉识别，保证结果一定有素材依据。
+   */
+  function resolveEffectiveRecognitionSource(source: AiRecognitionSource): AiRecognitionSource {
+    if (isCurrentMediaVideoFile) {
+      return "prompt";
+    }
+
+    if (source === "prompt" && !promptDraft.trim() && item.imageFileName) {
+      return "image";
+    }
+
+    return source;
+  }
+
   async function recognizeCategory() {
     if (isAnalyzing) {
       return;
     }
 
-    const action = getRecognitionAction("category", recognitionSourceByKind.category);
+    const action = getRecognitionAction(
+      "category",
+      resolveEffectiveRecognitionSource(recognitionSourceByKind.category),
+    );
     const usesPrompt = action === "prompt-category";
 
     setAnalyzingTarget(action);
@@ -1131,18 +1291,44 @@ export function PromptDetailDialog({
         category: usesPrompt ? "未分类" : savedCategory,
         knownCategories,
       });
-      const suggestions = normalizePhotographyCategorySuggestions([
-        ...result.analysis.suggestedCategories,
+      const suggestions = normalizeAiCategorySuggestions([
         result.analysis.primaryCategory,
+        ...result.analysis.suggestedCategories,
+        // Secondary genres may arrive as taxonomy suggestion names already normalized.
       ]).slice(0, maxAiCategoryCount);
-      const nextCategories = normalizeCategorySuggestions(addTags(categoryChips, suggestions), knownCategories).slice(
-        0,
-        maxAiCategoryCount,
-      );
 
-      if (!areStringArraysEqual(nextCategories, categoryChips)) {
-        commitCategoryChips(nextCategories);
+      // 只新增、不替换；到达上限后由匹配度决定去留（见 mergeAnalysisLabelsWithFitCap）。
+      // 主分类受保护，永远不会被本次识别顶掉。
+      if (suggestions.length === 0) {
+        // 模型没有给出有依据的分类，不写入任何结果。
+        return;
       }
+
+      const nextCategories = normalizeCategorySuggestions(
+        mergeAnalysisLabelsWithFitCap({
+          existing: categoryChips,
+          incoming: suggestions,
+          maxCount: maxAiCategoryCount,
+          protectedCount: 1,
+        }),
+        knownCategories,
+      ).slice(0, maxAiCategoryCount);
+
+      if (areStringArraysEqual(nextCategories, categoryChips)) {
+        return;
+      }
+
+      // 单次保存：category / categoryId / genreIds 全部由 commitCategoryChips 一次写完。
+      // 之前这里额外补了一次 onSave，两次背靠背写入互相覆盖，是次分类丢失的另一半原因。
+      commitCategoryChips(nextCategories, {
+        categorySource: "ai",
+        categoryConfidence:
+          result.analysis.taxonomyBand === "high"
+            ? 0.96
+            : result.analysis.taxonomyBand === "mid"
+              ? 0.8
+              : 0.65,
+      });
     } finally {
       setAnalyzingTarget(null);
     }
@@ -1153,7 +1339,7 @@ export function PromptDetailDialog({
       return;
     }
 
-    const action = getRecognitionAction("tags", recognitionSourceByKind.tags);
+    const action = getRecognitionAction("tags", resolveEffectiveRecognitionSource(recognitionSourceByKind.tags));
     const usesPrompt = action === "prompt-tags";
 
     setAnalyzingTarget(action);
@@ -1169,14 +1355,19 @@ export function PromptDetailDialog({
         tags: [],
         category: usesPrompt ? "未分类" : savedCategory,
       });
+      const sanitized = result.analysis.suggestedTags.filter(
+        (tag) =>
+          !categoryChips.some((category) => isSameLabel(category, tag)) &&
+          !normalizePhotographyCategorySuggestions([tag]).length,
+      );
+      // 与分类同一套策略：未满纯新增，满了之后高匹配度的新标签顶掉低匹配度的旧标签。
       const nextTags = uniquePromptLabels(
-        addTags(
-          visibleTagDrafts,
-          result.analysis.suggestedTags.filter(
-            (tag) => !categoryChips.some((category) => isSameLabel(category, tag)),
-          ),
-        ),
-      ).slice(0, maxAiTagCount);
+        mergeAnalysisLabelsWithFitCap({
+          existing: visibleTagDrafts,
+          incoming: sanitized,
+          maxCount: maxAiTagCount,
+        }),
+      );
 
       if (!areStringArraysEqual(nextTags, visibleTagDrafts)) {
         commitVisibleTags(nextTags);
@@ -1211,9 +1402,6 @@ export function PromptDetailDialog({
     setNegativePromptDraft(nextNegativePrompt);
     setPromptUndoSnapshot(null);
     setAnalysisResult(savedCapsuleAnalysis);
-    setAnalysisSourceLabel(savedCapsuleAnalysis ? "已保存" : "");
-    setActiveCapsule(null);
-    setGeneratedCapsuleOptions({});
     setIsNegativePromptVisible(nextNegativePrompt.trim().length > 0 && isNegativePromptVisible);
     void onSave({ prompt: nextPrompt, negativePrompt: nextNegativePrompt });
   }
@@ -1224,9 +1412,6 @@ export function PromptDetailDialog({
     const savedCapsuleAnalysis = buildSavedCapsuleAnalysis(item, nextPrompt, nextNegativePrompt, knownCategories);
 
     setAnalysisResult(savedCapsuleAnalysis);
-    setAnalysisSourceLabel(savedCapsuleAnalysis ? "已保存" : "");
-    setActiveCapsule(null);
-    saveAnalysisParametersToLexicon(savedCapsuleAnalysis);
 
     if (nextPrompt !== item.prompt || nextNegativePrompt !== item.negativePrompt) {
       void onSave({ prompt: nextPrompt, negativePrompt: nextNegativePrompt });
@@ -1250,9 +1435,6 @@ export function PromptDetailDialog({
     }
 
     setAnalysisResult(null);
-    setAnalysisSourceLabel("");
-    setActiveCapsule(null);
-    setGeneratedCapsuleOptions({});
 
     if (promptChanged && (nextPrompt !== item.prompt || nextNegativePrompt !== item.negativePrompt)) {
       void onSave({ prompt: nextPrompt, negativePrompt: nextNegativePrompt });
@@ -1300,84 +1482,6 @@ export function PromptDetailDialog({
     }
   }
 
-  async function applyPromptAnalysisToDraft(
-    sourcePrompt: string,
-    sourceNegativePrompt: string,
-    options: { rememberUndoOnPromptChange?: boolean } = {},
-  ) {
-    const promptAnalysisSelection = toAiActionPayloadSelection("prompt");
-    const result = await onAnalyzePrompt({
-      target: "prompt",
-      apiProfileId: promptAnalysisSelection.apiProfileId,
-      apiModelId: promptAnalysisSelection.apiModelId,
-      customInstructions: promptAnalysisSelection.customInstructions,
-      title: titleDraft,
-      prompt: sourcePrompt,
-      negativePrompt: sourceNegativePrompt,
-      tags: tagDrafts,
-      category: savedCategory,
-      knownCategories,
-    });
-    const negativeValues = getNegativePromptValues(result.analysis);
-    const visibleAnalysis = omitNegativeAnalysisSections(result.analysis);
-    const movedPrompts = moveNegativePromptValuesFromPrompt(sourcePrompt, sourceNegativePrompt, negativeValues);
-    const nextPrompt = applyAnalysisInlineChips(movedPrompts.prompt, visibleAnalysis);
-    const storedCategoryTags = tagDrafts.filter((tag) =>
-      categoryChips.some((category) => isSameLabel(category, tag)),
-    );
-    const nextTags = mergePromptAnalysisTagsPreservingCategories({
-      categoryLabels: categoryChips,
-      maxVisibleTagCount: maxAiTagCount,
-      storedCategoryTags,
-      suggestedTags: visibleAnalysis.suggestedTags,
-      visibleTags: visibleTagDrafts,
-    });
-    const patch: PromptDetailSavePatch = {};
-    const willChangePrompt = nextPrompt !== promptDraft || movedPrompts.negativePrompt !== negativePromptDraft;
-
-    if (willChangePrompt && options.rememberUndoOnPromptChange !== false) {
-      rememberPromptUndoSnapshot();
-    }
-
-    if (nextPrompt !== promptDraft) {
-      patch.prompt = nextPrompt;
-      setPromptDraft(nextPrompt);
-    }
-
-    if (movedPrompts.negativePrompt !== negativePromptDraft) {
-      patch.negativePrompt = movedPrompts.negativePrompt;
-      setNegativePromptDraft(movedPrompts.negativePrompt);
-      setIsNegativePromptVisible(false);
-    }
-
-    if (!areStringArraysEqual(nextTags, tagDrafts)) {
-      patch.tags = nextTags;
-      setTagDrafts(nextTags);
-    }
-
-    setAnalysisResult(visibleAnalysis);
-    setAnalysisSourceLabel(result.source === "remote" ? "远程 AI" : "本地分析");
-    window.setTimeout(() => saveAnalysisParametersToLexicon(visibleAnalysis), 0);
-
-    if (Object.keys(patch).length > 0) {
-      void onSave(patch);
-    }
-  }
-
-  async function analyzeCurrentPromptParameters() {
-    if (isOptimizingPrompt || isTranslatingPrompt || isReversingImagePrompt || isAnalyzing) {
-      return;
-    }
-
-    setAnalyzingTarget("prompt");
-
-    try {
-      await applyPromptAnalysisToDraft(promptDraft, negativePromptDraft);
-    } finally {
-      setAnalyzingTarget(null);
-    }
-  }
-
   async function optimizeCurrentPrompt() {
     if (isOptimizingPrompt || isTranslatingPrompt || isReversingImagePrompt || isAnalyzing) {
       return;
@@ -1402,9 +1506,6 @@ export function PromptDetailDialog({
       }
 
       setAnalysisResult(null);
-      setAnalysisSourceLabel("");
-      setActiveCapsule(null);
-      setGeneratedCapsuleOptions({});
 
       const splitPrompts = splitNegativePromptFromPrompt(optimizedPromptDraft, negativePromptDraft, {
         title: titleDraft,
@@ -1501,6 +1602,7 @@ export function PromptDetailDialog({
       return;
     }
 
+    promptDraftRef.current = value;
     setPromptDraft(value);
   }
 
@@ -1559,9 +1661,6 @@ export function PromptDetailDialog({
       rememberPromptUndoSnapshot();
       setPromptDraft(nextPrompt);
       setAnalysisResult(null);
-      setAnalysisSourceLabel("");
-      setActiveCapsule(null);
-      setGeneratedCapsuleOptions({});
       void onSave({ prompt: nextPrompt });
     } finally {
       setIsReversingImagePrompt(false);
@@ -1596,170 +1695,6 @@ export function PromptDetailDialog({
     commitVisibleTags(nextTags);
   }
 
-  function openPromptCapsuleMenu(
-    event: ReactMouseEvent<HTMLButtonElement>,
-    capsule: Omit<ActivePromptCapsule, "label" | "menuPosition">,
-  ) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const menuWidth = 352;
-    const menuHeight = 500;
-    const left = Math.max(16, Math.min(rect.left, window.innerWidth - menuWidth - 16));
-    const top = Math.max(16, Math.min(rect.bottom + 8, window.innerHeight - menuHeight - 16));
-
-    setActiveCapsule({
-      ...capsule,
-      label: getPromptCapsuleLabel(capsule.variable, analysisResult),
-      menuPosition: { left, top },
-    });
-  }
-
-  function saveAnalysisParametersToLexicon(analysis: PromptAnalysisResult | null) {
-    if (!analysis) {
-      return;
-    }
-
-    const result = mergePromptAnalysisParametersIntoLexicon(localPromptLexicons, analysis, tagDrafts, {
-      sourcePromptId: item.id,
-      sourcePromptTitle: titleDraft || item.title,
-    });
-
-    if (result.addedCount === 0) {
-      return;
-    }
-
-    setLocalPromptLexicons(result.promptLexicons);
-    void onSavePromptLexicons(result.promptLexicons);
-  }
-
-  function savePromptParameterValuesToLexicon(values: readonly PromptParameterLexiconValue[]) {
-    const result = mergePromptParameterValuesIntoLexicon(localPromptLexicons, values, tagDrafts, {
-      sourcePromptId: item.id,
-      sourcePromptTitle: titleDraft || item.title,
-    });
-
-    if (result.addedCount === 0) {
-      return;
-    }
-
-    setLocalPromptLexicons(result.promptLexicons);
-    void onSavePromptLexicons(result.promptLexicons);
-  }
-
-  function replaceActiveCapsuleValue(nextValue: string) {
-    if (!activeCapsule) {
-      return;
-    }
-
-    const normalizedValue = nextValue.trim();
-
-    if (!normalizedValue) {
-      return;
-    }
-
-    if (activeCapsule.field === "prompt") {
-      const nextPrompt = replacePromptTemplateParameterValue(
-        promptDraft,
-        activeCapsule.parameterIndex,
-        activeCapsule.variable,
-        normalizedValue,
-      );
-      const savedCapsuleAnalysis = buildSavedCapsuleAnalysis(item, nextPrompt, negativePromptDraft, knownCategories);
-
-      if (nextPrompt === promptDraft) {
-        setActiveCapsule(null);
-        return;
-      }
-
-      rememberPromptUndoSnapshot();
-      setPromptDraft(nextPrompt);
-      setAnalysisResult(savedCapsuleAnalysis);
-      setAnalysisSourceLabel(savedCapsuleAnalysis ? "已保存" : "");
-      void onSave({ prompt: nextPrompt });
-    } else {
-      const nextNegativePrompt = replacePromptTemplateParameterValue(
-        negativePromptDraft,
-        activeCapsule.parameterIndex,
-        activeCapsule.variable,
-        normalizedValue,
-      );
-      const savedCapsuleAnalysis = buildSavedCapsuleAnalysis(item, promptDraft, nextNegativePrompt, knownCategories);
-
-      if (nextNegativePrompt === negativePromptDraft) {
-        setActiveCapsule(null);
-        return;
-      }
-
-      rememberPromptUndoSnapshot();
-      setNegativePromptDraft(nextNegativePrompt);
-      setAnalysisResult(savedCapsuleAnalysis);
-      setAnalysisSourceLabel(savedCapsuleAnalysis ? "已保存" : "");
-      void onSave({ negativePrompt: nextNegativePrompt });
-    }
-
-    setGeneratedCapsuleOptions((current) => ({
-      ...current,
-      [normalizeVariableKey(activeCapsule.variable)]: addUniqueValues(
-        current[normalizeVariableKey(activeCapsule.variable)] ?? [],
-        [normalizedValue],
-      ),
-    }));
-    savePromptParameterValuesToLexicon([
-      {
-        label: activeCapsule.label,
-        value: normalizedValue,
-        variable: activeCapsule.variable,
-      },
-    ]);
-    setActiveCapsule(null);
-  }
-
-  async function generateAiCapsuleOptions() {
-    if (!activeCapsule || isGeneratingCapsuleOptions) {
-      return;
-    }
-
-    setIsGeneratingCapsuleOptions(true);
-
-    try {
-      const result = await onAnalyzePrompt({
-        target: "prompt-options",
-        ...toAiActionPayloadSelection("prompt-options"),
-        title: titleDraft,
-        prompt: promptDraft,
-        negativePrompt: negativePromptDraft,
-        tags: tagDrafts,
-        category: savedCategory,
-        knownCategories,
-        optionVariable: activeCapsule.variable,
-        optionLabel: activeCapsule.label,
-        optionValue: activeCapsule.value,
-      });
-      const values = result.analysis.sections
-        .filter((section) => isSameVariable(section.variable, activeCapsule.variable))
-        .flatMap((section) => section.values);
-      const filteredValues = filterPromptOptionValues({
-        variable: activeCapsule.variable,
-        values,
-        currentValue: activeCapsule.value,
-      });
-      const optionKey = normalizeVariableKey(activeCapsule.variable);
-      const nextGeneratedValues = buildGeneratedPromptOptionValues({
-        prompt: promptDraft,
-        optionLabel: activeCapsule.label,
-        optionValue: activeCapsule.value,
-        optionVariable: activeCapsule.variable,
-        values: filteredValues,
-      });
-
-      setGeneratedCapsuleOptions((current) => ({
-        ...current,
-        [optionKey]: addUniqueValues(current[optionKey] ?? [], nextGeneratedValues),
-      }));
-    } finally {
-      setIsGeneratingCapsuleOptions(false);
-    }
-  }
-
   function handleVideoRef(element: HTMLVideoElement | null) {
     videoRef.current = element;
 
@@ -1771,35 +1706,15 @@ export function PromptDetailDialog({
     element.muted = getStoredVideoMuted();
   }
 
-  const activeCapsuleOptions = activeCapsule
-    ? (() => {
-        const lexiconValueScopes = getPromptParameterLexiconValueScopes(
-          localPromptLexicons,
-          activeCapsule.variable,
-          item.id,
-        );
-
-        return collectPromptCapsuleOptionGroups({
-          capsule: activeCapsule,
-          analysis: analysisResult,
-          generatedValues: generatedCapsuleOptions[normalizeVariableKey(activeCapsule.variable)] ?? [],
-          currentPromptLexiconValues: lexiconValueScopes.currentPrompt,
-          globalLexiconValues: lexiconValueScopes.global,
-          otherPromptLexiconValues: lexiconValueScopes.otherPrompts,
-          prompt: promptDraft,
-        });
-      })()
-    : [];
-
   return (
     <AppDialog
-      overlayClassName="z-40 p-3 min-[920px]:p-5"
-      panelClassName="grid max-h-[94vh] w-full max-w-[1840px] min-[980px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] min-[980px]:grid-rows-[minmax(0,94vh)]"
+      overlayClassName="z-40 p-2 min-[720px]:p-3 min-[920px]:p-5"
+      panelClassName="grid max-h-[min(96dvh,100%)] w-full max-w-[min(1840px,100%)] min-[900px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] min-[900px]:grid-rows-[minmax(0,min(94dvh,100%))]"
       onClose={onClose}
     >
         <div
-          className={`relative flex min-h-[360px] min-w-0 flex-col overflow-y-auto bg-panel px-4 py-3 min-[980px]:min-h-[84vh] min-[980px]:border-r min-[980px]:border-border min-[980px]:px-6 ${
-            isCurrentMediaLandscape ? "min-[980px]:justify-center min-[980px]:py-4" : "min-[980px]:py-6"
+          className={`relative flex min-h-[280px] min-w-0 flex-col overflow-y-auto bg-panel px-3 py-3 min-[720px]:px-4 min-[900px]:min-h-[70dvh] min-[900px]:border-r min-[900px]:border-border min-[900px]:px-6 ${
+            isCurrentMediaLandscape ? "min-[900px]:justify-center min-[900px]:py-4" : "min-[900px]:py-6"
           }`}
         >
           <div
@@ -1807,12 +1722,12 @@ export function PromptDetailDialog({
               isCurrentMediaVideo ? "mx-auto gap-4" : "m-auto justify-center gap-4"
             }`}
           >
-            <div className="flex max-h-full w-full items-center justify-center px-1 min-[980px]:px-4" ref={detailImageAreaRef}>
+            <div className="flex max-h-full w-full items-center justify-center px-1 min-[900px]:px-4" ref={detailImageAreaRef}>
               <div
                 className={`relative inline-flex cursor-zoom-in items-center justify-center overflow-hidden ${
                   useFixedDetailImageBox
                     ? ""
-                    : `max-h-[80vh] ${isCurrentMediaLandscape ? "w-full" : "w-fit"} max-w-full min-[980px]:max-w-full`
+                    : `max-h-[80vh] ${isCurrentMediaLandscape ? "w-full" : "w-fit"} max-w-full min-[900px]:max-w-full`
                 }`}
                 style={
                   useFixedDetailImageBox && detailImageBox
@@ -1868,6 +1783,25 @@ export function PromptDetailDialog({
                   </div>
                 )}
               </div>
+              {imageFileSize > largeImageThreshold && !isCurrentMediaVideo ? (
+                <div className="group/warning-badge absolute right-2 top-2 z-10 flex size-3 items-center justify-center rounded-full bg-warning/65">
+                  <AlertCircle size={10} className="text-primary-foreground" />
+                  <div className="pointer-events-none invisible absolute right-0 top-4 z-50 w-44 rounded-lg border border-border bg-tooltip px-3 py-2 text-xs text-tooltip-foreground opacity-0 shadow-elevated transition-all duration-200 group-hover/warning-badge:visible group-hover/warning-badge:opacity-100">
+                    <div className="mb-0.5 font-semibold text-warning">文件体积过大</div>
+                    <div className="leading-relaxed">
+                      当前效果图 {formatFileSize(imageFileSize)}，建议右键"图像压缩"按钮调整参数后压缩，以优化文件大小。
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              {compressFeedback ? (
+                <div className="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-full bg-primary/85 px-3 py-1 text-xs font-medium text-primary-foreground shadow-elevated">
+                  {formatFileSize(compressFeedback.originalSize)} → {formatFileSize(compressFeedback.compressedSize)}
+                  {compressFeedback.originalSize > 0
+                    ? `（节省 ${Math.round((1 - compressFeedback.compressedSize / compressFeedback.originalSize) * 100)}%）`
+                    : ""}
+                </div>
+              ) : null}
             </div>
 
             {isCurrentMediaVideo ? (
@@ -1897,9 +1831,9 @@ export function PromptDetailDialog({
             className={`group/image-actions z-20 flex min-h-10 shrink-0 items-end ${
               isCurrentMediaVideo
                 ? isCurrentMediaLandscape
-                  ? "absolute inset-x-4 bottom-4 min-[980px]:inset-x-6"
+                  ? "absolute inset-x-4 bottom-4 min-[900px]:inset-x-6"
                   : "relative mt-1 w-full"
-                : "absolute inset-x-4 bottom-6 min-h-24 min-[980px]:inset-x-6"
+                : "absolute inset-x-4 bottom-6 min-h-24 min-[900px]:inset-x-6"
             }`}
           >
             <div
@@ -1928,6 +1862,17 @@ export function PromptDetailDialog({
                   />
                 ) : null}
                 <IconTooltipButton
+                  ariaLabel={isCurrentMediaVideo ? "视频不支持传送到画布" : "传送到画布"}
+                  disabled={isBusy || !item.imageFileName || isCurrentMediaVideo}
+                  icon={<Send size={14} />}
+                  label={isCurrentMediaVideo ? "视频不支持传送到画布" : "传送到画布"}
+                  size="md"
+                  tooltipAlign="center"
+                  tooltipPlacement="below"
+                  variant="subtle"
+                  onClick={() => onPushToCanvas(promptDraft, negativePromptDraft)}
+                />
+                <IconTooltipButton
                   ariaLabel={isCurrentMediaVideo ? "视频不支持复制到剪贴板" : "复制图片到剪贴板"}
                   disabled={isBusy || !item.imageFileName || isCurrentMediaVideo}
                   icon={<Copy size={14} />}
@@ -1949,6 +1894,101 @@ export function PromptDetailDialog({
                   variant="subtle"
                   onClick={onExportImage}
                 />
+                <div className="relative" ref={compressSettingsRef}>
+                  <IconTooltipButton
+                    ariaLabel={isCurrentMediaVideo ? "视频不支持压缩" : "图像压缩（右键设置参数）"}
+                    disabled={isBusy || !item.imageFileName || isCurrentMediaVideo || isCompressingImage}
+                    icon={isCompressingImage ? <Loader2 size={14} className="animate-spin" /> : <Minimize2 size={14} />}
+                    label={isCompressingImage ? "压缩中…" : isCurrentMediaVideo ? "视频不支持压缩" : "图像压缩"}
+                    size="md"
+                    tooltipAlign="center"
+                    tooltipPlacement="below"
+                    variant="subtle"
+                    onClick={handleCompressCurrentImage}
+                    onContextMenu={(event) => {
+                      if (isCurrentMediaVideo || isCompressingImage) return;
+                      event.preventDefault();
+                      setCompressSettingsOpen((prev) => !prev);
+                    }}
+                  />
+                  {compressSettingsOpen ? (
+                    <div className="absolute bottom-full left-0 z-50 mb-2 w-56 rounded-xl border border-border bg-panel p-3 shadow-elevated">
+                      <div className="mb-2 text-xs font-semibold text-foreground">压缩参数</div>
+                      <div className="mb-3">
+                        <div className="mb-1 flex items-center justify-between text-xs text-muted">
+                          <span>压缩质量</span>
+                          <span className="font-medium text-foreground">{compressQuality}</span>
+                        </div>
+                        <input
+                          className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-border"
+                          max={100}
+                          min={10}
+                          type="range"
+                          value={compressQuality}
+                          onChange={(e) => setCompressQuality(Number(e.target.value))}
+                        />
+                      </div>
+                      <div className="mb-3">
+                        <div className="mb-1 text-xs text-muted">输出格式</div>
+                        <div className="flex gap-2">
+                          <button
+                            className={`flex-1 rounded-lg border px-2 py-1 text-xs transition-colors ${
+                              compressFormat === "keep"
+                                ? "border-primary bg-primary text-primary-foreground"
+                                : "border-border bg-panel text-muted hover:bg-primary-soft"
+                            }`}
+                            type="button"
+                            onClick={() => setCompressFormat("keep")}
+                          >
+                            保持原格式
+                          </button>
+                          <button
+                            className={`flex-1 rounded-lg border px-2 py-1 text-xs transition-colors ${
+                              compressFormat === "webp"
+                                ? "border-primary bg-primary text-primary-foreground"
+                                : "border-border bg-panel text-muted hover:bg-primary-soft"
+                            }`}
+                            type="button"
+                            onClick={() => setCompressFormat("webp")}
+                          >
+                            WebP
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mb-3">
+                        <div className="mb-1 text-xs text-muted">尺寸限制</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            { label: "不限", value: 0 },
+                            { label: "4096px", value: 4096 },
+                            { label: "2048px", value: 2048 },
+                            { label: "1024px", value: 1024 },
+                          ].map((opt) => (
+                            <button
+                              key={opt.value}
+                              className={`rounded-lg border px-2 py-1 text-xs transition-colors ${
+                                compressMaxSide === opt.value
+                                  ? "border-primary bg-primary text-primary-foreground"
+                                  : "border-border bg-panel text-muted hover:bg-primary-soft"
+                              }`}
+                              type="button"
+                              onClick={() => setCompressMaxSide(opt.value)}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <button
+                        className="w-full rounded-lg border border-primary bg-primary py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary-strong"
+                        type="button"
+                        onClick={handleCompressCurrentImage}
+                      >
+                        开始压缩
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               </div>
 
               <div className="relative flex min-w-0 flex-wrap items-center justify-end gap-2" ref={deleteActionRef}>
@@ -2047,7 +2087,7 @@ export function PromptDetailDialog({
           </div>
         </div>
 
-        <aside className="flex min-h-0 min-w-0 flex-col bg-panel px-5 py-4 min-[980px]:max-h-[94vh] min-[980px]:px-7 min-[980px]:py-5">
+        <aside className="flex min-h-0 min-w-0 flex-col bg-panel px-4 py-3 min-[720px]:px-5 min-[720px]:py-4 min-[900px]:max-h-[min(94dvh,100%)] min-[900px]:px-7 min-[900px]:py-5">
           <header
             className={`group/detail-card relative shrink-0 overflow-hidden rounded-xl border bg-panel shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-image focus-within:-translate-y-1 focus-within:shadow-image ${detailInfoCardTone.article}`}
           >
@@ -2132,10 +2172,12 @@ export function PromptDetailDialog({
             </div>
 
             {moduleNoticeText ? (
-              <div className="mt-3 flex items-center gap-2 rounded-md border border-warning/30 bg-warning-soft px-3 py-2 text-xs text-foreground">
-                <AlertCircle size={14} className="shrink-0 text-warning" />
-                <span>{moduleNoticeText}</span>
-              </div>
+              <VideoRuntimeInstallBanner
+                className="mt-3"
+                message={moduleNoticeText}
+                showIcon
+                onInstalled={() => setModuleNoticeText("")}
+              />
             ) : null}
 
             {!isPromptEditing ? (
@@ -2148,7 +2190,10 @@ export function PromptDetailDialog({
                       disabled={isAnalyzing || isBusy}
                       icon={<Sparkles size={14} />}
                       label={
-                        analyzingTarget === getRecognitionAction("category", recognitionSourceByKind.category)
+                        analyzingTarget === getRecognitionAction(
+                          "category",
+                          resolveEffectiveRecognitionSource(recognitionSourceByKind.category),
+                        )
                           ? "识别中"
                           : "识别分类"
                       }
@@ -2159,7 +2204,10 @@ export function PromptDetailDialog({
                       onContextMenu={(event) =>
                         openAiProfileMenu(
                           event,
-                          getRecognitionAction("category", recognitionSourceByKind.category),
+                          getRecognitionAction(
+                            "category",
+                            resolveEffectiveRecognitionSource(recognitionSourceByKind.category),
+                          ),
                           "category",
                         )
                       }
@@ -2228,7 +2276,10 @@ export function PromptDetailDialog({
                       disabled={isAnalyzing || isBusy}
                       icon={<Sparkles size={14} />}
                       label={
-                        analyzingTarget === getRecognitionAction("tags", recognitionSourceByKind.tags)
+                        analyzingTarget === getRecognitionAction(
+                          "tags",
+                          resolveEffectiveRecognitionSource(recognitionSourceByKind.tags),
+                        )
                           ? "识别中"
                           : "识别标签"
                       }
@@ -2237,7 +2288,11 @@ export function PromptDetailDialog({
                       tooltipPlacement="below"
                       variant="panel"
                       onContextMenu={(event) =>
-                        openAiProfileMenu(event, getRecognitionAction("tags", recognitionSourceByKind.tags), "tags")
+                        openAiProfileMenu(
+                          event,
+                          getRecognitionAction("tags", resolveEffectiveRecognitionSource(recognitionSourceByKind.tags)),
+                          "tags",
+                        )
                       }
                       onClick={() => void recognizeTags()}
                     />
@@ -2379,19 +2434,6 @@ export function PromptDetailDialog({
                 />
                 <IconTooltipButton
                   data-ai-profile-trigger="true"
-                  ariaLabel={analyzingTarget === "prompt" ? "生成胶囊中" : "参数分析"}
-                  disabled={isViewingTranslatedPrompt || isAnalyzing || isOptimizingPrompt || isTranslatingPrompt || isReversingImagePrompt || isBusy}
-                  icon={<Sparkles size={14} />}
-                  label={analyzingTarget === "prompt" ? "生成胶囊中" : "参数分析"}
-                  size="sm"
-                  tooltipAlign="center"
-                  tooltipPlacement="below"
-                  variant="panel"
-                  onContextMenu={(event) => openAiProfileMenu(event, "prompt")}
-                  onClick={() => void analyzeCurrentPromptParameters()}
-                />
-                <IconTooltipButton
-                  data-ai-profile-trigger="true"
                   ariaLabel={isReversingImagePrompt ? "反推中" : "图像反推"}
                   disabled={isViewingTranslatedPrompt || isAnalyzing || isOptimizingPrompt || isTranslatingPrompt || isReversingImagePrompt || isBusy}
                   icon={<ScanSearch size={14} />}
@@ -2493,7 +2535,6 @@ export function PromptDetailDialog({
                   isNegativePromptVisible={isNegativePromptVisible}
                   negativePrompt={activeNegativePromptDraft}
                   onDoubleClick={startPromptEditing}
-                  onOpenCapsule={isViewingTranslatedPrompt ? undefined : openPromptCapsuleMenu}
                   prompt={activePromptDraft}
                   onToggleNegativePrompt={() => setIsNegativePromptVisible((current) => !current)}
                 />
@@ -2520,18 +2561,23 @@ export function PromptDetailDialog({
             {analysisResult ? (
               <PromptAnalysisSummary
                 analysis={analysisResult}
-                sourceLabel={analysisSourceLabel}
               />
             ) : null}
           </section>
 
-          <footer className="mt-4 grid shrink-0 grid-cols-[0.42fr_0.58fr] gap-3 bg-panel pt-3">
+          <footer className="mt-4 grid shrink-0 grid-cols-3 gap-3 bg-panel pt-3">
             <Button
               className="h-12 rounded-md bg-panel"
               icon={<Share2 size={17} />}
-              onClick={() => onShareText(shareText)}
+              onClick={() => {
+                if (imageCount > 1 && onShareGroup) {
+                  onShareGroup();
+                  return;
+                }
+                onShareText?.(shareText);
+              }}
             >
-              分享
+              {imageCount > 1 && onShareGroup ? "分享本组" : "分享"}
             </Button>
             <Button
               className="h-12 rounded-md border-progress bg-progress text-primary-foreground hover:bg-progress/90"
@@ -2541,36 +2587,28 @@ export function PromptDetailDialog({
             >
               复制提示词
             </Button>
+            <Button
+              className="h-12 rounded-md"
+              icon={<Send size={17} />}
+              onClick={() => onPushPromptToCanvas(promptDraft, negativePromptDraft)}
+            >
+              传送到画布
+            </Button>
           </footer>
         </aside>
 
-        {activeCapsule ? (
-          <PromptCapsuleMenu
-            activeValue={activeCapsule.value}
-            isGenerating={isGeneratingCapsuleOptions}
-            label={activeCapsule.label}
-            menuRef={capsuleMenuRef}
-            optionGroups={activeCapsuleOptions}
-            position={activeCapsule.menuPosition}
-            variable={activeCapsule.variable}
-            onAddCustom={replaceActiveCapsuleValue}
-            onClose={() => setActiveCapsule(null)}
-            onGenerateAiOptions={() => void generateAiCapsuleOptions()}
-            onOpenAiProfileMenu={(event) => openAiProfileMenu(event, "prompt-options")}
-            onSelect={replaceActiveCapsuleValue}
-          />
-        ) : null}
         {activeAiProfileMenu ? (
           <AiProfileQuickSwitchMenu
             actionLabel={getAiProfileActionLabel(activeAiProfileMenu.action)}
             activeProfileId={aiSettings.activeProfileId}
             capability={getAiProfileActionCapability(activeAiProfileMenu.action)}
+            allowImageSource={!isCurrentMediaVideoFile}
             menuRef={aiProfileMenuRef}
             position={activeAiProfileMenu.position}
             profiles={aiSettings.profiles}
             recognitionSource={
               activeAiProfileMenu.recognitionKind
-                ? recognitionSourceByKind[activeAiProfileMenu.recognitionKind]
+                ? resolveEffectiveRecognitionSource(recognitionSourceByKind[activeAiProfileMenu.recognitionKind])
                 : undefined
             }
             ruleSelection={resolveAiRuleSelection(activeAiProfileMenu.action)}
@@ -2604,7 +2642,6 @@ export function PromptDetailDialog({
 
 type PromptAnalysisSummaryProps = {
   analysis: PromptAnalysisResult;
-  sourceLabel: string;
 };
 
 type PromptTypeSwitchProps = {
@@ -2682,21 +2719,21 @@ function PromptTypeSwitch({ value, onChange }: PromptTypeSwitchProps) {
 
 function PromptAnalysisSummary({
   analysis,
-  sourceLabel,
 }: PromptAnalysisSummaryProps) {
   return (
     <div className="border-t border-border px-4 py-3">
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-        <span className="font-medium text-foreground">已生成莫兰迪胶囊</span>
-        {sourceLabel ? (
+        <span className="font-medium text-foreground">AI \u5206\u6790\u7ED3\u679C</span>
+        {analysis.suggestedTags.length > 0 ? (
           <span className="rounded-full border border-border bg-panel px-2 py-0.5 text-[11px] text-muted">
-            {sourceLabel}
+            {analysis.suggestedTags.length} \u4E2A\u5EFA\u8BAE\u6807\u7B7E
           </span>
         ) : null}
-        <span className="rounded-full border border-border bg-panel px-2 py-0.5 text-[11px] text-muted">
-          {analysis.chips.length} 个可替换胶囊
-        </span>
-        <span>点击胶囊可替换词条。</span>
+        {analysis.suggestedCategories.length > 0 ? (
+          <span className="rounded-full border border-border bg-panel px-2 py-0.5 text-[11px] text-muted">
+            {analysis.suggestedCategories.length} \u4E2A\u5EFA\u8BAE\u5206\u7C7B
+          </span>
+        ) : null}
       </div>
     </div>
   );
@@ -2705,7 +2742,8 @@ function PromptAnalysisSummary({
 type AiProfileQuickSwitchMenuProps = {
   actionLabel: string;
   activeProfileId: string;
-  capability: "text" | "vision";
+  allowImageSource?: boolean;
+  capability: AiProviderModelCapability;
   menuRef: RefObject<HTMLDivElement | null>;
   position: { left: number; top: number };
   profiles: PublicAiProviderProfile[];
@@ -2723,6 +2761,7 @@ type AiProfileQuickSwitchMenuProps = {
 function AiProfileQuickSwitchMenu({
   actionLabel,
   activeProfileId,
+  allowImageSource = true,
   capability,
   menuRef,
   position,
@@ -2819,16 +2858,21 @@ function AiProfileQuickSwitchMenu({
           <div className="grid gap-1 pt-1.5">
             {(["image", "prompt"] as const).map((source) => {
               const selected = recognitionSource === source;
+              const disabled = source === "image" && !allowImageSource;
 
               return (
                 <button
                   aria-pressed={selected}
+                  disabled={disabled}
                   className={`grid min-h-10 grid-cols-[18px_minmax(0,1fr)] items-center gap-1.5 rounded-xl px-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/25 ${
                     selected ? "bg-primary-soft text-foreground" : "text-muted hover:bg-background hover:text-foreground"
-                  }`}
+                  } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
                   key={source}
                   type="button"
                   onClick={() => {
+                    if (disabled) {
+                      return;
+                    }
                     onSelectSource(source);
                     setActiveBranch("model");
                   }}
@@ -2843,7 +2887,7 @@ function AiProfileQuickSwitchMenu({
                   <span className="min-w-0">
                     <span className="block truncate text-sm font-medium">{getAiRecognitionSourceLabel(source)}</span>
                     <span className="block truncate text-[11px] text-muted">
-                      {source === "image" ? "图像模型与规则" : "文本模型与规则"}
+                      {disabled ? "视频仅支持文本分析" : source === "image" ? "图像模型与规则" : "文本模型与规则"}
                     </span>
                   </span>
                 </button>
@@ -3061,10 +3105,6 @@ type PromptTemplatePreviewProps = {
   isNegativePromptVisible: boolean;
   negativePrompt: string;
   onDoubleClick: () => void;
-  onOpenCapsule?: (
-    event: ReactMouseEvent<HTMLButtonElement>,
-    capsule: Omit<ActivePromptCapsule, "label" | "menuPosition">,
-  ) => void;
   onToggleNegativePrompt: () => void;
   prompt: string;
 };
@@ -3073,7 +3113,6 @@ function PromptTemplatePreview({
   isNegativePromptVisible,
   negativePrompt,
   onDoubleClick,
-  onOpenCapsule,
   onToggleNegativePrompt,
   prompt,
 }: PromptTemplatePreviewProps) {
@@ -3090,7 +3129,7 @@ function PromptTemplatePreview({
       title="双击编辑提示词"
       onDoubleClick={onDoubleClick}
     >
-      {hasPrompt ? <PromptTemplateSegments field="prompt" text={prompt} onOpenCapsule={onOpenCapsule} /> : null}
+      {hasPrompt ? <PromptTemplateSegments text={prompt} /> : null}
       {hasNegativePrompt ? (
         <div className={hasPrompt ? "mt-4" : ""}>
           <button
@@ -3107,7 +3146,7 @@ function PromptTemplatePreview({
           {isNegativePromptVisible ? (
             <div className="mt-3 rounded-md border border-border bg-panel px-3 py-3">
               <span className="font-sans text-xs font-medium text-muted">负向提示词：</span>
-              <PromptTemplateSegments field="negativePrompt" text={negativePrompt} onOpenCapsule={onOpenCapsule} />
+              <PromptTemplateSegments text={negativePrompt} />
             </div>
           ) : null}
         </div>
@@ -3117,19 +3156,10 @@ function PromptTemplatePreview({
 }
 
 function PromptTemplateSegments({
-  field,
   text,
-  onOpenCapsule,
 }: {
-  field: PromptCapsuleField;
   text: string;
-  onOpenCapsule?: (
-    event: ReactMouseEvent<HTMLButtonElement>,
-    capsule: Omit<ActivePromptCapsule, "label" | "menuPosition">,
-  ) => void;
 }) {
-  let parameterIndex = -1;
-
   return (
     <>
       {parsePromptTemplateSegments(text).map((segment, index) => {
@@ -3137,8 +3167,6 @@ function PromptTemplateSegments({
           return <span key={`${segment.text}-${index}`}>{segment.text}</span>;
         }
 
-        parameterIndex += 1;
-        const currentParameterIndex = parameterIndex;
         const sectionKey = resolvePromptSectionKeyForValue(segment.variable, segment.value);
 
         if (!sectionKey) {
@@ -3154,56 +3182,19 @@ function PromptTemplateSegments({
 
         const toneClassName = getPromptCapsuleToneClassName(capsuleVariable);
 
-        if (!onOpenCapsule) {
-          return <span key={`${segment.source}-${index}`}>{resolvePromptTemplateText(segment.source)}</span>;
-        }
-
         return (
-          <button
-            className={`mx-0.5 inline-flex max-w-full translate-y-[1px] items-center rounded-full border px-2 py-0.5 font-sans text-[11px] font-semibold leading-5 shadow-elevated transition-colors hover:bg-panel focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 ${toneClassName}`}
-            data-prompt-capsule="true"
+          <span
+            className={`mx-0.5 inline-flex max-w-full translate-y-[1px] items-center rounded-full border px-2 py-0.5 font-sans text-[11px] font-semibold leading-5 shadow-elevated ${toneClassName}`}
             key={`${segment.source}-${index}`}
             title={`参数 ${capsuleVariable}：${capsuleValue}`}
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpenCapsule(event, {
-                field,
-                parameterIndex: currentParameterIndex,
-                value: capsuleValue,
-                variable: capsuleVariable,
-              });
-            }}
-            onDoubleClick={(event) => event.stopPropagation()}
           >
             <span className="max-w-56 truncate">{capsuleValue}</span>
-          </button>
+          </span>
         );
       })}
     </>
   );
 }
-
-type PromptCapsuleMenuProps = {
-  activeValue: string;
-  isGenerating: boolean;
-  label: string;
-  menuRef: RefObject<HTMLDivElement | null>;
-  optionGroups: PromptCapsuleOptionGroup[];
-  position: { left: number; top: number };
-  variable: string;
-  onAddCustom: (value: string) => void;
-  onClose: () => void;
-  onGenerateAiOptions: () => void;
-  onOpenAiProfileMenu: (event: ReactMouseEvent<HTMLButtonElement>) => void;
-  onSelect: (value: string) => void;
-};
-
-type PromptCapsuleOptionGroup = {
-  id: "current" | "sourceLexicon" | "lexicon" | "otherLexicon" | "ai" | "common" | "recent";
-  label: string;
-  options: string[];
-};
 
 type ModelSwitchMenuProps = {
   activeModel: string | null;
@@ -3449,164 +3440,6 @@ function ModelSwitchMenu({
         </button>
       </div>
     </div>
-  );
-}
-
-function PromptCapsuleMenu({
-  activeValue,
-  isGenerating,
-  label,
-  menuRef,
-  optionGroups,
-  position,
-  variable,
-  onAddCustom,
-  onClose,
-  onGenerateAiOptions,
-  onOpenAiProfileMenu,
-  onSelect,
-}: PromptCapsuleMenuProps) {
-  const [customValue, setCustomValue] = useState("");
-  const visibleGroups = optionGroups.filter((group) => group.options.length > 0);
-
-  function commitCustomValue() {
-    const nextValue = customValue.trim();
-
-    if (!nextValue) {
-      return;
-    }
-
-    onAddCustom(nextValue);
-    setCustomValue("");
-  }
-
-  return (
-    <div
-      className="fixed z-50 w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-border bg-panel shadow-image"
-      ref={menuRef}
-      style={{ left: position.left, top: position.top }}
-    >
-      <div className="flex items-start justify-between gap-3 bg-panel px-4 pb-3 pt-3.5">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h3 className="truncate text-base font-semibold leading-6 text-foreground">{label}</h3>
-            <span className="rounded-full border border-border bg-background px-2 py-0.5 font-mono text-[10px] text-muted">
-              {variable}
-            </span>
-          </div>
-          <p className="mt-0.5 line-clamp-1 text-xs text-muted">当前：{activeValue}</p>
-        </div>
-        <button
-          aria-label="关闭词条选择"
-          className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted outline-none transition-colors hover:bg-primary-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/25"
-          type="button"
-          onClick={onClose}
-        >
-          <X size={14} />
-        </button>
-      </div>
-
-      <div className="bg-panel px-4 pb-3">
-        <button
-          data-ai-profile-trigger="true"
-          className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-full border border-transparent bg-[linear-gradient(135deg,var(--color-primary),var(--color-primary-strong))] px-4 text-sm font-semibold text-primary-foreground shadow-elevated outline-none transition-all hover:-translate-y-0.5 hover:shadow-image focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
-          disabled={isGenerating}
-          type="button"
-          onContextMenu={onOpenAiProfileMenu}
-          onClick={onGenerateAiOptions}
-        >
-          <Sparkles size={16} />
-          {isGenerating ? "生成中" : "AI词条"}
-        </button>
-      </div>
-
-      <div className="max-h-[19rem] overflow-y-auto border-y border-border bg-background px-3 py-3">
-        {visibleGroups.length > 0 ? (
-          <div className="grid gap-2.5">
-            {visibleGroups.map((group) => (
-              <div className="grid gap-1.5" key={group.id}>
-                <div className="flex items-center justify-between px-1 text-[11px] font-semibold leading-4 text-muted">
-                  <span>{group.label}</span>
-                  <span>{group.options.length}</span>
-                </div>
-                <div className="grid gap-1.5 rounded-xl border border-border bg-panel p-1.5">
-                  {group.options.map((option) => {
-                    const selected = isSameLabel(option, activeValue);
-
-                    return (
-                      <PromptCapsuleOptionButton
-                        groupId={group.id}
-                        key={`${group.id}-${option}`}
-                        option={option}
-                        selected={selected}
-                        onSelect={onSelect}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="rounded-xl border border-border bg-panel px-4 py-7 text-center text-xs text-muted">
-            还没有可切换词条
-          </p>
-        )}
-      </div>
-
-      <div className="grid gap-2.5 bg-panel px-4 py-3.5">
-        <div className="grid grid-cols-[minmax(0,1fr)_44px] gap-2">
-          <input
-            aria-label="自定义词条"
-            className="h-10 min-w-0 rounded-xl border border-border bg-background px-4 text-sm text-foreground outline-none transition-colors placeholder:text-muted focus:border-primary focus:ring-2 focus:ring-primary/20"
-            placeholder="添加自定义选项"
-            value={customValue}
-            onChange={(event) => setCustomValue(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                commitCustomValue();
-              }
-            }}
-          />
-          <button
-            aria-label="保存自定义词条"
-            className="flex h-10 items-center justify-center rounded-xl border border-border bg-background text-muted outline-none transition-all hover:-translate-y-0.5 hover:bg-primary-soft hover:text-foreground hover:shadow-elevated focus-visible:ring-2 focus-visible:ring-primary/25"
-            type="button"
-            onClick={commitCustomValue}
-          >
-            <Plus size={17} />
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PromptCapsuleOptionButton({
-  groupId,
-  option,
-  selected,
-  onSelect,
-}: {
-  groupId: PromptCapsuleOptionGroup["id"];
-  option: string;
-  selected: boolean;
-  onSelect: (value: string) => void;
-}) {
-  const toneClassName = getPromptCapsuleOptionToneClassName(groupId, selected);
-
-  return (
-    <button
-      className={`relative flex min-h-10 w-full items-center justify-between gap-3 rounded-lg border py-2 pl-4 pr-3 text-left text-sm leading-5 shadow-none outline-none transition-all hover:-translate-y-0.5 hover:shadow-elevated focus-visible:ring-2 focus-visible:ring-primary/25 ${toneClassName}`}
-      title={option}
-      type="button"
-      onClick={() => onSelect(option)}
-    >
-      <span className="absolute left-0 top-2 bottom-2 w-1 rounded-r-full bg-current opacity-70" aria-hidden="true" />
-      <span className="min-w-0 truncate">{option}</span>
-      {selected ? <Check className="shrink-0 text-primary" size={15} /> : null}
-    </button>
   );
 }
 
@@ -3866,7 +3699,7 @@ function ImageNavButton({ ariaLabel, direction, onClick }: ImageNavButtonProps) 
   return (
     <div
       className={`group/nav absolute top-0 z-20 flex h-full w-24 items-center ${
-        direction === "left" ? "left-0 justify-start pl-3 min-[980px]:pl-5" : "right-0 justify-end pr-3 min-[980px]:pr-5"
+        direction === "left" ? "left-0 justify-start pl-3 min-[900px]:pl-5" : "right-0 justify-end pr-3 min-[900px]:pr-5"
       }`}
     >
       <button
@@ -3916,225 +3749,35 @@ function buildSavedCapsuleAnalysis(
   return promptAnalysis ? omitNegativeAnalysisSections(promptAnalysis) : null;
 }
 
-function replacePromptTemplateParameterValue(
-  text: string,
-  targetParameterIndex: number,
-  fallbackVariable: string,
-  nextValue: string,
-): string {
-  let parameterIndex = -1;
-
-  return parsePromptTemplateSegments(text)
-    .map((segment) => {
-      if (segment.type !== "parameter") {
-        return segment.text;
-      }
-
-      parameterIndex += 1;
-
-      if (parameterIndex !== targetParameterIndex) {
-        return segment.source;
-      }
-
-      const variable = fallbackVariable.trim() || segment.variable.trim();
-
-      return `{{${variable}: ${nextValue}}}`;
-    })
-    .join("");
-}
-
-function collectPromptCapsuleOptionGroups({
-  capsule,
-  analysis,
-  generatedValues,
-  currentPromptLexiconValues,
-  globalLexiconValues,
-  otherPromptLexiconValues,
-  prompt,
-}: {
-  capsule: ActivePromptCapsule;
-  analysis: PromptAnalysisResult | null;
-  generatedValues: string[];
-  currentPromptLexiconValues: string[];
-  globalLexiconValues: string[];
-  otherPromptLexiconValues: string[];
-  prompt: string;
-}): PromptCapsuleOptionGroup[] {
-  const usedValues: string[] = [];
-  const takeValues = (values: readonly string[], limit: number) => {
-    const filteredValues = filterPromptOptionValues({
-      variable: capsule.variable,
-      values,
-      currentValue: capsule.value,
-    });
-    const takenValues: string[] = [];
-
-    for (const value of filteredValues) {
-      if (usedValues.some((usedValue) => isSameLabel(usedValue, value))) {
-        continue;
-      }
-
-      usedValues.push(value);
-      takenValues.push(value);
-
-      if (takenValues.length >= limit) {
-        break;
-      }
-    }
-
-    return takenValues;
-  };
-  const localOptions = buildPromptOptionAnalysis({
-    prompt,
-    optionLabel: capsule.label,
-    optionValue: capsule.value,
-    optionVariable: capsule.variable,
-  }).sections.flatMap((section) => (isSameVariable(section.variable, capsule.variable) ? section.values : []));
-  const analysisOptions = analysis
-    ? analysis.sections.flatMap((section) => (isSameVariable(section.variable, capsule.variable) ? section.values : []))
-    : [];
-
-  return [
-    { id: "current", label: "当前使用", options: takeValues([capsule.value], 1) },
-    { id: "ai", label: "AI 扩写", options: takeValues(generatedValues, 5) },
-    { id: "sourceLexicon", label: "当前提示词词库", options: takeValues(currentPromptLexiconValues, 10) },
-    { id: "lexicon", label: "通用参数词库", options: takeValues(globalLexiconValues, 8) },
-    { id: "otherLexicon", label: "其它提示词同类参数", options: takeValues(otherPromptLexiconValues, 12) },
-    { id: "common", label: "常用词条", options: takeValues(localOptions, 8) },
-    { id: "recent", label: "最近使用", options: takeValues(analysisOptions, 6) },
-  ];
-}
-
-function getPromptCapsuleLabel(variable: string, analysis: PromptAnalysisResult | null): string {
-  const analysisLabel = analysis?.sections.find((section) => isSameVariable(section.variable, variable))?.label;
-
-  return analysisLabel ?? getFallbackCapsuleLabel(variable);
-}
-
-function getFallbackCapsuleLabel(variable: string): string {
-  const normalizedVariable = normalizeVariableKey(variable);
-  const sectionMeta = Object.values(promptSectionMeta).find(
-    (meta) => normalizeVariableKey(meta.variable) === normalizedVariable || normalizeVariableKey(meta.key) === normalizedVariable,
-  );
-
-  if (sectionMeta) {
-    return sectionMeta.label;
-  }
-
-  const labels: Record<string, string> = {
-    avoid: "避免内容",
-    aspectratio: "画面比例",
-    atmosphere: "氛围",
-    brand: "知名品牌",
-    cameraangle: "拍摄角度",
-    clothing: "服装细节",
-    color: "颜色",
-    colordetail: "色彩细节",
-    composition: "构图逻辑",
-    depthoffield: "景深区分",
-    details: "补充信息",
-    facemakeup: "面部妆容",
-    famousperson: "著名人物",
-    hairaccessory: "发型头饰",
-    handgesture: "手部手势",
-    handprop: "手上道具",
-    imagestyle: "图像风格",
-    lightreceiving: "受光情况",
-    lightshadow: "光影",
-    pose: "动作姿态",
-    shotsize: "景别",
-    textcontent: "文本内容",
-    typography: "字体",
-  };
-
-  return labels[normalizedVariable] ?? "提示词参数";
-}
+const PROMPT_CAPSULE_TONE_BY_VARIABLE: Record<string, CapsuleTone> = {
+  aspectratio: "clay",
+  atmosphere: "sand",
+  avoid: "stone",
+  brand: "stone",
+  cameraangle: "lavender",
+  clothing: "sage",
+  color: "rose",
+  colordetail: "rose",
+  composition: "stone",
+  depthoffield: "fog",
+  details: "stone",
+  facemakeup: "rose",
+  famousperson: "lavender",
+  hairaccessory: "sand",
+  handgesture: "clay",
+  handprop: "lavender",
+  imagestyle: "sage",
+  lightreceiving: "stone",
+  lightshadow: "fog",
+  pose: "mist",
+  shotsize: "mist",
+  textcontent: "clay",
+  typography: "mist",
+};
 
 function getPromptCapsuleToneClassName(variable: string): string {
-  const toneByVariable: Record<string, string> = {
-    aspectratio: "border-capsule-clay-border bg-capsule-clay text-capsule-clay-foreground",
-    atmosphere: "border-capsule-sand-border bg-capsule-sand text-capsule-sand-foreground",
-    avoid: "border-capsule-stone-border bg-capsule-stone text-capsule-stone-foreground",
-    brand: "border-capsule-stone-border bg-capsule-stone text-capsule-stone-foreground",
-    cameraangle: "border-capsule-lavender-border bg-capsule-lavender text-capsule-lavender-foreground",
-    clothing: "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground",
-    color: "border-capsule-rose-border bg-capsule-rose text-capsule-rose-foreground",
-    colordetail: "border-capsule-rose-border bg-capsule-rose text-capsule-rose-foreground",
-    composition: "border-capsule-stone-border bg-capsule-stone text-capsule-stone-foreground",
-    depthoffield: "border-capsule-fog-border bg-capsule-fog text-capsule-fog-foreground",
-    details: "border-capsule-stone-border bg-capsule-stone text-capsule-stone-foreground",
-    facemakeup: "border-capsule-rose-border bg-capsule-rose text-capsule-rose-foreground",
-    famousperson: "border-capsule-lavender-border bg-capsule-lavender text-capsule-lavender-foreground",
-    hairaccessory: "border-capsule-sand-border bg-capsule-sand text-capsule-sand-foreground",
-    handgesture: "border-capsule-clay-border bg-capsule-clay text-capsule-clay-foreground",
-    handprop: "border-capsule-lavender-border bg-capsule-lavender text-capsule-lavender-foreground",
-    imagestyle: "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground",
-    lightreceiving: "border-capsule-stone-border bg-capsule-stone text-capsule-stone-foreground",
-    lightshadow: "border-capsule-fog-border bg-capsule-fog text-capsule-fog-foreground",
-    pose: "border-capsule-mist-border bg-capsule-mist text-capsule-mist-foreground",
-    shotsize: "border-capsule-mist-border bg-capsule-mist text-capsule-mist-foreground",
-    textcontent: "border-capsule-clay-border bg-capsule-clay text-capsule-clay-foreground",
-    typography: "border-capsule-mist-border bg-capsule-mist text-capsule-mist-foreground",
-  };
-
-  return toneByVariable[normalizeVariableKey(variable)] ?? toneByVariable.details;
-}
-
-function getPromptCapsuleOptionToneClassName(groupId: PromptCapsuleOptionGroup["id"], selected: boolean): string {
-  const baseToneByGroup: Record<PromptCapsuleOptionGroup["id"], string> = {
-    current:
-      "border-primary/20 bg-primary-soft text-foreground [&>span:first-child]:bg-primary",
-    sourceLexicon:
-      "border-capsule-mist-border bg-capsule-mist/85 text-capsule-mist-foreground [&>span:first-child]:bg-capsule-mist-foreground",
-    lexicon:
-      "border-capsule-stone-border bg-capsule-stone/75 text-capsule-stone-foreground [&>span:first-child]:bg-capsule-stone-foreground",
-    otherLexicon:
-      "border-capsule-fog-border bg-capsule-fog/75 text-capsule-fog-foreground [&>span:first-child]:bg-capsule-fog-foreground",
-    ai:
-      "border-capsule-lavender-border bg-capsule-lavender/80 text-capsule-lavender-foreground [&>span:first-child]:bg-capsule-lavender-foreground",
-    common:
-      "border-capsule-sage-border bg-capsule-sage/70 text-capsule-sage-foreground [&>span:first-child]:bg-capsule-sage-foreground",
-    recent:
-      "border-capsule-sand-border bg-capsule-sand/75 text-capsule-sand-foreground [&>span:first-child]:bg-capsule-sand-foreground",
-  };
-  const selectedToneByGroup: Record<PromptCapsuleOptionGroup["id"], string> = {
-    current:
-      "border-primary/25 bg-[linear-gradient(90deg,var(--color-primary-soft),var(--color-panel))] text-foreground shadow-elevated [&>span:first-child]:bg-primary",
-    sourceLexicon:
-      "border-capsule-mist-border bg-[linear-gradient(90deg,var(--color-capsule-mist),var(--color-panel))] text-foreground shadow-elevated [&>span:first-child]:bg-capsule-mist-foreground",
-    lexicon:
-      "border-capsule-stone-border bg-[linear-gradient(90deg,var(--color-capsule-stone),var(--color-panel))] text-foreground shadow-elevated [&>span:first-child]:bg-capsule-stone-foreground",
-    otherLexicon:
-      "border-capsule-fog-border bg-[linear-gradient(90deg,var(--color-capsule-fog),var(--color-panel))] text-foreground shadow-elevated [&>span:first-child]:bg-capsule-fog-foreground",
-    ai:
-      "border-capsule-lavender-border bg-[linear-gradient(90deg,var(--color-capsule-lavender),var(--color-panel))] text-foreground shadow-elevated [&>span:first-child]:bg-capsule-lavender-foreground",
-    common:
-      "border-capsule-sage-border bg-[linear-gradient(90deg,var(--color-capsule-sage),var(--color-panel))] text-foreground shadow-elevated [&>span:first-child]:bg-capsule-sage-foreground",
-    recent:
-      "border-capsule-sand-border bg-[linear-gradient(90deg,var(--color-capsule-sand),var(--color-panel))] text-foreground shadow-elevated [&>span:first-child]:bg-capsule-sand-foreground",
-  };
-
-  return selected ? selectedToneByGroup[groupId] : baseToneByGroup[groupId];
-}
-
-function addUniqueValues(currentValues: readonly string[], nextValues: readonly string[]): string[] {
-  const values: string[] = [];
-
-  for (const value of [...currentValues, ...nextValues]) {
-    const normalized = value.trim();
-
-    if (!normalized || values.some((item) => isSameLabel(item, normalized))) {
-      continue;
-    }
-
-    values.push(normalized);
-  }
-
-  return values;
-}
-
-function isSameVariable(first: string, second: string): boolean {
-  return normalizeVariableKey(first) === normalizeVariableKey(second);
+  const tone = PROMPT_CAPSULE_TONE_BY_VARIABLE[normalizeVariableKey(variable)] ?? "stone";
+  return CAPSULE_TONES[tone].solid;
 }
 
 function normalizeVariableKey(value: string): string {
@@ -4145,30 +3788,33 @@ function areStringArraysEqual(first: readonly string[], second: readonly string[
   return first.length === second.length && first.every((value, index) => value === second[index]);
 }
 
+/**
+ /**
+ * 分类胶囊 = 主分类 + genreIds 解析出的次分类。
+ *
+ * 次分类曾经存在 tags 里，但 saveItem 会对 tags 跑 normalizeConcretePromptTags，
+ * 把一切能解析为分类的词剥掉 —— 结果是界面上看得到、库里存不住，
+ * 关闭卡片重开只剩主分类。genreIds 不经过标签清洗，是次分类的正确归宿。
+ */
 function getCategoryChips(
   savedCategory: string,
-  tags: readonly string[],
-  knownCategories: readonly string[],
+  genreIds: readonly string[],
+  taxonomy: CategoryTaxonomy | null,
 ): string[] {
   const primaryCategories = savedCategory && savedCategory !== "未分类" ? [savedCategory] : [];
-  const tagCategories = tags
-    .map((tag) => resolveKnownCategoryTag(tag, knownCategories))
-    .filter((tag): tag is string => tag !== null);
+  const genreNames = taxonomy
+    ? genreIds
+        .map((id) => resolveCategoryName(taxonomy, id, ""))
+        .filter((name): name is string => Boolean(name) && name !== "未分类" && !isHiddenAiCategoryLabel(name))
+    : [];
 
-  return uniquePromptLabels([...primaryCategories, ...tagCategories]).slice(0, maxAiCategoryCount);
+  return uniquePromptLabels([...primaryCategories, ...genreNames]).slice(0, maxAiCategoryCount);
 }
 
 function getVisibleTagDrafts(tags: readonly string[], categoryChips: readonly string[]): string[] {
   return tags.filter(
     (tag) => !isGenericPromptLabel(tag) && !categoryChips.some((category) => isSameLabel(category, tag)),
   );
-}
-
-function buildStoredTagsFromVisibleTags(
-  visibleTags: readonly string[],
-  categoryChips: readonly string[],
-): string[] {
-  return uniquePromptLabels([...visibleTags, ...categoryChips.slice(1)]);
 }
 
 function uniquePromptLabels(values: readonly string[]): string[] {
@@ -4223,7 +3869,9 @@ function normalizeCategorySuggestions(values: readonly string[], knownCategories
       continue;
     }
 
-    suggestions.push(category);
+    if (!isHiddenAiCategoryLabel(category)) {
+      suggestions.push(category);
+    }
   }
 
   return suggestions;
@@ -4253,12 +3901,11 @@ function getVisibleModelOptions(
 
 function getAiProfileActionLabel(action: AiProfileAction): string {
   const labels: Record<AiProfileAction, string> = {
-    prompt: "提示词参数分析",
     "prompt-category": "提示词分类识别",
     "prompt-tags": "提示词标签识别",
-    "prompt-options": "AI 词条扩写",
     "prompt-optimization": "提示词优化",
     "prompt-translation": "提示词翻译",
+    "image-generation": "画布默认模型",
     "image-reverse": "图像反推",
     "image-category": "分类识别",
     "image-tags": "标签识别",
@@ -4267,7 +3914,7 @@ function getAiProfileActionLabel(action: AiProfileAction): string {
   return labels[action];
 }
 
-function getAiProfileActionCapability(action: AiProfileAction): "text" | "vision" {
+function getAiProfileActionCapability(action: AiProfileAction): AiProviderModelCapability {
   return aiFeatureActionMeta[action].capability;
 }
 
@@ -4277,6 +3924,17 @@ function getRecognitionAction(kind: AiRecognitionKind, source: AiRecognitionSour
   }
 
   return source === "image" ? "image-tags" : "prompt-tags";
+}
+
+function getRecognitionSourceByKind(
+  settings: PublicAiProviderSettings,
+): Record<AiRecognitionKind, AiRecognitionSource> {
+  const preferences = normalizeAiRecognitionSourcePreferences(settings.recognitionSourcePreferences);
+
+  return {
+    category: preferences.category ?? "prompt",
+    tags: preferences.tags ?? "prompt",
+  };
 }
 
 function getAiRecognitionSourceLabel(source: AiRecognitionSource): string {
@@ -4330,6 +3988,7 @@ function AiModelCapabilityIcons({ capabilities }: { capabilities: readonly AiPro
     <span className="flex shrink-0 items-center gap-1 text-muted">
       {capabilities.includes("text") ? <FileText size={13} /> : null}
       {capabilities.includes("vision") ? <ImageIcon size={13} /> : null}
+      {capabilities.includes("image-generation") ? <Sparkles size={13} /> : null}
     </span>
   );
 }
@@ -4478,7 +4137,7 @@ function ReferenceImageThumb({
           isDeleteArmed
             ? "pointer-events-auto scale-100 opacity-100"
             : "pointer-events-none scale-90 opacity-0 group-hover/ref:pointer-events-auto group-hover/ref:scale-100 group-hover/ref:opacity-100"
-        } ${isPointerOverDelete ? "scale-110 border-danger bg-danger text-white" : ""}`}
+        } ${isPointerOverDelete ? "scale-110 border-danger bg-danger text-danger-foreground" : ""}`}
         disabled={isDeleting}
         type="button"
         onClick={(event) => {

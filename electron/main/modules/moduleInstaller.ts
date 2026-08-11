@@ -20,6 +20,14 @@ const GITHUB_MODULE_VERSION = "v1.0.0";
 const GITHUB_REPO_NAME = "prompt-library-modules";
 
 export async function checkModuleInstalled(moduleId: BuiltinModuleId): Promise<boolean> {
+  const definition = getBuiltinModuleDefinition(moduleId);
+
+  // Runtime modules (e.g. video-runtime) are backed by an external binary, so
+  // their "installed" state is the availability of that binary itself.
+  if (definition.category === "runtime") {
+    return checkRuntimeDependencyAvailable(moduleId);
+  }
+
   const runtimeDeps = getModuleRuntimeDependencies(moduleId);
   if (runtimeDeps.length === 0) {
     return true;

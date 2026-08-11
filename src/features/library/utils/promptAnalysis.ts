@@ -1,5 +1,13 @@
 import { uniqueTags } from "./buildLibraryFile";
 import {
+  photographyCategoryLabels,
+  resolvePhotographyCategory,
+  isPseudoPhotographyGenreLabel,
+  evaluateTagAdmission,
+  isCategoryOnlyTagLabel,
+} from "./photographyCategories";
+import { normalizeImageTag, sanitizeMaterialTags } from "./tagNormalization";
+import {
   parsePromptTemplateSegments,
   getPromptSectionKeyByVariable,
   normalizePromptSectionValue,
@@ -11,6 +19,10 @@ import {
   type PromptSplitSection,
   type PromptSplitSectionKey,
 } from "./promptSplit";
+import {
+  isReservedPromptMetadataVariable,
+  resolvePromptParameterDefinition,
+} from "./promptParameterSchema";
 
 export type PromptReplacementChip = {
   id: string;
@@ -32,6 +44,19 @@ export type PromptAnalysisResult = {
   suggestedCategories: string[];
   primaryCategory: string;
   template: string;
+  /** Taxonomy-bound AI suggestions (ids only). Optional for non-category targets. */
+  taxonomySuggestions?: Array<{
+    categoryId: string;
+    confidence: number;
+    reason: string;
+    source: "system" | "user" | "ai";
+  }>;
+  taxonomyBand?: "high" | "mid" | "low" | "none";
+  taxonomyPrimaryCategoryId?: string | null;
+  /** Category ids auto-created during AI binding (custom). */
+  taxonomyCreatedCategoryIds?: string[];
+  /** Grown taxonomy when AI auto-created categories (caller should persist). */
+  taxonomySnapshot?: import("../types/category").CategoryTaxonomy;
 };
 
 type CategorySuggestionOptions = {
@@ -55,27 +80,83 @@ type PromptOptionAnalysisInput = {
 };
 
 const fallbackCategories = [
-  "图像生成",
-  "人像摄影",
-  "插画设计",
-  "海报设计",
   "产品摄影",
-  "时尚大片",
-  "赛博朋克",
-  "水彩手绘",
-  "写实厚涂",
-  "影视概念",
+  "肖像摄影",
+  "风光摄影",
+  "茶饮摄影",
+  "食品摄影",
+  "时尚摄影",
+  "建筑摄影",
+  "街头摄影",
+  "概念摄影",
+  "航拍摄影",
+  "微距摄影",
 ];
 
 const categoryRules: Array<{ label: string; keywords: RegExp[] }> = [
-  { label: "人像摄影", keywords: [/人像|肖像|面部|妆容|发型|服装|姿态|手势|portrait|face|makeup|fashion/i] },
-  { label: "插画设计", keywords: [/插画|2d|平面插画|水彩|手绘|浮世绘|illustration|watercolor|ukiyo/i] },
-  { label: "艺术风格", keywords: [/立体主义|毕加索|超现实主义|弗里达|现实主义|列宾|cubism|surrealism|realism/i] },
-  { label: "赛博朋克", keywords: [/赛博朋克|霓虹|未来感|cyberpunk|neon/i] },
-  { label: "产品摄影", keywords: [/产品|商品|品牌|手持道具|包装|静物|product|brand|packshot|still life/i] },
-  { label: "海报设计", keywords: [/海报|字体|文本内容|排版|标语|标题|poster|typography|slogan/i] },
-  { label: "影视概念", keywords: [/电影感|镜头|景别|光影|景深|构图|cinematic|shot|lighting|composition/i] },
-  { label: "图像生成", keywords: [/画面|图像|风格|比例|颜色|氛围|midjourney|stable diffusion|dall.?e|flux|imagen/i] },
+  { label: "肖像摄影", keywords: [/人像|肖像|面部|妆容|发型|portrait|face|makeup/i] },
+  { label: "生活方式摄影", keywords: [/生活方式|生活场景|居家|情侣|家庭日常|lifestyle/i] },
+  { label: "婚纱摄影", keywords: [/婚纱摄影|婚纱照|婚纱写真|婚前照|新娘婚照|pre[- ]?wedding|bridal portrait|bridal photo/i] },
+  { label: "婚礼摄影", keywords: [/婚礼|婚宴|婚庆|仪式|接亲|婚礼现场|wedding(?:[ ]+ceremony|[ ]+event)?|wedding photography/i] },
+  { label: "儿童摄影", keywords: [/儿童|亲子|宝宝|新生儿|child|kids?|family photo/i] },
+  { label: "人物艺术摄影", keywords: [/人体|舞蹈|运动人像|nude|dance portrait/i] },
+  // 饮品规则必须位于泛产品/泛食品规则之前。广告、海报和商业布光是用途/呈现方式，
+  // 不能抢占明确的饮品主体；饮品制作过程再优先于饮品类型本身。
+  { label: "饮品制作过程摄影", keywords: [/冲泡|萃取|调酒|打奶泡|倒液|装杯|封口|搅拌饮品|制作饮品|pour(?:ing)?|brewing|bartending|mix(?:ing)?[ ]+(?:a[ ]+)?drink/i] },
+  { label: "咖啡摄影", keywords: [/咖啡(?!机|壶)|拿铁|美式咖啡|浓缩咖啡|手冲|冷萃|espresso|latte|americano|cappuccino|coffee/i] },
+  { label: "茶饮摄影", keywords: [/茶饮|奶茶|抹茶|果茶|红茶|绿茶|乌龙茶|茶饮料|茉莉花茶|matcha|milk tea|bubble tea|tea/i] },
+  { label: "酒精饮品摄影", keywords: [/葡萄酒|红酒|白葡萄酒|香槟|啤酒|鸡尾酒|威士忌|白酒|烈酒|朗姆酒|伏特加|酒精饮品|wine|champagne|beer|cocktail|whisky|whiskey|spirit/i] },
+  { label: "非酒精饮品摄影", keywords: [/果汁|汽水|碳酸饮料|饮料|矿泉水|乳饮料|能量饮料|冰沙|非酒精饮品|软饮|juice|soda|soft drink|smoothie|sparkling water/i] },
+  { label: "饮品与场景结合摄影", keywords: [/饮品(?:摄影|类|主体|产品)?|饮品广告|饮品场景|饮品与场景|咖啡馆.*(?:咖啡|饮品)|酒吧.*(?:酒|饮品)|餐桌.*(?:饮品|咖啡|茶)|drink photography|beverage photography/i] },
+  { label: "产品摄影", keywords: [/产品|商品|电商|包装|静物|珠宝|手表|奢侈品|product|packshot|still life|jewelry|watch|广告|海报|KV|advert|campaign/i] },
+  { label: "食品摄影", keywords: [/美食|食品|菜品|甜品|料理|烘焙|food|cuisine|dessert|bakery/i] },
+  { label: "时尚摄影", keywords: [/时尚|穿搭|lookbook|时装|模特|配饰|fashion|outfit|runway|model/i] },
+  { label: "美妆摄影", keywords: [/美妆|美容|护肤|发型|美甲|cosmetic|beauty|skincare/i] },
+  { label: "汽车摄影", keywords: [/汽车|车辆|轿车|跑车|摩托|赛车|car|vehicle|automotive|motorcycle/i] },
+  { label: "建筑摄影", keywords: [/建筑|室内|地产|样板间|酒店|民宿|家居|architecture|interior|real estate/i] },
+  { label: "活动摄影", keywords: [/发布会|展会|企业活动|会议|event photography|conference/i] },
+  { label: "新闻摄影", keywords: [/新闻|现场报道|突发事件|政治|灾难|photojournalism|news/i] },
+  { label: "街头摄影", keywords: [/街头|街拍|路人|street photography|street shot/i] },
+  { label: "人文摄影", keywords: [/人文|市井|民俗|纪实人文|community|folk|human interest/i] },
+  { label: "社会摄影", keywords: [/社会议题|环境问题|社会纪实|social documentary/i] },
+  { label: "城市风光摄影", keywords: [/城市天际线|城市夜景|城市风光|都市夜景|urban landscape|skyline|cityscape|CBD|城市地标|城市空间景观/i] },
+  // Natural landscape — avoid bare「风光/风景」so urban scenes prefer 城市风光摄影.
+  { label: "风光摄影", keywords: [/自然风光|自然风景|山川|湖海|沙漠|极地|草原|森林|海景|山岳|landscape|scenery|mountain|ocean|desert|tundra/i] },
+  { label: "天文摄影", keywords: [/天文|银河|星轨|月亮|极光|astro|milky way|aurora/i] },
+  { label: "野生动物摄影", keywords: [/野生动物|鸟类|哺乳动物|wildlife|bird photography/i] },
+  { label: "植物摄影", keywords: [/植物|花卉|树木|botanical|flower|plant/i] },
+  { label: "概念摄影", keywords: [/概念|观念|象征|conceptual|fine art concept/i] },
+  { label: "抽象摄影", keywords: [/抽象|形态抽象|abstract photography/i] },
+  { label: "超现实摄影", keywords: [/超现实|梦境|幻想|surreal/i] },
+  { label: "实验摄影", keywords: [/实验|多重曝光|摄影装置|experimental|double exposure/i] },
+  { label: "微距摄影", keywords: [/微距|macro/i] },
+  { label: "航拍摄影", keywords: [/航拍|无人机|俯视|aerial|drone/i] },
+  { label: "水下摄影", keywords: [/水下|潜水|underwater/i] },
+  { label: "高速摄影", keywords: [/高速|水滴凝固|high speed|freeze motion/i] },
+  { label: "长曝光摄影", keywords: [/长曝光|光轨|long exposure|light trail/i] },
+  { label: "红外摄影", keywords: [/红外|infrared/i] },
+  { label: "热成像摄影", keywords: [/热成像|thermal/i] },
+  { label: "显微摄影", keywords: [/显微|microscopy/i] },
+  { label: "医学摄影", keywords: [/医学|medical photography/i] },
+  { label: "体育赛事摄影", keywords: [/体育赛事|足球|篮球|极限运动|sports photography/i] },
+  { label: "动作摄影", keywords: [/动作摄影|动态冻结|action photography/i] },
+  { label: "旅行摄影", keywords: [/旅行|旅拍|travel photography/i] },
+  { label: "航空摄影", keywords: [/飞机|航空|aviation/i] },
+  { label: "船舶摄影", keywords: [/船舶|轮船|marine photography/i] },
+  { label: "铁路摄影", keywords: [/火车|铁路|railway/i] },
+  { label: "工业摄影", keywords: [/工厂|机械|制造业|工程|industrial photography/i] },
+  { label: "科学摄影", keywords: [/科学|科研|地质|scientific photography/i] },
+  { label: "农业摄影", keywords: [/农业|农场|agriculture/i] },
+  { label: "舞台摄影", keywords: [/舞台|剧场|stage photography/i] },
+  { label: "演唱会摄影", keywords: [/演唱会|concert photography/i] },
+  { label: "影视剧照摄影", keywords: [/剧照|片场|film still/i] },
+  { label: "娱乐宣传摄影", keywords: [/明星|游戏宣传|entertainment promo/i] },
+  { label: "文物摄影", keywords: [/文物|器物|artifact/i] },
+  { label: "博物馆摄影", keywords: [/博物馆|museum/i] },
+  { label: "建筑遗产摄影", keywords: [/建筑遗产|遗产建筑|heritage architecture/i] },
+  { label: "考古摄影", keywords: [/考古|archaeology/i] },
+  { label: "宠物摄影", keywords: [/宠物|pet photography/i] },
+  { label: "航天摄影", keywords: [/火箭|卫星|航天|space photography/i] },
 ];
 
 const genericPromptLabels = new Set(
@@ -103,6 +184,14 @@ const genericPromptLabels = new Set(
     "图片识别",
     "图像分析",
     "图片分析",
+    "视觉参考",
+    "提示词灵感",
+    "图片案例",
+    "来源网页",
+    "站点标识",
+    "作者头像",
+    "来源卡片",
+    "域名标签",
     "识别",
     "标签",
     "分类",
@@ -248,6 +337,75 @@ const sectionCuePatterns: Partial<Record<PromptSplitSectionKey, RegExp[]>> = {
   negative: [/不要|避免|排除|禁止|负面|反向|低质量|模糊|畸形|negative|avoid|bad|blurry/i],
 };
 
+/** Prefer a small set of high-value replaceable parameters over dumping every section. */
+export const maxPromptAnalysisChips = 8;
+export const maxPromptAnalysisValuesPerSection = 1;
+/**
+ * AI 参数分析的稳定边界：一个变量只代表一个可替换维度，默认只保留一个当前值。
+ * 这个上限只约束“分析结果”，不限制用户手动维护的胶囊值。
+ */
+export const maxPromptAnalysisSections = maxPromptAnalysisChips;
+
+const promptAnalysisSectionPriority: Partial<Record<PromptSplitSectionKey, number>> = {
+  food_category: 1,
+  food_specific_identity: 1,
+  food_main_ingredient: 1,
+  food_physical_form: 2,
+  food_freshness: 2,
+  product_identity: 1,
+  product_form: 2,
+  product_material: 3,
+  product_color: 4,
+  commercial_food_identity: 4,
+  commercial_visual_style: 4,
+  image_style: 4,
+  typography: 5,
+  text_content: 5,
+  aspect_ratio: 6,
+  composition: 6,
+  shot_size: 6,
+  camera_angle: 7,
+  color_detail: 8,
+  scene_color_palette: 8,
+  light_shadow: 9,
+  product_lighting: 9,
+  scene_lighting: 9,
+  atmosphere: 10,
+};
+
+/** Tag-only entry point. It never returns parameter sections or replacement chips. */
+export function analyzePromptTags(
+  prompt: string,
+  options: Partial<CategoryInput> = {},
+): PromptAnalysisResult {
+  const splitResult = splitPromptToTemplate(prompt);
+  const parameterValueKeys = new Set(
+    splitResult.sections
+      .flatMap((section) => section.values)
+      .map((value) => value.trim().replace(/\s+/g, "").toLocaleLowerCase("zh-Hans-CN"))
+      .filter(Boolean),
+  );
+  const residualPromptFragments = resolvePromptTemplateText(prompt)
+    .split(/[?,??;?.!??!?\n]+/u)
+    .map((fragment) => fragment.trim())
+    .filter(Boolean);
+  const tagCandidates = uniqueTags([...splitResult.suggestedTags, ...residualPromptFragments]).filter(
+    (tag) => !parameterValueKeys.has(tag.trim().replace(/\s+/g, "").toLocaleLowerCase("zh-Hans-CN")),
+  );
+
+  return {
+    chips: [],
+    sections: [],
+    suggestedTags: normalizeConcretePromptTags(tagCandidates, {
+      category: options.currentCategory,
+      maxCount: 15,
+    }),
+    suggestedCategories: [],
+    primaryCategory: "未分类",
+    template: "",
+  };
+}
+
 export function analyzePromptText(prompt: string, options: Partial<CategoryInput> = {}): PromptAnalysisResult {
   const splitResult = splitPromptToTemplate(prompt);
   const detectedSections = splitResult.sections.map((section) => ({
@@ -255,8 +413,33 @@ export function analyzePromptText(prompt: string, options: Partial<CategoryInput
     chips: buildReplacementChips(section),
   }));
   const explicitCapsuleAnalysis = buildPromptAnalysisFromSavedCapsules(prompt, options);
-  const sections = mergePromptAnalysisSections(explicitCapsuleAnalysis?.sections ?? [], detectedSections);
-  const chips = sections.flatMap((section) => section.chips);
+  const mergedSections = mergePromptAnalysisSections(explicitCapsuleAnalysis?.sections ?? [], detectedSections);
+  // Explicit user capsules stay intact; auto-detected analysis is compacted to top replaceable params.
+  // Negative sections are preserved for extraction (UI hides them via omitNegativeAnalysisSections).
+  const sections = (
+    explicitCapsuleAnalysis
+      ? mergedSections
+      : [
+          ...compactPromptAnalysisSections(prompt, mergedSections),
+          ...mergedSections.filter((section) => !isPromptAnalysisReplaceableSection(section.key)),
+        ]
+  ).sort(
+    (first, second) => promptSplitSectionOrder.indexOf(first.key) - promptSplitSectionOrder.indexOf(second.key),
+  );
+  const normalizedParameterSections = normalizePromptAnalysisSections(
+    prompt,
+    sections.filter((section) => isPromptAnalysisReplaceableSection(section.key)),
+    {
+      maxSections: explicitCapsuleAnalysis ? maxPromptAnalysisSections : maxPromptAnalysisChips,
+      requireSourceValue: true,
+      blockedLabels: [options.currentCategory ?? "", ...(options.knownCategories ?? [])],
+    },
+  );
+  const normalizedSections = [
+    ...normalizedParameterSections,
+    ...sections.filter((section) => !isPromptAnalysisReplaceableSection(section.key)),
+  ].sort((first, second) => promptSplitSectionOrder.indexOf(first.key) - promptSplitSectionOrder.indexOf(second.key));
+  const chips = normalizedSections.flatMap((section) => section.chips);
   const suggestedCategories = suggestPromptCategories({
     title: options.title ?? "",
     prompt,
@@ -264,14 +447,260 @@ export function analyzePromptText(prompt: string, options: Partial<CategoryInput
     currentCategory: options.currentCategory,
     knownCategories: options.knownCategories,
   });
+  // Parameter values must not leak taxonomy genre labels into tag space.
+  const suggestedTags = sanitizePromptTags(
+    [
+      ...normalizedParameterSections
+        .filter((section) => section.key !== "negative" && section.key !== "other")
+        .flatMap((section) => section.values),
+      ...splitResult.suggestedTags,
+    ],
+    {
+      category: options.currentCategory ?? suggestedCategories[0] ?? null,
+      extraBlockedLabels: suggestedCategories,
+      maxCount: 12,
+    },
+  );
 
   return {
     chips,
-    sections,
-    suggestedTags: splitResult.suggestedTags,
+    sections: normalizedSections,
+    suggestedTags,
     suggestedCategories,
-    primaryCategory: suggestedCategories[0] ?? "图像生成",
+    primaryCategory: suggestedCategories[0] ?? "未分类",
     template: splitResult.template,
+  };
+}
+
+/**
+ * Keep only the highest-replacement-value parameter sections (about 5–10 chips).
+ * Filters out instruction-like / generic / non-locatable values.
+ */
+export function compactPromptAnalysisSections(
+  prompt: string,
+  sections: readonly PromptAnalysisSection[],
+  options: {
+    maxChips?: number;
+    maxValuesPerSection?: number;
+  } = {},
+): PromptAnalysisSection[] {
+  const maxChips = options.maxChips ?? maxPromptAnalysisChips;
+  const maxValuesPerSection = options.maxValuesPerSection ?? maxPromptAnalysisValuesPerSection;
+  const sourcePrompt = resolvePromptTemplateText(prompt);
+  let remainingChipCount = maxChips;
+
+  return sections
+    .map((section, index) => ({ section, index }))
+    .sort((first, second) => {
+      const firstPriority = promptAnalysisSectionPriority[first.section.key] ?? 50;
+      const secondPriority = promptAnalysisSectionPriority[second.section.key] ?? 50;
+
+      return (
+        firstPriority - secondPriority ||
+        promptSplitSectionOrder.indexOf(first.section.key) - promptSplitSectionOrder.indexOf(second.section.key) ||
+        first.index - second.index
+      );
+    })
+    .reduce<PromptAnalysisSection[]>((nextSections, { section }) => {
+      if (remainingChipCount <= 0 || !isPromptAnalysisReplaceableSection(section.key)) {
+        return nextSections;
+      }
+
+      const values = uniqueTags(section.values)
+        .filter((value) => isPromptAnalysisReplaceableValue(sourcePrompt, section.key, value))
+        .slice(0, Math.min(maxValuesPerSection, remainingChipCount));
+
+      if (values.length === 0) {
+        return nextSections;
+      }
+
+      remainingChipCount -= values.length;
+
+      nextSections.push({
+        ...section,
+        values,
+        chips: values.map((value, index) =>
+          buildReplacementChip(section.key, section.label, section.variable, value, index),
+        ),
+      });
+
+      return nextSections;
+    }, []);
+}
+
+/**
+ * Normalize an AI/local parameter result before it can reach the capsule UI or
+ * the parameter lexicon.
+ *
+ * PromptFill's useful invariant is that a variable has a stable schema.  Our
+ * equivalent schema is promptSectionMeta: the model may suggest values, but it
+ * cannot invent a new category/label/variable combination.  Requiring the
+ * value to be locatable in the source prompt also makes a bad remote response
+ * fail closed instead of creating a capsule from a hallucinated sentence.
+ */
+export function normalizePromptAnalysisSections(
+  prompt: string,
+  sections: readonly PromptAnalysisSection[],
+  options: {
+    maxSections?: number;
+    requireSourceValue?: boolean;
+    blockedLabels?: readonly string[];
+  } = {},
+): PromptAnalysisSection[] {
+  const maxSections = Math.max(0, options.maxSections ?? maxPromptAnalysisSections);
+  const requireSourceValue = options.requireSourceValue ?? true;
+  const seenVariables = new Set<string>();
+  const normalized: PromptAnalysisSection[] = [];
+  const sourcePrompt = resolvePromptTemplateText(prompt);
+  const blockedLabels = new Set(
+    (options.blockedLabels ?? [])
+      .map((label) => label.trim().toLocaleLowerCase("zh-Hans-CN"))
+      .filter(Boolean),
+  );
+
+  for (const section of sections) {
+    if (normalized.length >= maxSections || !isPromptAnalysisReplaceableSection(section.key)) {
+      continue;
+    }
+
+    const definition = resolvePromptParameterDefinition({
+      key: section.key,
+      variable: section.variable,
+      value: section.values[0],
+    });
+    if (!definition) {
+      continue;
+    }
+
+    // The stable parameter schema is the authority. Never trust a remote
+    // label/variable to cross into the category or tag metadata domains.
+    const canonicalSectionKey = definition.key;
+    const variable = definition.variable;
+    const variableKey = normalizeVariable(variable).toLowerCase();
+    if (!variableKey || seenVariables.has(variableKey)) {
+      continue;
+    }
+
+    const value = uniqueTags(
+      section.values
+        .map((candidate) => normalizePromptSectionValue(canonicalSectionKey, candidate))
+        .filter(Boolean)
+        .filter((candidate) => {
+          if (!isPromptAnalysisReplaceableValue(sourcePrompt, canonicalSectionKey, candidate)) {
+            return false;
+          }
+
+          if (isKnownTaxonomyCategoryLabel(candidate)) {
+            return false;
+          }
+
+          if (blockedLabels.has(candidate.trim().toLocaleLowerCase("zh-Hans-CN"))) {
+            return false;
+          }
+
+          return !requireSourceValue || normalizedPromptIncludesValue(sourcePrompt, candidate);
+        }),
+    ).slice(0, maxPromptAnalysisValuesPerSection);
+
+    if (value.length === 0) {
+      continue;
+    }
+
+    seenVariables.add(variableKey);
+    const normalizedSection: PromptAnalysisSection = {
+      key: canonicalSectionKey,
+      label: definition.label,
+      variable,
+      values: value,
+      chips: value.map((item, index) => buildReplacementChip(canonicalSectionKey, definition.label, variable, item, index)),
+    };
+    normalized.push(normalizedSection);
+  }
+
+  return normalized;
+}
+
+export function isPromptAnalysisReplaceableSection(sectionKey: PromptSplitSectionKey): boolean {
+  return sectionKey !== "negative" && sectionKey !== "other";
+}
+
+export function isPromptAnalysisReplaceableValue(
+  prompt: string,
+  sectionKey: PromptSplitSectionKey,
+  value: string,
+): boolean {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue || isGenericPromptLabel(trimmedValue) || isInstructionLikePromptValue(trimmedValue)) {
+    return false;
+  }
+
+  if (!isPromptAnalysisValueLengthAcceptable(sectionKey, trimmedValue)) {
+    return false;
+  }
+
+  if (hasPromptAnalysisSentencePunctuation(sectionKey, trimmedValue)) {
+    return false;
+  }
+
+  return !prompt.trim() || normalizedPromptIncludesValue(prompt, trimmedValue);
+}
+
+function isInstructionLikePromptValue(value: string): boolean {
+  return /(?:不要|避免|禁止|严禁|不能|不可|不需要|不展开|不脱离|必须|确保|保留|可以|请|帮我|基于|参考|上传|重新|生成|创建|绘制|分析|说明|目标|要求|^使用|^让|^使|^令)/u.test(
+    value,
+  );
+}
+
+function isPromptAnalysisValueLengthAcceptable(sectionKey: PromptSplitSectionKey, value: string): boolean {
+  if (sectionKey === "text_content") {
+    return value.length <= 32;
+  }
+
+  if (sectionKey === "color_detail" || sectionKey === "scene_color_palette" || sectionKey === "product_color") {
+    return value.length <= 28;
+  }
+
+  return value.length <= 22;
+}
+
+function hasPromptAnalysisSentencePunctuation(sectionKey: PromptSplitSectionKey, value: string): boolean {
+  if (sectionKey === "aspect_ratio") {
+    return /[，,。；;！？!?]/u.test(value);
+  }
+
+  if (sectionKey === "color_detail" || sectionKey === "scene_color_palette" || sectionKey === "product_color") {
+    return /[，,。；;！？!?]/u.test(value);
+  }
+
+  return /[，,。；;！？!?：:]/u.test(value);
+}
+
+function normalizedPromptIncludesValue(prompt: string, value: string): boolean {
+  const normalizedPrompt = normalizeReplaceableSearchText(prompt);
+  const normalizedValue = normalizeReplaceableSearchText(value);
+
+  return normalizedValue.length > 0 && normalizedPrompt.includes(normalizedValue);
+}
+
+function normalizeReplaceableSearchText(value: string): string {
+  return value
+    .replace(/\{\{\s*([^}:]+)\s*:\s*([^}]+?)\s*\}\}/g, "$2")
+    .replace(/\s+/g, "")
+    .replace(/[“”"']/g, "")
+    .replace(/：/g, ":")
+    .trim()
+    .toLocaleLowerCase("zh-Hans-CN");
+}
+
+/** Strip parameter chips/sections from a category-only analysis result. */
+export function isolateCategoryAnalysisResult(analysis: PromptAnalysisResult): PromptAnalysisResult {
+  return {
+    ...analysis,
+    chips: [],
+    sections: [],
+    suggestedTags: [],
+    template: "",
   };
 }
 
@@ -311,7 +740,7 @@ function mergePromptAnalysisSections(
 
 export function buildPromptAnalysisFromSavedCapsules(
   prompt: string,
-  options: Partial<CategoryInput> = {},
+  _options: Partial<CategoryInput> = {},
 ): PromptAnalysisResult | null {
   const capsuleSegments = parsePromptTemplateSegments(prompt).filter((segment) => segment.type === "parameter");
 
@@ -323,23 +752,31 @@ export function buildPromptAnalysisFromSavedCapsules(
 
   for (const segment of capsuleSegments) {
     const declaredSectionKey = getPromptSectionKeyByVariable(segment.variable);
-    const sectionKey = segment.source.startsWith("{{")
-      ? getSupportedSectionKeyByVariable(segment.variable, segment.value)
-      : declaredSectionKey;
-
-    if (!sectionKey) {
+    if (!declaredSectionKey && isReservedPromptMetadataVariable(segment.variable)) {
       continue;
     }
 
-    const meta = promptSectionMeta[sectionKey];
-    const variable = declaredSectionKey === sectionKey ? normalizeVariable(segment.variable) || meta.variable : meta.variable;
-    const value = normalizePromptSectionValue(sectionKey, segment.value);
+    const sectionKey = segment.source.startsWith("{{")
+      ? getSupportedSectionKeyByVariable(segment.variable, segment.value)
+      : declaredSectionKey;
+    const definition = resolvePromptParameterDefinition({
+      key: sectionKey,
+      variable: segment.variable,
+      value: segment.value,
+    });
+
+    if (!definition) {
+      continue;
+    }
+
+    const canonicalSectionKey = definition.key;
+    const value = normalizePromptSectionValue(canonicalSectionKey, segment.value);
 
     if (!value) {
       continue;
     }
 
-    const existingSection = groupedSections.get(variable);
+    const existingSection = groupedSections.get(definition.variable);
 
     if (existingSection) {
       existingSection.values = uniqueTags([...existingSection.values, value]);
@@ -349,12 +786,12 @@ export function buildPromptAnalysisFromSavedCapsules(
       continue;
     }
 
-    groupedSections.set(variable, {
-      key: sectionKey,
-      label: meta.label,
-      variable,
+    groupedSections.set(definition.variable, {
+      key: canonicalSectionKey,
+      label: definition.label,
+      variable: definition.variable,
       values: uniqueTags([value]),
-      chips: [buildReplacementChip(sectionKey, meta.label, variable, value, 0)],
+      chips: [buildReplacementChip(canonicalSectionKey, definition.label, definition.variable, value, 0)],
     });
   }
 
@@ -366,29 +803,18 @@ export function buildPromptAnalysisFromSavedCapsules(
     (first, second) => promptSplitSectionOrder.indexOf(first.key) - promptSplitSectionOrder.indexOf(second.key),
   );
   const chips = sections.flatMap((section) => section.chips);
-  const resolvedPrompt = resolvePromptTemplateText(prompt);
-  const suggestedCategories = suggestPromptCategories(
-    {
-      title: options.title ?? "",
-      prompt: resolvedPrompt,
-      tags: options.tags ?? [],
-      currentCategory: options.currentCategory,
-      knownCategories: options.knownCategories,
-    },
-    { includeFallback: false },
-  );
-
   return {
     chips,
     sections,
-    suggestedTags: sections
-      .filter((section) => section.key !== "negative" && section.key !== "other")
-      .flatMap((section) => section.values.filter((value) => value.trim() && value.trim() !== section.label))
-      .slice(0, 15),
-    suggestedCategories,
-    primaryCategory: suggestedCategories[0] ?? options.currentCategory ?? "图像生成",
+    // Saved capsule values belong to the parameter lexicon only. This path is
+    // intentionally category/tag-blind so restoring a template cannot mutate
+    // either taxonomy or feature-tag state.
+    suggestedTags: [],
+    suggestedCategories: [],
+    primaryCategory: "未分类",
     template: prompt.trim(),
   };
+
 }
 
 export function applyAnalysisTemplate(currentPrompt: string, analysis: PromptAnalysisResult): string {
@@ -528,7 +954,7 @@ export function buildPromptOptionAnalysis(input: PromptOptionAnalysisInput): Pro
     sections: [section],
     suggestedTags: [],
     suggestedCategories: [],
-    primaryCategory: "图像生成",
+    primaryCategory: "未分类",
     template: "",
   };
 }
@@ -556,7 +982,7 @@ export function buildAiPromptOptionAnalysis(input: PromptOptionAnalysisInput): P
     sections: [section],
     suggestedTags: [],
     suggestedCategories: [],
-    primaryCategory: "图像生成",
+    primaryCategory: "未分类",
     template: "",
   };
 }
@@ -630,30 +1056,76 @@ export function suggestPromptCategories(input: CategoryInput, options: CategoryS
   const skipHeavyAnalysis = options.skipHeavyAnalysis === true;
   const content = [input.title, input.prompt, input.tags.join(" ")].join("\n");
   const suggestions: string[] = [];
+  const hasExplicitBeverage = /咖啡(?!机|壶)|拿铁|美式咖啡|浓缩咖啡|手冲|冷萃|茶饮|奶茶|抹茶|果茶|红茶|绿茶|乌龙茶|茶饮料|葡萄酒|红酒|白葡萄酒|香槟|啤酒|鸡尾酒|威士忌|白酒|烈酒|朗姆酒|伏特加|果汁|汽水|碳酸饮料|饮料|矿泉水|乳饮料|能量饮料|冰沙|软饮|饮品|coffee|latte|espresso|tea|matcha|wine|beer|cocktail|juice|soda|smoothie|beverage|drink/i.test(content);
+  const hasSeparateFoodSubject = /菜品|主食|面点|肉类|海鲜|蛋糕|甜品|烘焙|披萨|汉堡|牛排|food|dessert|bakery/i.test(content);
+  const hasBridalShoot = /婚纱摄影|婚纱照|婚纱写真|婚前照|新娘婚照|pre[- ]?wedding|bridal portrait|bridal photo/i.test(content);
+  const hasWeddingEvent = /婚礼|婚宴|婚庆|仪式|接亲|婚礼现场|wedding(?:[ ]+ceremony|[ ]+event)?|wedding photography/i.test(content);
 
-  if (isSelectableCategory(input.currentCategory ?? "")) {
-    suggestions.push(input.currentCategory as string);
-  }
+  // Only ontology genres / aliases are selectable.
+  const pushGenre = (value: string | null | undefined) => {
+    if (!value) {
+      return;
+    }
+    const resolved = resolvePhotographyCategory(value) ?? (isSelectableCategory(value) ? value : null);
+    if (resolved && !suggestions.includes(resolved)) {
+      suggestions.push(resolved);
+    }
+  };
 
-  suggestions.push(...findKnownCategoryMatches(input, content));
+  pushGenre(input.currentCategory ?? "");
+  suggestions.push(
+    ...findKnownCategoryMatches(input, content)
+      .map((label) => resolvePhotographyCategory(label) ?? label)
+      .filter((label, index, list) => list.indexOf(label) === index),
+  );
 
   for (const rule of categoryRules) {
     if (rule.keywords.some((keyword) => keyword.test(content))) {
-      suggestions.push(rule.label);
+      pushGenre(rule.label);
     }
   }
 
-  suggestions.push(...input.tags.filter(isSelectableCategory));
-
-  if (!skipHeavyAnalysis) {
-    suggestions.push(...splitPromptToTemplate(input.prompt).suggestedTags.filter(isSelectableCategory));
+  for (const tag of input.tags) {
+    pushGenre(tag);
   }
 
-  if (includeFallback) {
+  if (!skipHeavyAnalysis) {
+    for (const tag of splitPromptToTemplate(input.prompt).suggestedTags) {
+      pushGenre(tag);
+    }
+  }
+
+  if (includeFallback && suggestions.length === 0) {
     suggestions.push(...fallbackCategories);
   }
 
-  return uniqueTags(suggestions).slice(0, 10);
+  // Explicit beverage identity owns the subject slot. Keep 食品摄影 only when a
+  // separate non-beverage food subject is also present; 商业广告/海报不改变主体归属。
+  const filteredSuggestions = suggestions.filter((label) => {
+    if (!hasExplicitBeverage) {
+      return true;
+    }
+    if (label === "产品摄影") {
+      return false;
+    }
+    if (label === "食品摄影") {
+      return hasSeparateFoodSubject;
+    }
+    if (hasBridalShoot && !hasWeddingEvent && label === "婚礼摄影") {
+      return false;
+    }
+    if (hasWeddingEvent && hasBridalShoot && label === "婚纱摄影") {
+      return false;
+    }
+    return true;
+  });
+
+  // Final hard filter: only ontology leaves.
+  return uniqueTags(
+    filteredSuggestions
+      .map((label) => resolvePhotographyCategory(label) ?? label)
+      .filter((label) => photographyCategoryLabels.includes(label)),
+  ).slice(0, 8);
 }
 
 export function applyCategoryToTags(tags: readonly string[], currentCategory: string, nextCategory: string): string[] {
@@ -666,14 +1138,96 @@ export function removeCategoryFromTags(tags: readonly string[], category: string
   return applyCategoryToTags(tags, "", category);
 }
 
+/** Lowercased formal taxonomy labels — built once to avoid O(n) scans per tag. */
+let photographyCategoryLabelKeySet: Set<string> | null = null;
+
+function getPhotographyCategoryLabelKeySet(): Set<string> {
+  if (!photographyCategoryLabelKeySet) {
+    photographyCategoryLabelKeySet = new Set(
+      photographyCategoryLabels
+        .map((label) => normalizePromptLabel(label).toLowerCase())
+        .filter(Boolean),
+    );
+  }
+  return photographyCategoryLabelKeySet;
+}
+
+/**
+ * Tags must stay orthogonal to formal categories:
+ * - drop the item's current category label
+ * - drop any known photography-taxonomy category names
+ * - keep only concrete, non-generic visual / material / mood tags
+ */
+export function sanitizePromptTags(
+  tags: readonly string[],
+  options: {
+    category?: string | null;
+    extraBlockedLabels?: readonly string[];
+    maxCount?: number;
+  } = {},
+): string[] {
+  if (tags.length === 0) {
+    return [];
+  }
+
+  const blocked = new Set<string>();
+  const block = (value: string | null | undefined) => {
+    const key = normalizePromptLabel(value ?? "")
+      .trim()
+      .toLowerCase();
+    if (key && key !== "未分类") {
+      blocked.add(key);
+    }
+  };
+
+  block(options.category ?? "");
+  for (const label of options.extraBlockedLabels ?? []) {
+    block(label);
+  }
+
+  const taxonomyKeys = getPhotographyCategoryLabelKeySet();
+  const cleaned = uniqueTags(
+    tags
+      .map((tag) => normalizeImageTag(tag) ?? "")
+      .filter(Boolean)
+      .filter((tag) => {
+      const normalized = normalizePromptLabel(tag);
+      if (!normalized) {
+        return false;
+      }
+      const lower = normalized.toLowerCase();
+      if (blocked.has(lower) || taxonomyKeys.has(lower)) {
+        return false;
+      }
+      if (isPseudoPhotographyGenreLabel(normalized)) {
+        return false;
+      }
+      if (isCategoryOnlyTagLabel(normalized)) {
+        return false;
+      }
+      // Resolved genre names (incl. aliases) never enter tag space.
+      if (resolvePhotographyCategory(normalized)) {
+        return false;
+      }
+      if (!evaluateTagAdmission(normalized).admitted) {
+        return false;
+      }
+      return isConcretePromptTag(normalized);
+    }),
+  );
+
+  const sanitized = sanitizeMaterialTags(cleaned);
+  return typeof options.maxCount === "number" ? sanitized.slice(0, options.maxCount) : sanitized;
+}
+
 export function normalizeConcretePromptTags(
   tags: readonly string[],
   options: { category?: string; maxCount?: number } = {},
 ): string[] {
-  const normalizedTags = options.category ? removeCategoryFromTags(tags, options.category) : uniqueTags([...tags]);
-  const concreteTags = normalizedTags.filter(isConcretePromptTag);
-
-  return typeof options.maxCount === "number" ? concreteTags.slice(0, options.maxCount) : concreteTags;
+  return sanitizePromptTags(tags, {
+    category: options.category,
+    maxCount: options.maxCount,
+  });
 }
 
 export function addTags(tags: readonly string[], nextTags: readonly string[]): string[] {
@@ -715,11 +1269,15 @@ function isConcretePromptTag(label: string): boolean {
     return false;
   }
 
-  if (isVisibleSourceUiTag(normalized)) {
-    return true;
+  if (isKnownTaxonomyCategoryLabel(normalized)) {
+    return false;
   }
 
   if (isPromptTagModelOrSourceNoise(normalized)) {
+    return false;
+  }
+
+  if (isVisibleSourceUiTag(normalized)) {
     return false;
   }
 
@@ -728,6 +1286,20 @@ function isConcretePromptTag(label: string): boolean {
   }
 
   return true;
+}
+
+/** True when the label is exactly a formal photography taxonomy category name.
+ *  Do NOT match loose aliases (e.g. 「柔光」→「柔光商业光影」) — those remain valid fine tags.
+ */
+function isKnownTaxonomyCategoryLabel(label: string): boolean {
+  const normalized = normalizePromptLabel(label);
+  if (!normalized) {
+    return false;
+  }
+  if (getPhotographyCategoryLabelKeySet().has(normalized.toLowerCase())) {
+    return true;
+  }
+  return Boolean(resolvePhotographyCategory(normalized));
 }
 
 function isPromptTagLengthAcceptable(label: string): boolean {
@@ -762,13 +1334,20 @@ function isPromptTagParameterLike(label: string): boolean {
     return true;
   }
 
+  // A tag is a compact visual facet, not a sentence copied from the prompt.
+  // Length alone is insufficient because Chinese clauses can fit within 14
+  // characters (for example “地平线上有一位长发侠客剪影”).
+  if (/(?:有(?:一位|一名|一个|一只|多人|几名)|(?:画面|场景|背景|前景|地平线|远处|近处).{0,4}(?:有|出现|站着|坐着|位于|正在)|正在|站在|坐在|躺在|位于|可以看到|可见|呈现|描绘|包含|包括)/u.test(label)) {
+    return true;
+  }
+
   return /(?:请|上传|参考图|基于|重新|生成|创建|绘制|分析|画面目标|画面要求|文字排版|保留|不要|避免|禁止|必须|确保|使用|作为|放在|位于|占据|加入|前景加入|背景可以|表面|布满|轻微遮挡|标题空间|主体角度|可替换|参数|字段|变量)/u.test(
     label,
   );
 }
 
 function buildReplacementChips(section: PromptSplitSection): PromptReplacementChip[] {
-  return section.values.slice(0, 8).map((value, index) => ({
+  return section.values.slice(0, maxPromptAnalysisValuesPerSection).map((value, index) => ({
     id: `${section.key}-${index}-${value}`,
     sectionKey: section.key,
     label: section.label,

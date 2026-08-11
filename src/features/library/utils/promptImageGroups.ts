@@ -11,7 +11,6 @@ export type PromptImageGroup = {
 };
 
 export function groupPromptImages(cards: PromptCardData[], likedImageIds: readonly string[]): PromptImageGroup[] {
-  const likedImageIdSet = new Set(likedImageIds);
   const groupedCards = new Map<string, PromptCardData[]>();
   const groupOrder = new Map<string, number>();
 
@@ -31,7 +30,7 @@ export function groupPromptImages(cards: PromptCardData[], likedImageIds: readon
 
   return Array.from(groupedCards.entries())
     .map(([groupKey, groupCards]) => {
-      const items = sortPromptGroupImages(groupCards, likedImageIdSet);
+      const items = sortPromptGroupImages(groupCards);
 
       return {
         id: groupKey,
@@ -49,10 +48,9 @@ export function getPromptImageGroupItems(
   likedImageIds: readonly string[],
 ): PromptCardData[] {
   const currentGroupKey = getPromptImageGroupKey(currentItem);
-  const likedImageIdSet = new Set(likedImageIds);
   const groupItems = cards.filter((card) => getPromptImageGroupKey(card) === currentGroupKey);
 
-  return sortPromptGroupImages(groupItems, likedImageIdSet);
+  return sortPromptGroupImages(groupItems);
 }
 
 export function spreadPromptGroupImages(groups: PromptImageGroup[]): PromptCardData[] {
@@ -94,30 +92,26 @@ export function resolvePromptGroupPatchItemIds(
     .map((item) => item.id);
 }
 
-function sortPromptGroupImages(items: PromptCardData[], likedImageIdSet: ReadonlySet<string>): PromptCardData[] {
-  return [...items].sort((first, second) => sortByPromptCardOrder(first, second, likedImageIdSet));
+function sortPromptGroupImages(items: PromptCardData[]): PromptCardData[] {
+  const originalOrder = new Map(items.map((item, index) => [item.id, index]));
+
+  return [...items].sort((first, second) => sortByPromptCardOrder(first, second, originalOrder));
 }
 
 function sortByPromptCardOrder(
   first: PromptCardData,
   second: PromptCardData,
-  likedImageIdSet: ReadonlySet<string>,
+  originalOrder: ReadonlyMap<string, number>,
 ): number {
-  const firstLikedWeight = likedImageIdSet.has(first.id) ? 1 : 0;
-  const secondLikedWeight = likedImageIdSet.has(second.id) ? 1 : 0;
   const shouldPreferVideoMedia = first.promptType === "video" && second.promptType === "video";
   const firstVideoMediaWeight = shouldPreferVideoMedia && isVideoMediaFile(first.imageFileName) ? 1 : 0;
   const secondVideoMediaWeight = shouldPreferVideoMedia && isVideoMediaFile(second.imageFileName) ? 1 : 0;
-  const firstMissingWeight = first.mediaStatus === "missing" ? 1 : 0;
-  const secondMissingWeight = second.mediaStatus === "missing" ? 1 : 0;
 
   return (
-    secondLikedWeight - firstLikedWeight ||
     secondVideoMediaWeight - firstVideoMediaWeight ||
-    secondMissingWeight - firstMissingWeight ||
-    second.createdAt - first.createdAt ||
-    first.title.localeCompare(second.title, "zh-CN") ||
-    first.id.localeCompare(second.id)
+    first.createdAt - second.createdAt ||
+    first.updatedAt - second.updatedAt ||
+    (originalOrder.get(first.id) ?? 0) - (originalOrder.get(second.id) ?? 0)
   );
 }
 
@@ -136,9 +130,18 @@ export function getPromptImageGroupKey(card: PromptCardData): string {
 }
 
 function shouldSyncPromptGroupPatch(patch: Partial<LibraryItem>): boolean {
-  return ["title", "prompt", "negativePrompt", "category", "tags", "generationMethod", "promptType"].some((key) =>
-    Object.prototype.hasOwnProperty.call(patch, key),
-  );
+  return [
+    "title",
+    "prompt",
+    "negativePrompt",
+    "category",
+    "categoryId",
+    "categoryConfidence",
+    "categorySource",
+    "tags",
+    "generationMethod",
+    "promptType",
+  ].some((key) => Object.prototype.hasOwnProperty.call(patch, key));
 }
 
 function normalizeGroupText(value: string): string {

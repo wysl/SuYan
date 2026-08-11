@@ -1,6 +1,4 @@
-import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveAsarUnpackedPath } from "../../electron/main/runtime/videoRuntime";
 import {
   buildFfmpegArgs,
   parseProgressFraction,
@@ -42,29 +40,6 @@ const baseOptions: VideoCompressOptions = {
   crf: 23,
   codec: "h264",
 };
-
-describe("video compressor path resolver", () => {
-  it("rewrites packaged ffmpeg paths to app.asar.unpacked", () => {
-    const packedPath = path.join("C:", "Apps", "Prompt", "resources", "app.asar", "node_modules", "ffmpeg-static", "ffmpeg.exe");
-
-    expect(resolveAsarUnpackedPath(packedPath)).toBe(
-      path.join("C:", "Apps", "Prompt", "resources", "app.asar.unpacked", "node_modules", "ffmpeg-static", "ffmpeg.exe"),
-    );
-  });
-
-  it("keeps vendor ffmpeg paths unchanged", () => {
-    const vendorPath = path.join("C:", "Apps", "Prompt", "resources", "vendor", "node_modules", "ffmpeg-static", "ffmpeg.exe");
-
-    expect(resolveAsarUnpackedPath(vendorPath)).toBe(vendorPath);
-    expect(resolveAsarUnpackedPath(null)).toBeNull();
-  });
-
-  it("rewrites slash separated packaged paths", () => {
-    expect(resolveAsarUnpackedPath("C:/Apps/Prompt/resources/app.asar/node_modules/ffmpeg-static/ffmpeg.exe")).toBe(
-      "C:/Apps/Prompt/resources/app.asar.unpacked/node_modules/ffmpeg-static/ffmpeg.exe",
-    );
-  });
-});
 
 describe("buildFfmpegArgs", () => {
   it("omits scale filter for original resolution", () => {

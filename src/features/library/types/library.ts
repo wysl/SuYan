@@ -1,4 +1,12 @@
 import type { BuiltinModuleState } from "../utils/moduleRegistry";
+import type { CanvasDraftSettings } from "./canvas";
+import type {
+  CategoryAssignmentSource,
+  CategoryCandidateProposal,
+  CategoryInboxItem,
+  CategoryLearningEvent,
+  CategoryTaxonomy,
+} from "./category";
 
 export type NsfwRating = "unknown" | "safe" | "nsfw";
 export type NsfwGradingSpeed = "stable" | "fast" | "turbo";
@@ -45,7 +53,25 @@ export type LibraryItem = {
   mediaStorage?: MediaStorage;
   prompt: string;
   negativePrompt: string;
+  /**
+   * Legacy display/label field kept for compatibility with v0.1.0 data and share packages.
+   * Prefer categoryId for assignment; category is kept in sync as the resolved label.
+   */
   category?: string | null;
+  /** Stable taxonomy id (system:/custom:/ai:...). Null/undefined means uncategorized. */
+  categoryId?: string | null;
+  /**
+   * Multi-genre assignments (Photography Genre Ontology).
+   * Primary remains categoryId; genreIds may include primary + secondary genres.
+   * Example: 手表广告 → [产品摄影, 微距摄影]
+   */
+  genreIds?: string[] | null;
+  /** 0–1 confidence for AI assignment; user assignment should be 1. */
+  categoryConfidence?: number | null;
+  /** Who last set the category. */
+  categorySource?: CategoryAssignmentSource | null;
+  /** Original freeform label before taxonomy migration, if any. */
+  legacyCategory?: string | null;
   tags: string[];
   generationMethod?: string | null;
   promptType?: PromptContentType;
@@ -67,22 +93,15 @@ export type LibraryItem = {
 };
 
 export type LibraryFile = {
-  schemaVersion: 1;
+  /** 1 = legacy string category only; 2 = categoryId taxonomy assignment. */
+  schemaVersion: 1 | 2;
   updatedAt: string;
   items: LibraryItem[];
+  /** Optional embedded taxonomy snapshot (also stored in view-settings). */
+  categoryTaxonomy?: CategoryTaxonomy | null;
 };
 
 export type ThemeMode = "light" | "dark";
-
-export type PromptParameterLexiconEntry = {
-  id: string;
-  group: string;
-  label: string;
-  sourcePromptId?: string | null;
-  sourcePromptTitle?: string | null;
-  variable: string;
-  value: string;
-};
 
 export type PromptImageLexiconEntry = {
   id: string;
@@ -94,22 +113,31 @@ export type PromptImageLexiconEntry = {
 };
 
 export type PromptLexiconSettings = {
-  parameters: PromptParameterLexiconEntry[];
   categories: PromptImageLexiconEntry[];
   tags: PromptImageLexiconEntry[];
 };
 
 export type PromptLexiconKind = keyof PromptLexiconSettings;
-export type PromptLexiconEntry = PromptParameterLexiconEntry | PromptImageLexiconEntry;
+export type PromptLexiconEntry = PromptImageLexiconEntry;
 
 export type MaterialBrowserCollectionMode = "all" | "featured";
 export type MaterialBrowserGalleryMode = "masonry" | "grid";
 export type MaterialBrowserSortMode = "importedAt" | "updatedAt" | "imageSize" | "random";
 export type MaterialBrowserSortDirection = "asc" | "desc";
 
+export type CategoryWorkspaceState = {
+  taxonomy: CategoryTaxonomy | null;
+  inbox: CategoryInboxItem[];
+  candidates: CategoryCandidateProposal[];
+  learningEvents: CategoryLearningEvent[];
+};
+
 export type LibraryViewSettings = {
+  canvasDraft: CanvasDraftSettings;
   tagOrder: string[];
   likedImageIds: string[];
+  /** 资源推荐卡片的星标（按 URL 记录），星标项在所属分类内前置。 */
+  starredRecommendations: string[];
   generationModelOrder: string[];
   hiddenGenerationModels: string[];
   themeMode: ThemeMode;
@@ -122,7 +150,10 @@ export type LibraryViewSettings = {
   materialBrowserSortMode: MaterialBrowserSortMode;
   materialBrowserSortDirection: MaterialBrowserSortDirection;
   materialBrowserRandomSeed: number;
+  materialBrowserScrollTop: number;
   networkMaterialImportMode: NetworkMaterialImportMode;
   promptLexicons: PromptLexiconSettings | null;
   moduleState: BuiltinModuleState;
+  /** Unified category taxonomy + inbox/candidates for AI-driven maintenance. */
+  categoryWorkspace?: CategoryWorkspaceState | null;
 };

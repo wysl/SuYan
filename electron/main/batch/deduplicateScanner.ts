@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { getImagePath } from "../library/libraryPaths";
 import { readLibraryFile } from "../library/libraryStore";
+import { sha256FileViaRust } from "../runtime/rustFileOps";
 
 export type DeduplicateItem = {
   itemId: string;
@@ -77,15 +78,26 @@ async function collectHashedItems(items: readonly { id: string; imageFileName: s
 
     try {
       const filePath = getImagePath(item.imageFileName);
-      const buffer = await fs.readFile(filePath);
-      const hash = createHash("sha256").update(buffer).digest("hex");
+      // Rust 实现启用时优先走 Sidecar，分块流式计算，避免整文件读入内存。
+      const rustHash = await sha256FileViaRust(filePath);
+      let hash: string;
+      let fileSize: number;
+
+      if (rustHash) {
+        hash = rustHash.hash;
+        fileSize = rustHash.size;
+      } else {
+        const buffer = await fs.readFile(filePath);
+        hash = createHash("sha256").update(buffer).digest("hex");
+        fileSize = buffer.length;
+      }
 
       result.push({
         hash,
         item: {
           itemId: item.id,
           imageFileName: item.imageFileName,
-          fileSize: buffer.length,
+          fileSize,
           title: item.title,
           createdAt: item.createdAt,
         },

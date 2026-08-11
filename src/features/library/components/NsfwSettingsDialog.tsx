@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -38,6 +38,7 @@ import {
   resolveStatusFeedbackTone,
   type StatusFeedbackMessage,
 } from "../utils/statusFeedback";
+import { useAutoSave } from "../hooks/useAutoSave";
 
 type NsfwSettingsDialogProps = {
   aiSettings: PublicAiProviderSettings;
@@ -47,7 +48,7 @@ type NsfwSettingsDialogProps = {
   nsfwGradingSpeed: NsfwGradingSpeed;
   onClose: () => void;
   onGradeAllNsfw: (options?: { force?: boolean }) => void;
-  onSaveAiSettings: (settings: SaveAiProviderSettingsPayload) => Promise<boolean>;
+  onSaveAiSettings: (settings: SaveAiProviderSettingsPayload) => Promise<boolean | string>;
   onSave: (settings: {
     autoNsfwGrading: boolean;
     blurNsfwImages: boolean;
@@ -98,21 +99,6 @@ export function NsfwSettingsDialog({
   }, [feedbackText, onNotify]);
 
   useEffect(() => {
-    setAutoNsfwGradingDraft(autoNsfwGrading);
-    setBlurNsfwImagesDraft(blurNsfwImages);
-    setNsfwGradingSpeedDraft(nsfwGradingSpeed);
-    setFeedbackText("");
-  }, [autoNsfwGrading, blurNsfwImages, nsfwGradingSpeed]);
-
-  useEffect(() => {
-    setActionPreferencesDraft(aiSettings.actionPreferences);
-    setRuleEditor({ editingRuleId: null, instructions: "", label: "" });
-    setIsRuleEditorOpen(false);
-    setExpandedRuleId(null);
-    setModelSearchDraft("");
-  }, [aiSettings.actionPreferences, aiSettings.activeProfileId, aiSettings.profiles]);
-
-  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") {
         return;
@@ -159,33 +145,31 @@ export function NsfwSettingsDialog({
   const nsfwApiStatus = resolveNsfwApiStatus(nsfwActionProfile);
   const selectedRuleCount = nsfwActionRulePresetIds.length;
 
-  async function handleSave() {
-    setFeedbackText("正在保存内容分级...");
-    const isNsfwSettingsSaved = await onSave({
+  const basicSettingsDraft = useMemo(
+    () => ({
       autoNsfwGrading: autoNsfwGradingDraft,
       blurNsfwImages: blurNsfwImagesDraft,
       nsfwGradingSpeed: nsfwGradingSpeedDraft,
-    });
+    }),
+    [autoNsfwGradingDraft, blurNsfwImagesDraft, nsfwGradingSpeedDraft],
+  );
+  const aiSettingsDraftPayload = useMemo(
+    () => buildPublicAiSettingsPayload(aiSettings, actionPreferencesDraft),
+    [actionPreferencesDraft, aiSettings],
+  );
 
-    if (!isNsfwSettingsSaved) {
-      setFeedbackText("内容分级保存失败。");
-      return;
-    }
-
-    setFeedbackText("正在保存 NSFW 分级模型配置...");
-    const isAiSettingsSaved = await onSaveAiSettings(buildPublicAiSettingsPayload(aiSettings, actionPreferencesDraft));
-
-    setFeedbackText(
-      isAiSettingsSaved ? "内容分级已保存。" : "基础分级已保存，NSFW 模型保存失败。",
-    );
-  }
-
-  async function handleSaveAiSettingsOnly() {
-    setFeedbackText("正在保存检测引擎和规则...");
-    const isAiSettingsSaved = await onSaveAiSettings(buildPublicAiSettingsPayload(aiSettings, actionPreferencesDraft));
-
-    setFeedbackText(isAiSettingsSaved ? "检测引擎和规则已保存。" : "检测引擎和规则保存失败。");
-  }
+  useAutoSave({
+    isBusy,
+    onError: setFeedbackText,
+    onSave,
+    value: basicSettingsDraft,
+  });
+  useAutoSave({
+    isBusy,
+    onError: setFeedbackText,
+    onSave: onSaveAiSettings,
+    value: aiSettingsDraftPayload,
+  });
 
   function patchNsfwActionPreference(patch: AiActionPreference) {
     setActionPreferencesDraft((currentPreferences) => ({
@@ -212,7 +196,7 @@ export function NsfwSettingsDialog({
     setRuleEditor({ editingRuleId: null, instructions: "", label: "" });
     setIsRuleEditorOpen(false);
     setExpandedRuleId(null);
-    setFeedbackText("NSFW 模型配置已重置，保存后生效。");
+    setFeedbackText("NSFW 模型配置已重置，正在自动保存。");
   }
 
   function toggleRuleSelection(ruleId: string) {
@@ -231,7 +215,7 @@ export function NsfwSettingsDialog({
       rules,
       rulePresetIds: nextPresetIds,
     });
-    setFeedbackText("规则选择已更新，保存后生效。");
+    setFeedbackText("规则选择已更新，正在自动保存。");
   }
 
   function clearNsfwRules() {
@@ -240,7 +224,7 @@ export function NsfwSettingsDialog({
       rules: resolveActionRulesForDraft(nsfwAiAction, actionPreferencesDraft[nsfwAiAction]),
       rulePresetIds: [],
     });
-    setFeedbackText("已取消全部规则选择，保存后生效。");
+    setFeedbackText("已取消全部规则选择，正在自动保存。");
   }
 
   function editRule(rule: AiRulePreset) {
@@ -301,7 +285,7 @@ export function NsfwSettingsDialog({
     setRuleEditor({ editingRuleId: null, instructions: "", label: "" });
     setIsRuleEditorOpen(false);
     setExpandedRuleId(ruleId);
-    setFeedbackText(editingRuleId ? "规则已更新，保存后生效。" : "规则已新增，保存后生效。");
+    setFeedbackText(editingRuleId ? "规则已更新，正在自动保存。" : "规则已新增，正在自动保存。");
   }
 
   function deleteRule(ruleId: string) {
@@ -328,7 +312,7 @@ export function NsfwSettingsDialog({
       setExpandedRuleId(null);
     }
 
-    setFeedbackText("规则已删除，保存后生效。");
+    setFeedbackText("规则已删除，正在自动保存。");
   }
 
   return (
@@ -394,15 +378,6 @@ export function NsfwSettingsDialog({
               <p className="mt-1 text-xs leading-5 text-muted">指定图片 API、模型和判断策略。</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button
-                className="min-h-9 px-2.5 py-1.5 text-xs"
-                disabled={isBusy}
-                icon={<Check size={14} />}
-                variant="secondary"
-                onClick={() => void handleSaveAiSettingsOnly()}
-              >
-                保存引擎与规则
-              </Button>
               <Button
                 className="min-h-9 px-2.5 py-1.5 text-xs"
                 icon={<X size={14} />}
@@ -801,14 +776,6 @@ export function NsfwSettingsDialog({
         ) : null}
       </div>
 
-      <footer className="flex flex-wrap justify-end gap-2 border-t border-border px-5 py-4">
-        <Button icon={<X size={16} />} variant="ghost" onClick={onClose}>
-          取消
-        </Button>
-        <Button disabled={isBusy} icon={<Check size={16} />} variant="primary" onClick={() => void handleSave()}>
-          保存全部设置
-        </Button>
-      </footer>
     </AppDialog>
   );
 }

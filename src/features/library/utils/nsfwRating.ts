@@ -1,6 +1,7 @@
 import type { LibraryItem, NsfwRating } from "../types/library";
-import type { RemotePromptAnalysis } from "../types/ai";
+import type { RemotePromptAnalysis, RemotePromptAnalysisV2 } from "../types/ai";
 import { isVideoMediaFile } from "./mediaFileTypes";
+import { legacyFromRemoteAnalysisV2 } from "./remoteAnalysisV2";
 
 const exactNsfwLabels = new Set(["nsfw", "unsafe", "adult", "explicit", "porn", "色情", "情色", "成人", "限制级", "不安全"]);
 const exactSafeLabels = new Set(["sfw", "safe", "normal", "clean", "安全", "正常", "普通", "非限制级", "非色情"]);
@@ -73,6 +74,40 @@ export function resolveNsfwRatingFromRemoteAnalysis(analysis: RemotePromptAnalys
   }
 
   return "unknown";
+}
+
+/**
+ * Minimum confidence for a structured V2 safety verdict to be trusted directly.
+ * Below this the rating is treated as a weak signal and we defer to the text/
+ * label heuristic instead. Legacy-lifted safety results carry confidence 0 (the
+ * verdict rides in categories[0].label, not safety), so they always fall through
+ * to the historical heuristic path unchanged.
+ */
+const minStructuredSafetyConfidence = 0.5;
+
+/**
+ * Prefer the model's dedicated V2 safety channel over inferring the verdict from
+ * the collapsed category label. A confident `safe`/`nsfw` rating is returned
+ * directly; `suggestive`, `unknown`, or any sub-confidence rating falls through
+ * to {@link resolveNsfwRatingFromRemoteAnalysis} on the collapsed V1 shape. This
+ * keeps borderline content from being force-classified and preserves the exact
+ * historical behavior for legacy-lifted payloads (safety confidence 0), which
+ * still resolve via categories[0].label after the collapse.
+ */
+export function resolveNsfwRatingFromRemoteAnalysisV2(analysis: RemotePromptAnalysisV2): NsfwRating {
+  const { rating, confidence } = analysis.safety;
+
+  if (confidence >= minStructuredSafetyConfidence) {
+    if (rating === "nsfw") {
+      return "nsfw";
+    }
+
+    if (rating === "safe") {
+      return "safe";
+    }
+  }
+
+  return resolveNsfwRatingFromRemoteAnalysis(legacyFromRemoteAnalysisV2(analysis));
 }
 
 function resolveExactSafetyLabel(input: string): NsfwRating | null {

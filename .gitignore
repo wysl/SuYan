@@ -76,3 +76,11 @@ private/
 # Generated icons
 build/icon.ico
 build/_exe-icon-probe*.png
+# Keep the Windows Go helper fallback versioned; other generated helper outputs remain ignored.
+tools/go-file-helper/bin/*
+!tools/go-file-helper/bin/.gitkeep
+!tools/go-file-helper/bin/go-file-helper.exe
+
+# Rust Core sidecar build artifacts
+native/suyan-core/target/
+native/suyan-core/bin/

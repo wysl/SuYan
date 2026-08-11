@@ -6,9 +6,12 @@ import {
   extractGptImage2GalleryInfo,
   extractJimengWorkInfo,
   extractKnownPromptSiteInfo,
+  extractOpenNanaPromptInfo,
   extractPngTextChunks,
+  extractPromptsChatPromptInfo,
   extractWebToMindPromptInfo,
   extractXmiaomPromptInfo,
+  extractYouMindPromptInfo,
   extractXStatusInfo,
   getImportableRemoteMediaUrls,
   isSourceOnlyPrompt,
@@ -20,12 +23,15 @@ import {
   parseJimengItemInfoPayload,
   parseJimengWorkHtml,
   parseKnownPromptSiteHtml,
+  parseOpenNanaPromptHtml,
+  parsePromptsChatApiPayload,
   parsePromptDraftFromHtml,
   parsePromptDraftFromImageMetadata,
   parsePromptShareUrl,
   parsePromptText,
   parseWebToMindPromptCaseApiPayload,
   parseWebToMindPromptHtml,
+  parseYouMindPromptHtml,
   parseXmiaomPromptHtml,
   parseXStatusSyndicationPayload,
 } from "../../electron/shared/promptImportParser";
@@ -1736,6 +1742,137 @@ describe("promptImportParser", () => {
     expect(draft.negativePrompt).toBe("low quality, bad anatomy, extra digits");
     expect(draft.generationMethod).toBe("myCustomModel_v1");
     expect(draft.tags).toContain("ComfyUI");
+  });
+
+  it("recognizes OpenNana / YouMind / prompts.chat share urls", () => {
+    expect(extractOpenNanaPromptInfo("https://opennana.com/awesome-prompt-gallery/hyper-realistic-east-asian-woman-luxury-fashion-portrait")).toEqual({
+      sourceUrl: "https://opennana.com/awesome-prompt-gallery/hyper-realistic-east-asian-woman-luxury-fashion-portrait",
+      slug: "hyper-realistic-east-asian-woman-luxury-fashion-portrait",
+    });
+    expect(extractYouMindPromptInfo("https://youmind.com/zh-CN/video-prompts/japanese-classroom-romance-1402")).toEqual({
+      sourceUrl: "https://youmind.com/zh-CN/video-prompts/japanese-classroom-romance-1402",
+      promptId: "1402",
+    });
+    expect(extractYouMindPromptInfo("https://youmind.com/zh-CN/seedance-2-0-prompts?id=1402")?.promptId).toBe("1402");
+    expect(extractPromptsChatPromptInfo("https://prompts.chat/prompts/cmrm2sj0k000ajx04ctn1zwxv_video")).toEqual({
+      sourceUrl: "https://prompts.chat/prompts/cmrm2sj0k000ajx04ctn1zwxv_video",
+      promptId: "cmrm2sj0k000ajx04ctn1zwxv",
+      slug: "video",
+    });
+    expect(extractKnownPromptSiteInfo("https://opennana.com/?ref=4H8CJGZM")?.siteName).toBe("OpenNana");
+    expect(extractKnownPromptSiteInfo("https://kookaigc.top/?view=gallery")?.siteName).toBe("KookAIGC");
+  });
+
+  it("parses OpenNana detail html into matched prompt and effect image", () => {
+    const sourceUrl =
+      "https://opennana.com/awesome-prompt-gallery/hyper-realistic-east-asian-woman-luxury-fashion-portrait";
+    const html = [
+      "<html><head>",
+      "<title>超写实东亚女性豪华时尚室内人像 | ChatGPT AI提示词 | OpenNana</title>",
+      '<meta property="og:image" content="https://img.opennana.com/prompts/assets/202607/1784556903561-148ynelu-1784556905222-1.jpg" />',
+      '<meta name="keywords" content="人像,时尚,室内" />',
+      "</head><body>",
+      '<script>self.__next_f.push([1,"Hyper-realistic luxury fashion portrait. Adult East Asian female seated elegantly.\\nNegative: No text, no watermark, no logo."])</script>',
+      "</body></html>",
+    ].join("");
+    const draft = parseOpenNanaPromptHtml(html, sourceUrl);
+
+    expect(draft).toMatchObject({
+      title: "超写实东亚女性豪华时尚室内人像",
+      sourceUrl,
+      sourceImageUrl: "https://img.opennana.com/prompts/assets/202607/1784556903561-148ynelu-1784556905222-1.jpg",
+      negativePrompt: "No text, no watermark, no logo.",
+      authorName: "OpenNana",
+    });
+    expect(draft?.prompt).toContain("Hyper-realistic luxury fashion portrait");
+    expect(draft?.tags).toEqual(expect.arrayContaining(["OpenNana", "图像提示词"]));
+  });
+
+  it("parses YouMind Seedance detail html into prompt and effect video", () => {
+    const sourceUrl = "https://youmind.com/zh-CN/video-prompts/japanese-classroom-romance-1402";
+    const html = [
+      "<html><head>",
+      "<title>Seedance 2.0：15 秒电影感日式浪漫短片 - Seedance 2.0 AI Video Prompt | YouMind</title>",
+      '<meta property="og:image" content="https://cms-assets.youmind.com/media/video-covers/video-cover-4cd69204137a24106c99.jpg" />',
+      "</head><body>",
+      '<video controls poster="https://cms-assets.youmind.com/media/video-covers/video-cover-4cd69204137a24106c99.jpg">',
+      '<source src="https://cms-assets.youmind.com/media/1781842176206_sp3qsl_Seedance-2.0-15-Second-Cinematic-Japanese-Romance-Short-Film" type="video/mp4"/>',
+      "</video>",
+      '<script>self.__next_f.push([1,"{\\"promptContent\\":\\"15秒电影级日剧纯爱暧昧短片，超写实画质，午后空教室暖金色阳光透过百叶窗洒在并排课桌上。\\"}"])</script>',
+      "</body></html>",
+    ].join("");
+    const draft = parseYouMindPromptHtml(html, sourceUrl);
+
+    expect(draft).toMatchObject({
+      sourceUrl,
+      generationMethod: "Seedance 2.0",
+    });
+    expect(draft?.prompt).toContain("15秒电影级日剧纯爱暧昧短片");
+    expect(draft?.sourceImageUrls?.[0]).toContain("cms-assets.youmind.com/media/1781842176206");
+    expect(draft?.tags).toEqual(expect.arrayContaining(["YouMind", "视频提示词", "Seedance 2.0"]));
+    expect(
+      getImportableRemoteMediaUrls([
+        "https://cms-assets.youmind.com/media/1781842176206_sp3qsl_Seedance-2.0-15-Second-Cinematic-Japanese-Romance-Short-Film",
+        "https://cms-assets.youmind.com/media/video-covers/video-cover-4cd69204137a24106c99.jpg",
+      ])[0],
+    ).toContain("1781842176206");
+  });
+
+  it("parses prompts.chat api payload with media url", () => {
+    const sourceUrl = "https://prompts.chat/prompts/cmrm2sj0k000ajx04ctn1zwxv_video";
+    const draft = parsePromptsChatApiPayload(
+      {
+        id: "cmrm2sj0k000ajx04ctn1zwxv",
+        title: "Video",
+        slug: "video",
+        content:
+          "Cinematic close-up of a mysterious bartender pouring a glowing green liquid into a glass, heavy smoke rising, dark cocktail bar background, 4k, hyper-realistic, slow motion.",
+        type: "IMAGE",
+        mediaUrl: "https://prompts-chat-space.fra1.digitaloceanspaces.com/prompt-media/prompt-media-1784119660208-ou1bky.jpg",
+        author: { name: "IT Nest Tomal", username: "itnesttomal" },
+        tags: [],
+      },
+      sourceUrl,
+    );
+
+    expect(draft).toMatchObject({
+      title: "Video",
+      sourceUrl,
+      sourceImageUrl:
+        "https://prompts-chat-space.fra1.digitaloceanspaces.com/prompt-media/prompt-media-1784119660208-ou1bky.jpg",
+      authorName: "IT Nest Tomal",
+    });
+    expect(draft?.prompt).toContain("mysterious bartender");
+    expect(draft?.tags).toEqual(expect.arrayContaining(["prompts.chat", "图像提示词"]));
+  });
+
+  it("parses KookAIGC gallery html with matched image and prompt", () => {
+    const sourceUrl = "https://kookaigc.top/?view=gallery&id=demo-1";
+    const html = [
+      "<html><head>",
+      "<title>赛博夜景人像 | KookAIGC</title>",
+      '<meta property="og:image" content="https://cdn.kookaigc.top/gallery/demo-1.jpg" />',
+      "</head><body>",
+      '<script type="application/json">',
+      JSON.stringify({
+        item: {
+          title: "赛博夜景人像",
+          prompt: "雨夜霓虹街头的东亚女性近景人像，潮湿路面反光，电影感光影，浅景深。",
+          imageUrl: "https://cdn.kookaigc.top/gallery/demo-1.jpg",
+        },
+      }),
+      "</script>",
+      "</body></html>",
+    ].join("");
+    const draft = parseKnownPromptSiteHtml(html, extractKnownPromptSiteInfo(sourceUrl)!);
+
+    expect(draft).toMatchObject({
+      title: "赛博夜景人像",
+      sourceImageUrl: "https://cdn.kookaigc.top/gallery/demo-1.jpg",
+      authorName: "KookAIGC",
+    });
+    expect(draft?.prompt).toContain("雨夜霓虹街头");
+    expect(draft?.tags).toEqual(expect.arrayContaining(["KookAIGC", "图像提示词"]));
   });
 });
 

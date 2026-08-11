@@ -2,44 +2,19 @@ import type {
   LibraryItem,
   PromptImageLexiconEntry,
   PromptLexiconSettings,
-  PromptParameterLexiconEntry,
 } from "../types/library";
 import { photographyCategoryDefinitions } from "./photographyCategories";
+import { buildSystemCategoryId } from "./categoryId";
 import {
   buildPromptAnalysisFromSavedCapsules,
   omitNegativeAnalysisSections,
-  type PromptAnalysisResult,
 } from "./promptAnalysis";
 import {
-  getPromptSectionKeyByVariable,
-  normalizePromptSectionValue,
   promptSectionMeta,
   promptSplitSectionOrder,
   splitPromptToTemplate,
   type PromptSplitSectionKey,
 } from "./promptSplit";
-
-export type PromptParameterLexiconValue = {
-  group?: string;
-  label: string;
-  sectionKey?: PromptSplitSectionKey;
-  sourcePromptId?: string | null;
-  sourcePromptTitle?: string | null;
-  value: string;
-  variable: string;
-};
-
-export type PromptParameterLexiconSource = {
-  sourcePromptId?: string | null;
-  sourcePromptTitle?: string | null;
-};
-
-export type PromptParameterLexiconValueScopes = {
-  all: string[];
-  currentPrompt: string[];
-  global: string[];
-  otherPrompts: string[];
-};
 
 export type PromptLexiconMergeResult = {
   addedCount: number;
@@ -51,24 +26,8 @@ export type PromptLexiconPruneResult = {
   promptLexicons: PromptLexiconSettings | null;
   removedCategoryCount: number;
   removedCount: number;
-  removedParameterCount: number;
   removedTagCount: number;
   skipped?: boolean;
-};
-
-export type PromptParameterMenuValidationCode = "duplicate-name" | "numeric-prefix";
-
-export type PromptParameterMenuValidationIssue = {
-  code: PromptParameterMenuValidationCode;
-  message: string;
-  name: string;
-  parentPath: string;
-  path: string;
-};
-
-export type PromptParameterMenuValidationResult = {
-  isValid: boolean;
-  issues: PromptParameterMenuValidationIssue[];
 };
 
 const defaultTagLexiconGroupLabel = "通用标签";
@@ -76,305 +35,165 @@ const tagColorGroupLabel = "颜色分类";
 const tagQuantityGroupLabel = "数量分类";
 const aiTagDescription = "来自 AI 标签分析";
 const currentPromptTagDescription = "来自当前提示词标签";
-const defaultParameterFunctionalGroupLabel = "文本与补充";
-const functionalPromptParameterGroupLabels = [
-  "摄影参数",
-  "风格与审美",
-  "光影",
-  "道具与物体",
-  "主体与身份",
-  "身体与面部",
-  "妆发与配饰",
-  "服装结构",
-  "动作姿态",
-  "空间环境",
-  "构图与画面",
-  "材质纹理",
-  "色彩",
-  "食材与烹饪",
-  "产品与商业",
-  "环境与氛围",
-  "文本与补充",
+
+const defaultSubjectTagLabels = [
+  "人物",
+  "女性",
+  "男性",
+  "儿童",
+  "猫",
+  "狗",
+  "鸟类",
+  "汽车",
+  "手机",
+  "手表",
+  "咖啡",
+  "花朵",
+  "建筑",
+  "香水",
+  "玻璃瓶",
+  "产品主体",
+  "包装",
+  "珠宝",
+  "食物",
+  "饮品",
+  "动物",
+  "宠物",
+  "植物",
+  "道具",
+  "文字图形",
 ] as const;
-const legacyPromptParameterDomainLabelKeys = new Set(
-  [
-    "人物像素级拆解",
-    "场景像素级拆解",
-    "电商产品图分析",
-    "食物身份分析",
-    "菜系识别",
-    "风格像素级拆解",
-    "光影像素级拆解",
-    "道具像素级拆解",
-    "历史地域服饰像素级拆解",
-    "镜头与画面",
-  ].map(normalizeMenuNameKey),
-);
-const legacyPromptParameterMenuLabelGroupByKey = new Map<string, string>([
-  ...functionalPromptParameterGroupLabels.map((label) => [normalizeMenuNameKey(label), label] as const),
-  ...[
-    ["摄影参数", "摄影参数"],
-    ["人像摄影参数", "摄影参数"],
-    ["场景摄影参数", "摄影参数"],
-    ["产品摄影参数", "摄影参数"],
-    ["摄影表现风格", "摄影参数"],
-    ["摄影呈现", "摄影参数"],
-    ["镜头器材", "摄影参数"],
-    ["拍摄角度", "摄影参数"],
-    ["景别", "摄影参数"],
-    ["画面比例", "摄影参数"],
-    ["构图逻辑", "摄影参数"],
-    ["曝光逻辑", "摄影参数"],
-    ["图像风格", "风格与审美"],
-    ["风格类别", "风格与审美"],
-    ["视觉流派", "风格与审美"],
-    ["时代属性", "风格与审美"],
-    ["国家文化", "风格与审美"],
-    ["审美体系", "风格与审美"],
-    ["设计语言", "风格与审美"],
-    ["风格关键词", "风格与审美"],
-    ["商业视觉风格", "产品与商业"],
-    ["主体定位", "主体与身份"],
-    ["人物主体定位", "主体与身份"],
-    ["基础身份属性", "主体与身份"],
-    ["年龄气质", "主体与身份"],
-    ["食物大类别", "主体与身份"],
-    ["具体名称识别", "主体与身份"],
-    ["产品主体定位", "主体与身份"],
-    ["服饰文化身份", "主体与身份"],
-    ["国家地区体系", "主体与身份"],
-    ["民族体系", "主体与身份"],
-    ["历史时期", "主体与身份"],
-    ["历史朝代", "主体与身份"],
-    ["社会身份", "主体与身份"],
-    ["身体结构", "身体与面部"],
-    ["身材骨架", "身体与面部"],
-    ["面部结构", "身体与面部"],
-    ["骨相五官", "身体与面部"],
-    ["肤质细节", "身体与面部"],
-    ["皮肤基底", "身体与面部"],
-    ["肤质纹理", "身体与面部"],
-    ["皮肤附加细节", "身体与面部"],
-    ["发型结构", "妆发与配饰"],
-    ["发型头饰", "妆发与配饰"],
-    ["发型造型", "妆发与配饰"],
-    ["饰品细节", "妆发与配饰"],
-    ["面部配饰", "妆发与配饰"],
-    ["颈部配饰", "妆发与配饰"],
-    ["手部配饰", "妆发与配饰"],
-    ["头部配饰", "妆发与配饰"],
-    ["服装结构", "服装结构"],
-    ["服装细节", "服装结构"],
-    ["服装风格", "服装结构"],
-    ["服装剪裁", "服装结构"],
-    ["服装形制", "服装结构"],
-    ["裁剪方式", "服装结构"],
-    ["穿着方式", "服装结构"],
-    ["层次结构", "服装结构"],
-    ["配套系统", "服装结构"],
-    ["制作工艺", "服装结构"],
-    ["服饰微观细节", "服装结构"],
-    ["动作姿态", "动作姿态"],
-    ["手部手势", "动作姿态"],
-    ["腿部体态", "动作姿态"],
-    ["肩颈体态", "动作姿态"],
-    ["表情情绪", "动作姿态"],
-    ["面部表情", "动作姿态"],
-    ["场景类型定位", "空间环境"],
-    ["空间结构", "空间环境"],
-    ["空间比例尺度", "空间环境"],
-    ["建筑结构", "空间环境"],
-    ["建筑空间结构", "空间环境"],
-    ["背景环境", "空间环境"],
-    ["产品背景环境", "空间环境"],
-    ["产品与环境关系", "空间环境"],
-    ["产品环境关系", "空间环境"],
-    ["透视关系", "构图与画面"],
-    ["场景透视关系", "构图与画面"],
-    ["前中后景分层", "构图与画面"],
-    ["构图布局", "构图与画面"],
-    ["产品构图布局", "构图与画面"],
-    ["产品比例关系", "构图与画面"],
-    ["构图语言", "构图与画面"],
-    ["构图留白", "构图与画面"],
-    ["材质纹理", "材质纹理"],
-    ["材质语言", "材质纹理"],
-    ["产品材质纹理", "材质纹理"],
-    ["场景材质纹理", "材质纹理"],
-    ["服装材质", "材质纹理"],
-    ["地面材质", "材质纹理"],
-    ["色彩体系", "色彩"],
-    ["色彩语言", "色彩"],
-    ["色彩关系", "色彩"],
-    ["基础颜色", "色彩"],
-    ["场景色彩体系", "色彩"],
-    ["产品色彩体系", "色彩"],
-    ["服装颜色", "色彩"],
-    ["发色", "色彩"],
-    ["色彩基因", "色彩"],
-    ["光影关系", "光影"],
-    ["光影表现", "光影"],
-    ["光影语言", "光影"],
-    ["光源类型", "光影"],
-    ["光源位置", "光影"],
-    ["光线方向", "光影"],
-    ["阴影方向", "光影"],
-    ["反射折射", "光影"],
-    ["摄影灯光方案", "光影"],
-    ["微观光学细节", "光影"],
-    ["道具识别", "道具与物体"],
-    ["道具类别", "道具与物体"],
-    ["道具功能作用", "道具与物体"],
-    ["数量组合关系", "道具与物体"],
-    ["空间位置", "道具与物体"],
-    ["尺寸比例", "道具与物体"],
-    ["外形结构", "道具与物体"],
-    ["摆放方式", "道具与物体"],
-    ["使用状态", "道具与物体"],
-    ["主体关联关系", "道具与物体"],
-    ["主要物体元素", "道具与物体"],
-    ["产品配件元素", "道具与物体"],
-    ["环境小道具", "道具与物体"],
-    ["菜系分类", "食材与烹饪"],
-    ["地域文化来源", "食材与烹饪"],
-    ["典型食材体系", "食材与烹饪"],
-    ["味型视觉表达", "食材与烹饪"],
-    ["传统摆盘习惯", "食材与烹饪"],
-    ["常用餐具风格", "食材与烹饪"],
-    ["主体食材", "食材与烹饪"],
-    ["辅助食材", "食材与烹饪"],
-    ["结构层次", "食材与烹饪"],
-    ["外形轮廓", "食材与烹饪"],
-    ["烹饪方式", "食材与烹饪"],
-    ["熟成状态", "食材与烹饪"],
-    ["口感视觉表现", "食材与烹饪"],
-    ["新鲜程度", "食材与烹饪"],
-    ["份量比例", "食材与烹饪"],
-    ["产品外观结构", "产品与商业"],
-    ["产品摆放角度", "产品与商业"],
-    ["产品细节卖点", "产品与商业"],
-    ["商业定位", "产品与商业"],
-    ["风格商业定位", "产品与商业"],
-    ["产品微观细节", "产品与商业"],
-    ["微观真实细节", "产品与商业"],
-    ["情绪表达", "环境与氛围"],
-    ["氛围情绪", "环境与氛围"],
-    ["故事氛围", "环境与氛围"],
-    ["时间天气", "环境与氛围"],
-    ["环境天气", "环境与氛围"],
-    ["参考对象", "文本与补充"],
-    ["品牌文字", "文本与补充"],
-    ["知名品牌", "文本与补充"],
-    ["字体", "文本与补充"],
-    ["文本内容", "文本与补充"],
-    ["负向提示词", "文本与补充"],
-    ["避免内容", "文本与补充"],
-    ["其他", "文本与补充"],
-    ["补充信息", "文本与补充"],
-  ].map(([label, group]) => [normalizeMenuNameKey(label), group] as const),
-]);
-const defaultStyleAnalysisTagLabels = [
-  "风格类别",
-  "视觉流派",
-  "时代属性",
-  "国家文化",
-  "审美体系",
-  "色彩语言",
-  "构图语言",
-  "光影语言",
-  "材质语言",
-  "空间语言",
-  "设计语言",
-  "情绪表达",
-  "风格商业定位",
-  "风格关键词",
+
+const defaultStyleTagLabels = [
+  "电影感",
+  "高级感",
+  "极简",
+  "复古",
+  "未来感",
+  "赛博朋克",
+  "日系",
+  "胶片",
+  "奢华",
+  "自然",
+  "商业广告感",
+  "纪实感",
+  "梦幻",
+  "韩系干净",
+  "港风",
+  "黑白",
+  "高对比",
+  "低饱和",
+  "高饱和",
+  "胶片颗粒",
+  "超写实",
+  "插画感",
+  "3D渲染感",
 ] as const;
-const defaultLightingAnalysisTagLabels = [
-  "光源类型",
-  "光源位置",
-  "光线方向",
-  "光源大小",
-  "光线硬软程度",
-  "光线强弱",
-  "光比关系",
-  "明暗分布",
-  "阴影方向",
-  "阴影软硬",
-  "高光位置",
-  "反射折射",
-  "材质响应",
-  "环境光照",
-  "色温色彩",
-  "时间天气",
-  "氛围情绪",
-  "摄影灯光方案",
-  "微观光学细节",
+
+const defaultLightingTagLabels = [
+  "自然光",
+  "柔光",
+  "硬光",
+  "逆光",
+  "侧光",
+  "轮廓光",
+  "低调光",
+  "高调光",
+  "戏剧光",
+  "棚拍",
+  "顶光",
+  "窗光",
+  "霓虹光",
 ] as const;
-const defaultPropAnalysisTagLabels = [
-  "道具识别",
-  "道具类别",
-  "道具功能作用",
-  "数量组合关系",
-  "空间位置",
-  "尺寸比例",
-  "外形结构",
-  "材质纹理",
-  "色彩关系",
-  "摆放方式",
-  "使用状态",
-  "主体关联关系",
-  "光影表现",
-  "风格属性",
-  "故事氛围",
-  "微观细节",
+
+const defaultCompositionTagLabels = [
+  "中心构图",
+  "三分法",
+  "对称构图",
+  "留白",
+  "前景遮挡",
+  "框架构图",
+  "俯拍",
+  "平拍",
+  "低角度",
+  "高角度",
+  "引导线",
+  "负空间",
 ] as const;
-const defaultCostumeAnalysisTagLabels = [
-  "服饰文化身份",
-  "国家地区体系",
-  "民族体系",
-  "历史时期",
-  "历史朝代",
-  "服装形制",
-  "裁剪方式",
-  "穿着方式",
-  "层次结构",
-  "配套系统",
-  "社会身份",
-  "制作工艺",
-  "民族纹样符号",
-  "服饰审美语言",
-  "摄影呈现",
-  "服饰微观细节",
+
+const defaultTechniqueTagLabels = [
+  "浅景深",
+  "长曝光",
+  "微距",
+  "HDR",
+  "焦外虚化",
+  "运动冻结",
+  "慢门",
+  "景深合成",
+  "高速快门",
+  "航拍俯视",
+  "移轴",
+  "多重曝光",
+  "深景深",
+] as const;
+
+const defaultMaterialTagLabels = [
+  "玻璃",
+  "金属",
+  "皮革",
+  "木材",
+  "陶瓷",
+  "水",
+  "液体",
+  "布料",
+  "石材",
+  "塑料",
+  "纸张",
+] as const;
+
+const defaultEmotionTagLabels = [
+  "温暖",
+  "孤独",
+  "宁静",
+  "活力",
+  "神秘",
+  "浪漫",
+  "力量感",
+  "清冷",
+  "紧张",
+  "愉悦",
+] as const;
+
+const defaultApplicationTagLabels = [
+  "电商",
+  "广告",
+  "海报",
+  "品牌宣传",
+  "社交媒体",
+  "杂志",
+  "包装",
+  "电商主图",
+  "详情页",
+  "海报KV",
+  "Lookbook",
+  "封面图",
+  "剧照",
 ] as const;
 
 export function createDefaultPromptLexiconSettings(tagLabels: readonly string[] = []): PromptLexiconSettings {
+  // Default seed for brand-new installs only.
+  // Do NOT pack hundreds of template tags into every empty lexicon —
+  // users who clear tags expect an empty directory until AI/user adds them.
   return {
-    parameters: promptSplitSectionOrder.map((key) => {
-      const meta = promptSectionMeta[key];
-
-      return {
-        id: `parameter-${key}`,
-        group: getPromptParameterGroup(key),
-        label: meta.label,
-        variable: meta.variable,
-        value: "",
-      };
-    }),
-    categories: photographyCategoryDefinitions.map((category, index) => ({
-      id: `category-${index + 1}`,
+    categories: photographyCategoryDefinitions.map((category) => ({
+      id: buildSystemCategoryId(category.group, category.label),
       group: category.group,
       label: category.label,
       description: category.description,
       parentId: null,
       imageFileName: null,
     })),
-    tags: uniqueLabels([
-      ...defaultStyleAnalysisTagLabels,
-      ...defaultLightingAnalysisTagLabels,
-      ...defaultPropAnalysisTagLabels,
-      ...defaultCostumeAnalysisTagLabels,
-      ...tagLabels,
-    ]).map((tag, index) => ({
+    tags: uniqueLabels(tagLabels).map((tag, index) => ({
       id: `tag-${index + 1}`,
       group: getPromptTagGroup(tag),
       label: tag,
@@ -385,71 +204,31 @@ export function createDefaultPromptLexiconSettings(tagLabels: readonly string[] 
   };
 }
 
-export function mergeLibraryPromptParametersIntoLexicon(
-  promptLexicons: PromptLexiconSettings | null,
-  items: readonly LibraryItem[],
-  knownCategories: readonly string[] = [],
-): PromptLexiconMergeResult {
-  return mergeLibraryPromptParametersIntoLexiconForItems(promptLexicons, items, items, knownCategories);
-}
-
 /**
- * 仅扫描指定条目，避免导入后全库重建导致数秒卡顿。
- * seed/normalize 仍基于全库标签，保证默认词库完整。
+ * 同步词库：扫描指定条目，将素材标签合并进标签词库。
+ * 导入后只扫描新增条目，避免全库重建导致数秒卡顿。
  */
-export function mergeLibraryPromptParametersIntoLexiconForItems(
+export function mergeLibraryPromptLexiconForItems(
   promptLexicons: PromptLexiconSettings | null,
   allItems: readonly LibraryItem[],
   targetItems: readonly LibraryItem[],
   knownCategories: readonly string[] = [],
 ): PromptLexiconMergeResult {
+  void knownCategories;
   const seedTagLabels = uniqueLabels(allItems.flatMap((item) => item.tags));
   const normalizedLexicons = normalizePromptLexiconSettings(promptLexicons, seedTagLabels);
-  const parameterWorkingSet = createParameterLexiconWorkingSet(normalizedLexicons.parameters);
   const tagWorkingSet = createTagLexiconWorkingSet(normalizedLexicons.tags);
   let addedCount = 0;
   let indexedPromptCount = 0;
 
   for (const item of targetItems) {
-    const savedCapsuleAnalysis = buildPromptAnalysisFromSavedCapsules(`${item.prompt}\n${item.negativePrompt}`, {
-      title: item.title,
-      tags: item.tags,
-      currentCategory: item.category ?? undefined,
-      knownCategories,
-    });
-    const visibleAnalysis = savedCapsuleAnalysis ? omitNegativeAnalysisSections(savedCapsuleAnalysis) : null;
-
-    if (!visibleAnalysis || visibleAnalysis.sections.length === 0) {
-      continue;
+    // Always index material tags into the tag browser lexicon. AI tag recognition
+    // writes item.tags without capsules; those must still appear under 标签浏览.
+    const materialTags = uniqueLabels(item.tags ?? []);
+    if (materialTags.length > 0) {
+      addedCount += applyTagLabelsToWorkingSet(tagWorkingSet, materialTags);
+      indexedPromptCount += 1;
     }
-
-    const source: PromptParameterLexiconSource = {
-      sourcePromptId: item.id,
-      sourcePromptTitle: item.title,
-    };
-
-    for (const section of visibleAnalysis.sections) {
-      for (const value of section.values) {
-        const added = applyParameterValueToWorkingSet(
-          parameterWorkingSet,
-          {
-            group: getPromptParameterGroup(section.key),
-            label: section.label,
-            sectionKey: section.key,
-            value,
-            variable: section.variable,
-          },
-          source,
-        );
-
-        if (added) {
-          addedCount += 1;
-        }
-      }
-    }
-
-    addedCount += applyTagLabelsToWorkingSet(tagWorkingSet, visibleAnalysis.suggestedTags);
-    indexedPromptCount += 1;
   }
 
   return {
@@ -457,7 +236,6 @@ export function mergeLibraryPromptParametersIntoLexiconForItems(
     indexedPromptCount,
     promptLexicons: {
       ...normalizedLexicons,
-      parameters: parameterWorkingSet.parameters,
       tags: tagWorkingSet.tags,
     },
   };
@@ -473,20 +251,8 @@ export function prunePromptLexiconsForLibraryItems(
       promptLexicons,
       removedCategoryCount: 0,
       removedCount: 0,
-      removedParameterCount: 0,
       removedTagCount: 0,
     };
-  }
-
-  // 没有“绑定到具体提示词来源”的参数时，不需要全库重建引用图。
-  // 分类/标签默认词条会保留，剩余项可按当前库的直接标签/分类快速过滤。
-  const hasSourceBoundParameters = promptLexicons.parameters.some(
-    (entry) =>
-      Boolean(normalizeOptionalSourceValue(entry.sourcePromptId) || normalizeOptionalSourceValue(entry.sourcePromptTitle)),
-  );
-
-  if (!hasSourceBoundParameters) {
-    return prunePromptLexiconsWithoutSourceBoundParameters(promptLexicons, items, knownCategories);
   }
 
   const references = collectPromptLexiconReferences(items, knownCategories);
@@ -496,324 +262,133 @@ export function prunePromptLexiconsForLibraryItems(
     defaultLexicons.categories.map((entry) => normalizeLexiconLabelKey(entry.label)),
   );
   const defaultTagLabelKeys = new Set(defaultLexicons.tags.map((entry) => normalizeLexiconLabelKey(entry.label)));
-  const parameters = normalizedLexicons.parameters.filter((entry) => shouldKeepParameterEntry(entry, references));
   const categories = normalizedLexicons.categories.filter((entry) =>
     shouldKeepCategoryEntry(entry, references, defaultCategoryLabelKeys),
   );
   const tags = normalizedLexicons.tags.filter((entry) =>
     shouldKeepTagEntry(entry, references, defaultTagLabelKeys),
   );
-  const removedParameterCount = normalizedLexicons.parameters.length - parameters.length;
   const removedCategoryCount = normalizedLexicons.categories.length - categories.length;
   const removedTagCount = normalizedLexicons.tags.length - tags.length;
 
   return {
     promptLexicons: {
-      parameters,
       categories,
       tags,
     },
     removedCategoryCount,
-    removedCount: removedParameterCount + removedCategoryCount + removedTagCount,
-    removedParameterCount,
+    removedCount: removedCategoryCount + removedTagCount,
     removedTagCount,
   };
 }
 
 /**
- * 删除条目后的轻量剪枝：只清理明确绑定到已删提示词的参数，
- * 不做全库胶囊分析。日志显示完整剪枝常花费数秒且 removedCount=0。
+ * 删除条目后的轻量剪枝：只清理标签/分类中不再被剩余条目引用的条目。
  */
 export function prunePromptLexiconsAfterItemDeletion(
   promptLexicons: PromptLexiconSettings | null,
-  _remainingItems: readonly LibraryItem[],
-  deletedItems: readonly LibraryItem[],
-  _knownCategories: readonly string[] = [],
+  remainingItems: readonly LibraryItem[],
+  _deletedItems: readonly LibraryItem[],
+  knownCategories: readonly string[] = [],
 ): PromptLexiconPruneResult {
-  if (!promptLexicons || deletedItems.length === 0) {
+  if (!promptLexicons || remainingItems.length === 0) {
     return {
       promptLexicons,
       removedCategoryCount: 0,
       removedCount: 0,
-      removedParameterCount: 0,
       removedTagCount: 0,
-      skipped: true,
     };
   }
 
-  const deletedIds = new Set(deletedItems.map((item) => item.id));
-  const deletedTitles = new Set(
-    deletedItems
-      .map((item) => item.title.trim())
-      .filter((title) => title.length > 0),
-  );
-
-  const parameters = promptLexicons.parameters.filter((entry) => {
-    const sourceId = normalizeOptionalSourceValue(entry.sourcePromptId);
-    const sourceTitle = normalizeOptionalSourceValue(entry.sourcePromptTitle);
-
-    if (sourceId && deletedIds.has(sourceId)) {
-      return false;
-    }
-
-    if (sourceTitle && deletedTitles.has(sourceTitle)) {
-      return false;
-    }
-
-    return true;
-  });
-
-  const removedParameterCount = promptLexicons.parameters.length - parameters.length;
-
-  if (removedParameterCount === 0) {
-    return {
-      promptLexicons,
-      removedCategoryCount: 0,
-      removedCount: 0,
-      removedParameterCount: 0,
-      removedTagCount: 0,
-      skipped: true,
-    };
-  }
-
-  return {
-    promptLexicons: {
-      parameters,
-      categories: promptLexicons.categories,
-      tags: promptLexicons.tags,
-    },
-    removedCategoryCount: 0,
-    removedCount: removedParameterCount,
-    removedParameterCount,
-    removedTagCount: 0,
-  };
+  return prunePromptLexiconsForLibraryItems(promptLexicons, remainingItems, knownCategories);
 }
 
-function prunePromptLexiconsWithoutSourceBoundParameters(
-  promptLexicons: PromptLexiconSettings,
+type PromptLexiconReferenceKeys = {
+  categoryLabelKeys: Set<string>;
+  seedTagLabels: string[];
+  tagLabelKeys: Set<string>;
+};
+
+function collectPromptLexiconReferences(
   items: readonly LibraryItem[],
   knownCategories: readonly string[],
-): PromptLexiconPruneResult {
-  const seedTagLabels = uniqueLabels(items.flatMap((item) => item.tags));
-  const normalizedLexicons = normalizePromptLexiconSettings(promptLexicons, seedTagLabels);
-  const defaultLexicons = createDefaultPromptLexiconSettings([]);
-  const defaultCategoryLabelKeys = new Set(
-    defaultLexicons.categories.map((entry) => normalizeLexiconLabelKey(entry.label)),
-  );
-  const defaultTagLabelKeys = new Set(defaultLexicons.tags.map((entry) => normalizeLexiconLabelKey(entry.label)));
-  const categoryLabelKeys = new Set<string>();
-  const tagLabelKeys = new Set<string>();
+): PromptLexiconReferenceKeys {
+  const references: PromptLexiconReferenceKeys = {
+    categoryLabelKeys: new Set<string>(),
+    seedTagLabels: uniqueLabels(items.flatMap((item) => item.tags)),
+    tagLabelKeys: new Set<string>(),
+  };
 
   for (const category of knownCategories) {
-    addLexiconLabelKey(categoryLabelKeys, category);
+    addLexiconLabelKey(references.categoryLabelKeys, category);
   }
 
   for (const item of items) {
-    addLexiconLabelKey(categoryLabelKeys, item.category ?? "");
+    addLexiconLabelKey(references.categoryLabelKeys, item.category ?? "");
 
     for (const tag of item.tags) {
-      addLexiconLabelKey(tagLabelKeys, tag);
-      addLexiconLabelKey(categoryLabelKeys, tag);
+      addLexiconLabelKey(references.tagLabelKeys, tag);
+      addLexiconLabelKey(references.categoryLabelKeys, tag);
+    }
+
+    const savedCapsuleAnalysis = buildPromptAnalysisFromSavedCapsules(`${item.prompt}\n${item.negativePrompt}`, {
+      title: item.title,
+      tags: item.tags,
+      currentCategory: item.category ?? undefined,
+      knownCategories,
+    });
+    const visibleAnalysis = savedCapsuleAnalysis ? omitNegativeAnalysisSections(savedCapsuleAnalysis) : null;
+
+    if (!visibleAnalysis) {
+      continue;
+    }
+
+    for (const category of visibleAnalysis.suggestedCategories) {
+      addLexiconLabelKey(references.categoryLabelKeys, category);
     }
   }
 
-  const references: PromptLexiconReferenceKeys = {
-    categoryLabelKeys,
-    parameterValueKeys: new Set<string>(),
-    parameterVariableValueKeys: new Set<string>(),
-    seedTagLabels,
-    tagLabelKeys,
-  };
-  const parameters = normalizedLexicons.parameters.filter((entry) => shouldKeepParameterEntry(entry, references));
-  const categories = normalizedLexicons.categories.filter((entry) =>
-    shouldKeepCategoryEntry(entry, references, defaultCategoryLabelKeys),
-  );
-  const tags = normalizedLexicons.tags.filter((entry) =>
-    shouldKeepTagEntry(entry, references, defaultTagLabelKeys),
-  );
-  const removedParameterCount = normalizedLexicons.parameters.length - parameters.length;
-  const removedCategoryCount = normalizedLexicons.categories.length - categories.length;
-  const removedTagCount = normalizedLexicons.tags.length - tags.length;
-
-  return {
-    promptLexicons: {
-      parameters,
-      categories,
-      tags,
-    },
-    removedCategoryCount,
-    removedCount: removedParameterCount + removedCategoryCount + removedTagCount,
-    removedParameterCount,
-    removedTagCount,
-  };
+  return references;
 }
 
-export function mergePromptAnalysisParametersIntoLexicon(
-  promptLexicons: PromptLexiconSettings | null,
-  analysis: PromptAnalysisResult,
-  seedTagLabels: readonly string[] = [],
-  source: PromptParameterLexiconSource = {},
-): { promptLexicons: PromptLexiconSettings; addedCount: number } {
-  const parameterResult = mergePromptParameterValuesIntoLexicon(
-    promptLexicons,
-    analysis.sections.flatMap((section) =>
-      section.values.map((value) => ({
-        group: getPromptParameterGroup(section.key),
-        label: section.label,
-        sectionKey: section.key,
-        value,
-        variable: section.variable,
-      })),
-    ),
-    seedTagLabels,
-    source,
-  );
-  const tagResult = mergePromptTagLabelsIntoLexicon(parameterResult.promptLexicons, analysis.suggestedTags, seedTagLabels);
-
-  return {
-    promptLexicons: tagResult.promptLexicons,
-    addedCount: parameterResult.addedCount + tagResult.addedCount,
-  };
-}
-
-type ParameterLexiconWorkingSet = {
-  parameters: PromptParameterLexiconEntry[];
-  usedIds: Set<string>;
-  existingEntriesByValueKey: Map<string, PromptParameterLexiconEntry>;
-};
-
-function createParameterLexiconWorkingSet(
-  parameters: readonly PromptParameterLexiconEntry[],
-): ParameterLexiconWorkingSet {
-  const nextParameters = [...parameters];
-
-  return {
-    parameters: nextParameters,
-    usedIds: new Set(nextParameters.map((entry) => entry.id)),
-    existingEntriesByValueKey: new Map(
-      nextParameters
-        .filter((entry) => entry.value.trim())
-        .map((entry) => [createParameterValueKey(entry.group, entry.label, entry.variable, entry.value), entry] as const),
-    ),
-  };
-}
-
-function applyParameterValueToWorkingSet(
-  workingSet: ParameterLexiconWorkingSet,
-  value: PromptParameterLexiconValue,
-  source: PromptParameterLexiconSource,
+function shouldKeepCategoryEntry(
+  entry: PromptImageLexiconEntry,
+  references: PromptLexiconReferenceKeys,
+  defaultCategoryLabelKeys: ReadonlySet<string>,
 ): boolean {
-  const variable = normalizeVariable(value.variable);
-  const sectionKey = value.sectionKey ?? getPromptSectionKeyByVariable(variable) ?? "other";
-  const normalizedValue = normalizePromptSectionValue(sectionKey, value.value);
+  const labelKey = normalizeLexiconLabelKey(entry.label);
 
-  if (!variable || !normalizedValue) {
+  if (defaultCategoryLabelKeys.has(labelKey) || references.categoryLabelKeys.has(labelKey)) {
+    return true;
+  }
+
+  return !entry.id.startsWith("derived-category-");
+}
+
+function shouldKeepTagEntry(
+  entry: PromptImageLexiconEntry,
+  references: PromptLexiconReferenceKeys,
+  defaultTagLabelKeys: ReadonlySet<string>,
+): boolean {
+  const labelKey = normalizeLexiconLabelKey(entry.label);
+
+  if (defaultTagLabelKeys.has(labelKey) || references.tagLabelKeys.has(labelKey)) {
+    return true;
+  }
+
+  if (entry.description === aiTagDescription || entry.description === currentPromptTagDescription) {
     return false;
   }
 
-  const label = value.label.trim() || promptSectionMeta[sectionKey].label;
-  const group = resolvePromptParameterGroup(variable, value.group?.trim() || getPromptParameterGroup(sectionKey));
-  const sourcePromptId = normalizeOptionalSourceValue(value.sourcePromptId ?? source.sourcePromptId);
-  const sourcePromptTitle = normalizeOptionalSourceValue(value.sourcePromptTitle ?? source.sourcePromptTitle);
-  const valueKey = createParameterValueKey(group, label, variable, normalizedValue);
-  const existingEntry = workingSet.existingEntriesByValueKey.get(valueKey);
-
-  if (existingEntry) {
-    mergeParameterEntrySource(existingEntry, sourcePromptId, sourcePromptTitle);
-    return false;
-  }
-
-  const nextEntry = {
-    id: createParameterLexiconId(variable, normalizedValue, workingSet.usedIds),
-    group,
-    label,
-    sourcePromptId,
-    sourcePromptTitle,
-    variable,
-    value: normalizedValue,
-  };
-  workingSet.parameters.push(nextEntry);
-  workingSet.existingEntriesByValueKey.set(valueKey, nextEntry);
-  return true;
+  return !entry.id.startsWith("derived-tag-");
 }
 
-export function mergePromptParameterValuesIntoLexicon(
-  promptLexicons: PromptLexiconSettings | null,
-  values: readonly PromptParameterLexiconValue[],
-  seedTagLabels: readonly string[] = [],
-  source: PromptParameterLexiconSource = {},
-): { promptLexicons: PromptLexiconSettings; addedCount: number } {
-  const normalizedLexicons = normalizePromptLexiconSettings(promptLexicons, seedTagLabels);
-  const workingSet = createParameterLexiconWorkingSet(normalizedLexicons.parameters);
-  let addedCount = 0;
+function addLexiconLabelKey(target: Set<string>, value: string | null | undefined): void {
+  const labelKey = normalizeLexiconLabelKey(value ?? "");
 
-  for (const value of values) {
-    if (applyParameterValueToWorkingSet(workingSet, value, source)) {
-      addedCount += 1;
-    }
+  if (labelKey) {
+    target.add(labelKey);
   }
-
-  return {
-    promptLexicons: {
-      ...normalizedLexicons,
-      parameters: workingSet.parameters,
-    },
-    addedCount,
-  };
-}
-
-export function getPromptParameterLexiconValues(
-  promptLexicons: PromptLexiconSettings | null,
-  variable: string,
-): string[] {
-  return getPromptParameterLexiconValueScopes(promptLexicons, variable).all;
-}
-
-export function getPromptParameterLexiconValueScopes(
-  promptLexicons: PromptLexiconSettings | null,
-  variable: string,
-  sourcePromptId: string | null = null,
-): PromptParameterLexiconValueScopes {
-  const variableKey = normalizeVariableKey(variable);
-
-  if (!promptLexicons || !variableKey) {
-    return {
-      all: [],
-      currentPrompt: [],
-      global: [],
-      otherPrompts: [],
-    };
-  }
-
-  const values = promptLexicons.parameters.filter(
-    (entry) => normalizeVariableKey(entry.variable) === variableKey && entry.value.trim(),
-  );
-  const normalizedSourcePromptId = normalizeOptionalSourceValue(sourcePromptId);
-  const currentPrompt = normalizedSourcePromptId
-    ? values
-        .filter((entry) => normalizeOptionalSourceValue(entry.sourcePromptId) === normalizedSourcePromptId)
-        .map((entry) => entry.value)
-    : [];
-  const global = values
-    .filter((entry) => !normalizeOptionalSourceValue(entry.sourcePromptId) && !normalizeOptionalSourceValue(entry.sourcePromptTitle))
-    .map((entry) => entry.value);
-  const otherPrompts = values
-    .filter((entry) => {
-      const entrySourcePromptId = normalizeOptionalSourceValue(entry.sourcePromptId);
-      const entrySourcePromptTitle = normalizeOptionalSourceValue(entry.sourcePromptTitle);
-
-      return entrySourcePromptId
-        ? entrySourcePromptId !== normalizedSourcePromptId
-        : Boolean(entrySourcePromptTitle);
-    })
-    .map((entry) => entry.value);
-
-  return {
-    all: uniqueLabels([...currentPrompt, ...global, ...otherPrompts, ...values.map((entry) => entry.value)]),
-    currentPrompt: uniqueLabels(currentPrompt),
-    global: uniqueLabels(global),
-    otherPrompts: uniqueLabels(otherPrompts),
-  };
 }
 
 type TagLexiconWorkingSet = {
@@ -877,15 +452,15 @@ export function mergePromptTagLabelsIntoLexicon(
   };
 }
 
-export function getPromptParameterGroup(key: string): string {
-  return promptParameterGroupBySection[key as PromptSplitSectionKey] ?? defaultParameterFunctionalGroupLabel;
+export function getPromptSectionGroup(key: string): string {
+  return promptSectionGroupByKey[key as PromptSplitSectionKey] ?? "文本与补充";
 }
 
 export function getPromptTagGroup(label: string, fallbackGroup = defaultTagLexiconGroupLabel): string {
   const exactSectionKey = resolveExactPromptTagSectionKey(label);
 
   if (exactSectionKey && exactSectionKey !== "negative" && exactSectionKey !== "other" && exactSectionKey !== "color") {
-    return getPromptGroupLeaf(getPromptParameterGroup(exactSectionKey));
+    return getPromptGroupLeaf(getPromptSectionGroup(exactSectionKey));
   }
 
   const intrinsicGroup = getTagIntrinsicGroup(label);
@@ -897,154 +472,17 @@ export function getPromptTagGroup(label: string, fallbackGroup = defaultTagLexic
   const sectionKey = resolvePromptTagSectionKey(label);
 
   if (sectionKey && sectionKey !== "negative" && sectionKey !== "other") {
-    return getPromptGroupLeaf(getPromptParameterGroup(sectionKey));
+    return getPromptGroupLeaf(getPromptSectionGroup(sectionKey));
   }
 
-  return getPromptGroupLeaf(fallbackGroup) || defaultTagLexiconGroupLabel;
-}
-
-export function normalizePromptParameterGroupPath(group: string): string {
-  const segments = splitPromptLexiconGroupPath(group)
-    .map(stripMenuNumericPrefix)
-    .filter((segment) => segment && !isLegacyPromptParameterDomainSegment(segment));
-
-  for (const segment of [...segments].reverse()) {
-    const functionalGroup = getFunctionalPromptParameterGroupByMenuLabel(segment);
-
-    if (functionalGroup) {
-      return functionalGroup;
-    }
+  const fallbackLeaf = getPromptGroupLeaf(fallbackGroup);
+  if (!fallbackLeaf || ["通用标签", "趣味配方", "自定义标签"].includes(fallbackLeaf)) {
+    return "其他标签 Other";
   }
-
-  return segments.length > 0 ? segments.join(" / ") : defaultParameterFunctionalGroupLabel;
+  return fallbackLeaf;
 }
 
-export function migratePromptParameterLexiconGroups(
-  entries: readonly PromptParameterLexiconEntry[],
-): PromptParameterLexiconEntry[] {
-  return entries.map((entry) => {
-    const variable = normalizeVariable(entry.variable);
-    const group = resolvePromptParameterGroup(variable, entry.group);
-
-    return group === entry.group ? entry : { ...entry, group };
-  });
-}
-
-export function validatePromptParameterMenuPath(group: string): PromptParameterMenuValidationResult {
-  return createPromptParameterMenuValidationResult(collectPromptParameterMenuPathIssues(group));
-}
-
-export function validatePromptParameterMenuTree(groups: readonly string[]): PromptParameterMenuValidationResult {
-  const issues = groups.flatMap(collectPromptParameterMenuPathIssues);
-  const namesByParentPath = new Map<string, Map<string, Set<string>>>();
-
-  for (const group of groups) {
-    const parentSegments: string[] = [];
-
-    for (const segment of splitPromptLexiconGroupPath(group)) {
-      const name = segment.trim();
-      const parentPath = parentSegments.join(" / ");
-      const nameKey = normalizeMenuNameKey(stripMenuNumericPrefix(name) || name);
-
-      if (nameKey) {
-        const siblingNames = getOrCreateMap(namesByParentPath, parentPath);
-        const rawNames = siblingNames.get(nameKey) ?? new Set<string>();
-        rawNames.add(name);
-        siblingNames.set(nameKey, rawNames);
-      }
-
-      parentSegments.push(name);
-    }
-  }
-
-  for (const [parentPath, siblingNames] of namesByParentPath) {
-    for (const rawNames of siblingNames.values()) {
-      if (rawNames.size <= 1) {
-        continue;
-      }
-
-      const names = [...rawNames].sort((left, right) => left.localeCompare(right, "zh-Hans-CN"));
-      issues.push({
-        code: "duplicate-name",
-        message: `同一层级下存在重名菜单：${names.join("、")}`,
-        name: names.join("、"),
-        parentPath,
-        path: [...splitPromptLexiconGroupPath(parentPath), names[0] ?? ""].filter(Boolean).join(" / "),
-      });
-    }
-  }
-
-  return createPromptParameterMenuValidationResult(dedupePromptParameterMenuIssues(issues));
-}
-
-export function validatePromptParameterMenuEntries(
-  entries: readonly PromptParameterLexiconEntry[],
-): PromptParameterMenuValidationResult {
-  const issues = [...validatePromptParameterMenuTree(entries.map((entry) => entry.group)).issues];
-  const itemsByParentPath = new Map<
-    string,
-    Map<string, { labels: Set<string>; path: string; variables: Set<string> }>
-  >();
-
-  for (const entry of entries) {
-    const label = entry.label.trim();
-
-    if (!label) {
-      continue;
-    }
-
-    const variable = normalizeVariable(entry.variable);
-    const parentPath = resolvePromptParameterGroup(variable, entry.group);
-    const path = [parentPath, label].filter(Boolean).join(" / ");
-
-    if (hasMenuNumericPrefix(label)) {
-      issues.push({
-        code: "numeric-prefix",
-        message: `菜单名称不能以数字序号开头：${label}`,
-        name: label,
-        parentPath,
-        path,
-      });
-    }
-
-    const labelKey = normalizeMenuNameKey(stripMenuNumericPrefix(label) || label);
-
-    if (!labelKey) {
-      continue;
-    }
-
-    const siblingItems = getOrCreateMap(itemsByParentPath, parentPath);
-    const item = siblingItems.get(labelKey) ?? {
-      labels: new Set<string>(),
-      path,
-      variables: new Set<string>(),
-    };
-    item.labels.add(label);
-    item.variables.add(normalizeVariableKey(variable));
-    siblingItems.set(labelKey, item);
-  }
-
-  for (const [parentPath, siblingItems] of itemsByParentPath) {
-    for (const item of siblingItems.values()) {
-      if (item.labels.size <= 1 && item.variables.size <= 1) {
-        continue;
-      }
-
-      const names = [...item.labels].sort((left, right) => left.localeCompare(right, "zh-Hans-CN"));
-      issues.push({
-        code: "duplicate-name",
-        message: `同一菜单下存在重名参数集合：${names.join("、")}`,
-        name: names.join("、"),
-        parentPath,
-        path: item.path,
-      });
-    }
-  }
-
-  return createPromptParameterMenuValidationResult(dedupePromptParameterMenuIssues(issues));
-}
-
-const promptParameterGroupBySection: Record<PromptSplitSectionKey, string> = {
+const promptSectionGroupByKey: Record<PromptSplitSectionKey, string> = {
   lens_equipment: "摄影参数",
   image_style: "风格与审美",
   style_classification: "风格与审美",
@@ -1245,145 +683,20 @@ const promptParameterGroupBySection: Record<PromptSplitSectionKey, string> = {
   other: "文本与补充",
 };
 
-function resolvePromptParameterGroup(variable: string, group: string): string {
-  const sectionKey = getPromptSectionKeyByVariable(variable);
-
-  if (sectionKey) {
-    return getPromptParameterGroup(sectionKey);
-  }
-
-  return normalizePromptParameterGroupPath(group);
-}
-
 function normalizePromptLexiconSettings(
   promptLexicons: PromptLexiconSettings | null,
   seedTagLabels: readonly string[],
 ): PromptLexiconSettings {
-  const defaultSettings = createDefaultPromptLexiconSettings(seedTagLabels);
-
+  // Only brand-new installs (null) get defaults. An explicit empty settings object
+  // means the user cleared the lexicon — never reseed tags/categories.
   if (!promptLexicons) {
-    return defaultSettings;
+    return createDefaultPromptLexiconSettings(seedTagLabels);
   }
 
   return {
-    parameters: mergeMissingParameterDefaults(
-      normalizeParameterLexiconEntries(promptLexicons.parameters),
-      defaultSettings.parameters,
-    ),
-    categories: mergeMissingImageDefaults(
-      normalizeImageLexiconEntries(promptLexicons.categories),
-      defaultSettings.categories,
-      "category",
-    ),
-    tags: mergeMissingImageDefaults(
-      normalizeImageLexiconEntries(promptLexicons.tags, { kind: "tag" }),
-      defaultSettings.tags,
-      "tag",
-    ),
+    categories: normalizeImageLexiconEntries(promptLexicons.categories ?? []),
+    tags: normalizeImageLexiconEntries(promptLexicons.tags ?? [], { kind: "tag" }),
   };
-}
-
-function mergeMissingParameterDefaults(
-  entries: readonly PromptParameterLexiconEntry[],
-  defaults: readonly PromptParameterLexiconEntry[],
-): PromptParameterLexiconEntry[] {
-  const nextEntries = [...entries];
-  const usedIds = new Set(nextEntries.map((entry) => entry.id));
-  const existingKeys = new Set(
-    nextEntries.map((entry) => createParameterValueKey(entry.group, entry.label, entry.variable, entry.value)),
-  );
-
-  for (const defaultEntry of defaults) {
-    const defaultKey = createParameterValueKey(
-      defaultEntry.group,
-      defaultEntry.label,
-      defaultEntry.variable,
-      defaultEntry.value,
-    );
-
-    if (existingKeys.has(defaultKey)) {
-      continue;
-    }
-
-    nextEntries.push({
-      ...defaultEntry,
-      id: getUniqueLexiconId(defaultEntry.id, usedIds, "parameter"),
-    });
-    existingKeys.add(defaultKey);
-  }
-
-  return nextEntries;
-}
-
-function mergeMissingImageDefaults(
-  entries: readonly PromptImageLexiconEntry[],
-  defaults: readonly PromptImageLexiconEntry[],
-  prefix: "category" | "tag",
-): PromptImageLexiconEntry[] {
-  const nextEntries = [...entries];
-  const usedIds = new Set(nextEntries.map((entry) => entry.id));
-  const existingLabels = new Set(nextEntries.map((entry) => normalizeLexiconLabelKey(entry.label)));
-
-  for (const defaultEntry of defaults) {
-    const defaultLabel = normalizeLexiconLabelKey(defaultEntry.label);
-
-    if (existingLabels.has(defaultLabel)) {
-      continue;
-    }
-
-    nextEntries.push({
-      ...defaultEntry,
-      id: getUniqueLexiconId(defaultEntry.id, usedIds, prefix),
-    });
-    existingLabels.add(defaultLabel);
-  }
-
-  return nextEntries;
-}
-
-function normalizeParameterLexiconEntries(
-  entries: readonly PromptParameterLexiconEntry[],
-): PromptParameterLexiconEntry[] {
-  const normalizedEntries: PromptParameterLexiconEntry[] = [];
-  const entriesByKey = new Map<string, PromptParameterLexiconEntry>();
-  const usedIds = new Set<string>();
-
-  for (const entry of entries) {
-    const variable = normalizeVariable(entry.variable);
-    const label = entry.label.trim();
-
-    if (!variable || !label) {
-      continue;
-    }
-
-    const id = getUniqueLexiconId(entry.id, usedIds, "parameter");
-    const normalizedEntry: PromptParameterLexiconEntry = {
-      id,
-      group: resolvePromptParameterGroup(variable, entry.group),
-      label,
-      sourcePromptId: normalizeOptionalSourceValue(entry.sourcePromptId),
-      sourcePromptTitle: normalizeOptionalSourceValue(entry.sourcePromptTitle),
-      variable,
-      value: entry.value.trim(),
-    };
-    const duplicateKey = createParameterValueKey(
-      normalizedEntry.group,
-      normalizedEntry.label,
-      normalizedEntry.variable,
-      normalizedEntry.value,
-    );
-    const existingEntry = entriesByKey.get(duplicateKey);
-
-    if (existingEntry) {
-      mergeParameterEntrySource(existingEntry, normalizedEntry.sourcePromptId, normalizedEntry.sourcePromptTitle);
-      continue;
-    }
-
-    entriesByKey.set(duplicateKey, normalizedEntry);
-    normalizedEntries.push(normalizedEntry);
-  }
-
-  return normalizedEntries;
 }
 
 function normalizeImageLexiconEntries(
@@ -1443,179 +756,121 @@ function mergeImageLexiconEntry(targetEntry: PromptImageLexiconEntry, duplicateE
   }
 }
 
-type PromptLexiconReferenceKeys = {
-  categoryLabelKeys: Set<string>;
-  parameterValueKeys: Set<string>;
-  parameterVariableValueKeys: Set<string>;
-  seedTagLabels: string[];
-  tagLabelKeys: Set<string>;
-};
-
-function collectPromptLexiconReferences(
-  items: readonly LibraryItem[],
-  knownCategories: readonly string[],
-): PromptLexiconReferenceKeys {
-  const references: PromptLexiconReferenceKeys = {
-    categoryLabelKeys: new Set<string>(),
-    parameterValueKeys: new Set<string>(),
-    parameterVariableValueKeys: new Set<string>(),
-    seedTagLabels: uniqueLabels(items.flatMap((item) => item.tags)),
-    tagLabelKeys: new Set<string>(),
-  };
-
-  for (const item of items) {
-    addLexiconLabelKey(references.categoryLabelKeys, item.category ?? "");
-
-    for (const tag of item.tags) {
-      addLexiconLabelKey(references.tagLabelKeys, tag);
-      addLexiconLabelKey(references.categoryLabelKeys, tag);
-    }
-
-    const savedCapsuleAnalysis = buildPromptAnalysisFromSavedCapsules(`${item.prompt}\n${item.negativePrompt}`, {
-      title: item.title,
-      tags: item.tags,
-      currentCategory: item.category ?? undefined,
-      knownCategories,
-    });
-    const visibleAnalysis = savedCapsuleAnalysis ? omitNegativeAnalysisSections(savedCapsuleAnalysis) : null;
-
-    if (!visibleAnalysis) {
-      continue;
-    }
-
-    for (const section of visibleAnalysis.sections) {
-      for (const value of section.values) {
-        const reference = createParameterReferenceKeys(section.key, section.label, section.variable, value);
-
-        if (!reference) {
-          continue;
-        }
-
-        references.parameterValueKeys.add(reference.valueKey);
-        references.parameterVariableValueKeys.add(reference.variableValueKey);
-      }
-    }
-
-    for (const tag of visibleAnalysis.suggestedTags) {
-      addLexiconLabelKey(references.tagLabelKeys, tag);
-    }
-
-    for (const category of visibleAnalysis.suggestedCategories) {
-      addLexiconLabelKey(references.categoryLabelKeys, category);
-    }
-  }
-
-  return references;
-}
-
-function createParameterReferenceKeys(
-  sectionKey: PromptSplitSectionKey,
-  label: string,
-  variableName: string,
-  value: string,
-): { valueKey: string; variableValueKey: string } | null {
-  const variable = normalizeVariable(variableName);
-  const normalizedValue = normalizePromptSectionValue(sectionKey, value);
-
-  if (!variable || !normalizedValue) {
-    return null;
-  }
-
-  const resolvedLabel = label.trim() || promptSectionMeta[sectionKey].label;
-  const group = resolvePromptParameterGroup(variable, getPromptParameterGroup(sectionKey));
-
-  return {
-    valueKey: createParameterValueKey(group, resolvedLabel, variable, normalizedValue),
-    variableValueKey: createParameterVariableValueKey(variable, normalizedValue),
-  };
-}
-
-function shouldKeepParameterEntry(
-  entry: PromptParameterLexiconEntry,
-  references: PromptLexiconReferenceKeys,
-): boolean {
-  const value = entry.value.trim();
-
-  if (!value) {
-    return true;
-  }
-
-  if (references.parameterValueKeys.has(createParameterValueKey(entry.group, entry.label, entry.variable, value))) {
-    return true;
-  }
-
-  if (references.parameterVariableValueKeys.has(createParameterVariableValueKey(entry.variable, value))) {
-    return true;
-  }
-
-  if (normalizeOptionalSourceValue(entry.sourcePromptId) || normalizeOptionalSourceValue(entry.sourcePromptTitle)) {
-    return false;
-  }
-
-  return !isGeneratedParameterEntry(entry);
-}
-
-function shouldKeepCategoryEntry(
-  entry: PromptImageLexiconEntry,
-  references: PromptLexiconReferenceKeys,
-  defaultCategoryLabelKeys: ReadonlySet<string>,
-): boolean {
-  const labelKey = normalizeLexiconLabelKey(entry.label);
-
-  if (defaultCategoryLabelKeys.has(labelKey) || references.categoryLabelKeys.has(labelKey)) {
-    return true;
-  }
-
-  return !entry.id.startsWith("derived-category-");
-}
-
-function shouldKeepTagEntry(
-  entry: PromptImageLexiconEntry,
-  references: PromptLexiconReferenceKeys,
-  defaultTagLabelKeys: ReadonlySet<string>,
-): boolean {
-  const labelKey = normalizeLexiconLabelKey(entry.label);
-
-  if (defaultTagLabelKeys.has(labelKey) || references.tagLabelKeys.has(labelKey)) {
-    return true;
-  }
-
-  if (entry.description === aiTagDescription || entry.description === currentPromptTagDescription) {
-    return false;
-  }
-
-  return !entry.id.startsWith("derived-tag-");
-}
-
-function addLexiconLabelKey(target: Set<string>, value: string | null | undefined): void {
-  const labelKey = normalizeLexiconLabelKey(value ?? "");
-
-  if (labelKey) {
-    target.add(labelKey);
-  }
-}
-
-function isGeneratedParameterEntry(entry: PromptParameterLexiconEntry): boolean {
-  const value = entry.value.trim();
-
-  if (!value) {
-    return false;
-  }
-
-  const baseId = createParameterLexiconBaseId(entry.variable, value);
-
-  return entry.id === baseId || entry.id.startsWith(`${baseId}-`);
-}
-
 function getTagIntrinsicGroup(label: string): string | null {
-  if (isColorTagLabel(label)) {
-    return tagColorGroupLabel;
-  }
-
   if (isQuantityTagLabel(label)) {
     return tagQuantityGroupLabel;
   }
 
+  // Classify concrete visual facts before generic vocabulary and colors. A
+  // color describes an entity; it must never outrank the entity's semantic
+  // layer (for example, a dress is clothing and a flower wall is environment).
+  // Clothing is checked before composition because “半身裙” contains “半身”.
+  // 具体历史服制（朝代形制）先于泛服饰归入「服制」组，便于古风素材按形制检索。
+  if (/玄端|深衣|曲裾|直裾|襜褕|袿衣|襦裙|大袖衫|杂裾|袴褶|裲裆|坦领|半臂|披帛|圆领袍|襕衫|褙子|旋裙|直裰|袄裙|马面裙|比甲|曳撒|旗装|氅衣|马褂|马蹄袖|旗头|花盆底/.test(label)) {
+    return "服制 Historical Garment";
+  }
+  // 人物气质倾向归入「气质」组，与服饰/情绪/风格分开，可多值标注。
+  if (/清纯|甜美|甜酷|元气|冷艳|御姐|知性|邻家|优雅|高冷|英气|古灵精怪/.test(label)) {
+    return "气质 Temperament";
+  }
+  // 发型/发长归入「妆发与配饰」维度。发色只是可分离属性（交色彩体系），发型本身才是妆发特征。
+  // 即便模型吐回「粉色短发」这类颜色+发型复合词（未经 normalizeImageTag 剖开时直达此处），
+  // 也按发型收敛到妆发，绝不落进颜色分类——颜色描述实体，不得盖过实体语义层。置于色彩判定之前，
+  // 与「白色花朵→空间环境」同理；「披肩发」列全词以免退回披肩（道具），「马尾」在动物规则之前。
+  if (
+    /短发|长发|中长发|中发|锁骨发|齐肩发|披肩发|超长发|卷发|直发|大波浪|波浪卷|羊毛卷|盘发|发髻|丸子头|双马尾|马尾|麻花辫|编发|波波头|碎发|湿发|中分|刘海|发型|秀发/.test(
+      label,
+    )
+  ) {
+    return "妆发与配饰";
+  }
+  // 具体菜品 / 节庆食品 / 食材细节归入「美食」组（画面事实、多值）。
+  if (/月饼|粽子|饺子|汤圆|年糕|火锅|牛排|寿司|刺身|拉面|烧烤|蛋糕|甜甜圈|布丁|冰淇淋|沙拉|三明治|汉堡|披萨|意面|薯片|巧克力|海鲜|牛肉|猪肉|鸡肉|羊肉|米饭|面条|包子|春卷|牛油果|芒果|西瓜|哈密瓜|柠檬|青柠|柠茶|橙片|橙汁|橙茶|柑橘|西柚|柚子|猕猴桃|草莓|蓝莓|树莓|葡萄|青提|提子|石榴|芭乐|莲雾|黄皮|油柑|山楂|乌梅|陈皮|甘草片|核桃|开心果|巴旦木|夏威夷果|花生|杏仁|奇亚籽|燕麦|西米|椰果|椰蓉|芋头|芋泥|红豆|绿豆|豆乳|奶盖|奶浆|奶油|奶昔|抹茶粉|糖粉|酥皮|水果|鲜果|果肉|果粒|果丁|果酱|果串|冰块|冰沙|茶汤|茶叶|气泡|雪媚娘|凤梨|南瓜|莲子|银耳|牛奶|奶液/.test(label)) {
+    return "美食 Food";
+  }
+  // 宠物品种归入「宠物」组（犬/猫/异宠题材的具体品种，画面事实）；置于主体之前。
+  if (/金毛|柯基|柴犬|哈士奇|泰迪|边牧|萨摩耶|拉布拉多|布偶|橘猫|英短|美短|蓝猫|狸花猫|荷兰猪|垂耳兔|龙猫|仓鼠|鹦鹉|文鸟|乌龟|蜥蜴|金鱼|锦鲤/.test(label)) {
+    return "宠物 Pet";
+  }
+  // 数码设备归入「数码」组（电子数码摄影题材的具体设备）；置于主体之前，防「手机」落入泛主体。
+  if (/手机|笔记本|平板电脑|相机|单反|键盘|鼠标|显示器|智能手表|游戏机|充电宝|移动电源|耳机|耳罩|音响|音箱/.test(label)) {
+    return "数码 Digital";
+  }
+  // 界面组件/微风格/布局模式归入「UI设计」组；置于材质之前，防「玻璃态/毛玻璃」被玻璃材质误收。
+  if (/导航栏|按钮|表单|弹窗|卡片|轮播图|侧边栏|标签页|输入框|开关|进度条|新拟物|拟物化|玻璃态|毛玻璃|瀑布流|向导流|骨架屏/.test(label)) {
+    return "UI设计 UI Design";
+  }
+  // 海报文字 / 排版元素归入「文字排版」组（水印/版权已在准入层排除，不入标签）。
+  if (/文字标|字标|文案|口号|挂牌|招牌|副题|排版|标注|营养成分|活动时间|日期标记|尺寸标注|坐标文字|指标格|双语|竖排|字距|英文文字/.test(label)) {
+    return "文字排版 Text";
+  }
+  if (/半身裙|连衣裙|长裙|短裙|裙子|抹胸|吊带|背心|上衣|下装|长裤|短裤|裤子|外套|风衣|夹克|西装|大衣|毛衣|针织|衬衫|衬衣|T恤|体恤|礼服|婚纱|汉服|旗袍|制服|帽衫|Polo衫|羽绒服|棉服|袍|衣|裙|裤|鞋|靴|袜|服装|服饰|穿搭|袖|衣领/.test(label)) {
+    return "服饰 Clothing";
+  }
+  if (/前景|中景|后景|景别|构图|三分|对称|留白|俯拍|仰拍|低角度|高角度|平拍|平视|近景|远景|特写|半身|七分身|全身|视角|镜头/.test(label)) {
+    return "构图 Composition";
+  }
+  if (/抬手|触摸|触碰|手势|姿态|动作|站立|坐姿|躺|行走|回眸|转身|低头|抬头|闭眼|睁眼|眨眼|伸手|握住|奔跑|跳跃/.test(label)) {
+    return "动作姿态 Pose";
+  }
+  if (/花瓶|花束|花篮|花环|耳坠|耳环|耳饰|发簪|发饰|草帽|帽子|团扇|扇子|项链|手链|戒指|眼镜|围巾|领带|领结|披肩|腰带|皮带|胸针|配饰|道具|雨伞|背包|书本|杯子|餐具|托盘|木碗|木盘|木桌|木凳|木架|木盒|长凳|吧椅|藤椅|藤编|竹编|竹篮|提篮|置物架|陈列架|果盘|茶盘|茶则|茶勺|茶筅|茶具|烛台|花器|陶罐|陶盆|陶碗|盆栽|摆件|器具|托特包|布包|斗笠|油纸伞|折扇|绢扇|碗|碟|盘子|木勺|牵马绳|缰绳|马缰|马鞍|缰辔/.test(label)) {
+    return "道具与配饰 Props";
+  }
+  if (/马匹|骏马|马群|马儿|马\b|牛|羊|鹿|狐狸|兔|狼|虎|狮|豹|熊|象|长颈鹿|斑马|孔雀|天鹅|鸭|鹅|鱼|鲸|海豚|蝴蝶|昆虫/.test(label)) {
+    return "动物 Animal";
+  }
+  if (/自然光斑|丁达尔光|轮廓光|斑驳树影|光晕|耀斑|剪影|阴影/.test(label)) {
+    return "光影 Lighting";
+  }
+  // Botanical labels describe the depicted setting by default. This rule is
+  // intentionally before the legacy exact Subject list so “白色花朵”,
+  // “橙色炮仗花”, “白花” and “麻花瓣” do not fall into Subject.
+  if (/花朵|花瓣|炮仗花|花枝|花墙|花园|花(?!纹|色)|树影|树干|树木|叶片|绿叶|枝叶|森林|树林|藤蔓|绿植|植物|草地|湖水|水面|河流|海面|天空|云层|窗景|帷幔|幕布|窗帘|屏风|栈道|道路|街道|建筑|房屋|楼宇|室内|室外|房间|墙面|背景|地面|山景|石头|雪地|沙滩|场景|环境|蓝天|白云|云朵|积云|太阳(?!光|镜)|红日|夕阳|落日|日出|日落|旭日|烈日|晚霞|朝霞|满月|明月|月亮|星空|星点|银河|雪山|远山|山脉|山峦|群山|山地|牧场|草坡|草甸|梯田|湖岸|海平面|海岸|礁石|溪流|瀑布|芦苇|苇草|芦苇荡|枯枝|柳枝|树枝|棕榈|蕨叶|苔藓|荷叶|绿枝|梅枝|飞檐|斗拱|瓦垄|榻榻米|障子|拱窗|石桥|石拱桥|栏杆|台基|回廊|廊柱|吊柜|橱柜|百叶窗|地板|地砖|瓷砖|饰面|吊顶|筒灯|壁灯|吊灯|出风口|石膏线|台面|吧台|窗棂|梁柱|民居|村落|小镇|楼阁|亭台|殿宇|阁楼|长廊|嵌入式|水槽|烤箱|灶台/.test(label)) {
+    return "空间环境 Environment";
+  }
+  if (/玻璃|金属|皮革|木材|陶瓷|布料|液体|石材|塑料|纸|纸张|纹理|纹样|图案|花纹|材质|质感|编织|刺绣|麻编|木质纹理|皮质|丝绸|毛绒|格纹|条纹|针织纹理/.test(label)) {
+    return "材质 Material";
+  }
+
+  const key = normalizeLexiconLabelKey(label);
+  const sets: Array<[string, readonly string[]]> = [
+    ["主体 Subject", defaultSubjectTagLabels],
+    ["风格 Style", defaultStyleTagLabels],
+    ["光影 Lighting", defaultLightingTagLabels],
+    ["构图 Composition", defaultCompositionTagLabels],
+    ["技术 Technique", defaultTechniqueTagLabels],
+    ["材质 Material", defaultMaterialTagLabels],
+    ["情绪 Emotion", defaultEmotionTagLabels],
+    ["应用 Application", defaultApplicationTagLabels],
+  ];
+
+  for (const [group, labels] of sets) {
+    if (new Set(labels.map((item) => normalizeLexiconLabelKey(item))).has(key)) {
+      return group;
+    }
+  }
+
+  if (/人|女|男|儿童|猫|狗|鸟|车|手机|表|咖啡|香水|瓶|珠宝|食|饮|动物|宠物|产品主体/.test(label)) {
+    return "主体 Subject";
+  }
+  if (/光|阴影|树影|斑驳|逆光|侧光|棚拍|窗光|霓虹|光晕|耀斑/.test(label)) {
+    return "光影 Lighting";
+  }
+  if (isColorTagLabel(label)) {
+    return tagColorGroupLabel;
+  }
+  if (/^(红|橙|黄|绿|青|蓝|紫|粉|黑|白|灰|金|银)(色)?$/.test(label) || /色调|饱和|对比/.test(label)) {
+    return "风格 Style";
+  }
+  if (/景深|曝光|微距|HDR|虚化|慢门|快门|移轴|多重曝光/.test(label)) {
+    return "技术 Technique";
+  }
+  if (/温暖|孤独|宁静|活力|神秘|浪漫|力量|清冷|紧张|愉悦|高级感/.test(label)) {
+    return "情绪 Emotion";
+  }
+  if (/电商|广告|海报|品牌|社交|杂志|包装|主图|详情|KV|Lookbook|封面/.test(label)) {
+    return "应用 Application";
+  }
   return null;
 }
 
@@ -1698,152 +953,6 @@ function splitPromptLexiconGroupPath(groupPath: string): string[] {
     .filter(Boolean);
 }
 
-function collectPromptParameterMenuPathIssues(group: string): PromptParameterMenuValidationIssue[] {
-  const issues: PromptParameterMenuValidationIssue[] = [];
-  const parentSegments: string[] = [];
-
-  for (const segment of splitPromptLexiconGroupPath(group)) {
-    const name = segment.trim();
-    const parentPath = parentSegments.join(" / ");
-    const path = [...parentSegments, name].filter(Boolean).join(" / ");
-
-    if (hasMenuNumericPrefix(name)) {
-      issues.push({
-        code: "numeric-prefix",
-        message: `菜单名称不能以数字序号开头：${name}`,
-        name,
-        parentPath,
-        path,
-      });
-    }
-
-    parentSegments.push(name);
-  }
-
-  return issues;
-}
-
-function createPromptParameterMenuValidationResult(
-  issues: PromptParameterMenuValidationIssue[],
-): PromptParameterMenuValidationResult {
-  return {
-    isValid: issues.length === 0,
-    issues,
-  };
-}
-
-function dedupePromptParameterMenuIssues(
-  issues: readonly PromptParameterMenuValidationIssue[],
-): PromptParameterMenuValidationIssue[] {
-  const nextIssues: PromptParameterMenuValidationIssue[] = [];
-  const usedKeys = new Set<string>();
-
-  for (const issue of issues) {
-    const key = `${issue.code}|${issue.parentPath}|${issue.path}|${issue.name}`;
-
-    if (usedKeys.has(key)) {
-      continue;
-    }
-
-    usedKeys.add(key);
-    nextIssues.push(issue);
-  }
-
-  return nextIssues;
-}
-
-function getFunctionalPromptParameterGroupByMenuLabel(label: string): string | null {
-  const normalizedLabel = normalizeMenuNameKey(stripMenuNumericPrefix(label));
-  const mappedGroup = legacyPromptParameterMenuLabelGroupByKey.get(normalizedLabel);
-
-  if (mappedGroup) {
-    return mappedGroup;
-  }
-
-  const sectionKey = promptSplitSectionOrder.find((key) => {
-    const meta = promptSectionMeta[key];
-
-    return [key, meta.label, meta.variable].some((value) => normalizeMenuNameKey(value) === normalizedLabel);
-  });
-
-  return sectionKey ? getPromptParameterGroup(sectionKey) : null;
-}
-
-function isLegacyPromptParameterDomainSegment(segment: string): boolean {
-  const segmentKey = normalizeMenuNameKey(segment);
-
-  return legacyPromptParameterDomainLabelKeys.has(segmentKey) || /(?:像素级拆解|身份分析|产品图分析)$/u.test(segment);
-}
-
-function hasMenuNumericPrefix(name: string): boolean {
-  return /^\s*\d+\s*$/u.test(name) || /^\s*\d+[\s_\-.、:：)）]+(?=\S)/u.test(name);
-}
-
-function stripMenuNumericPrefix(name: string): string {
-  const trimmedName = name.trim();
-
-  if (/^\d+\s*$/u.test(trimmedName)) {
-    return "";
-  }
-
-  return trimmedName.replace(/^\d+[\s_\-.、:：)）]+(?=\S)/u, "").trim();
-}
-
-function getOrCreateMap<TKey, TValue>(source: Map<TKey, Map<string, TValue>>, key: TKey): Map<string, TValue> {
-  const existingValue = source.get(key);
-
-  if (existingValue) {
-    return existingValue;
-  }
-
-  const nextValue = new Map<string, TValue>();
-  source.set(key, nextValue);
-
-  return nextValue;
-}
-
-function createParameterValueKey(
-  group: string,
-  label: string,
-  variable: string,
-  value: string,
-): string {
-  const groupKey = group.trim().toLowerCase();
-  const labelKey = label.trim().toLowerCase();
-
-  return `${groupKey}:${labelKey}:${value.trim().toLowerCase()}`;
-}
-
-function createParameterVariableValueKey(variable: string, value: string): string {
-  return `${normalizeVariableKey(variable)}:${value.trim().toLowerCase()}`;
-}
-
-function mergeParameterEntrySource(
-  entry: PromptParameterLexiconEntry,
-  sourcePromptId: string | null | undefined,
-  sourcePromptTitle: string | null | undefined,
-): void {
-  const entrySourcePromptId = normalizeOptionalSourceValue(entry.sourcePromptId);
-  const entrySourcePromptTitle = normalizeOptionalSourceValue(entry.sourcePromptTitle);
-  const nextSourcePromptId = normalizeOptionalSourceValue(sourcePromptId);
-  const nextSourcePromptTitle = normalizeOptionalSourceValue(sourcePromptTitle);
-
-  if (entrySourcePromptId !== nextSourcePromptId || entrySourcePromptTitle !== nextSourcePromptTitle) {
-    entry.sourcePromptId = null;
-    entry.sourcePromptTitle = null;
-  }
-}
-
-function createParameterLexiconId(variable: string, value: string, usedIds: Set<string>): string {
-  const baseId = createParameterLexiconBaseId(variable, value);
-
-  return getUniqueLexiconId(baseId, usedIds, "parameter");
-}
-
-function createParameterLexiconBaseId(variable: string, value: string): string {
-  return `parameter-${toIdSegment(variable)}-${hashText(value)}`;
-}
-
 function createTagLexiconId(label: string, usedIds: Set<string>): string {
   return getUniqueLexiconId(`tag-${hashText(label)}`, usedIds, "tag");
 }
@@ -1868,33 +977,8 @@ function getUniqueLexiconId(id: string, usedIds: Set<string>, prefix: string): s
   return nextId;
 }
 
-function normalizeVariable(value: string): string {
-  const variable = value.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32);
-  const sectionKey = getPromptSectionKeyByVariable(variable);
-
-  return sectionKey ? promptSectionMeta[sectionKey].variable : variable;
-}
-
-function normalizeVariableKey(value: string): string {
-  return normalizeVariable(value).toLowerCase();
-}
-
-function normalizeMenuNameKey(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("zh-Hans-CN");
-}
-
 function normalizeLexiconLabelKey(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function normalizeOptionalSourceValue(value: string | null | undefined): string | null {
-  const normalized = typeof value === "string" ? value.trim() : "";
-
-  return normalized || null;
-}
-
-function toIdSegment(value: string): string {
-  return normalizeVariableKey(value).replace(/[^a-z0-9_-]/g, "-") || "custom";
 }
 
 function hashText(value: string): string {

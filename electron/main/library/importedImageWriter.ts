@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { AppError } from "../ipc/errors";
 import { compressImageBufferForImport } from "./imageCompression";
-import { normalizeImportImageExtension, type ImportImageExtension } from "./imageCompressionPolicy";
+import {
+  isPassthroughImportImageExtension,
+  normalizeImportImageExtension,
+  type ImportImageExtension,
+} from "./imageCompressionPolicy";
 import { getImagePath } from "./libraryPaths";
 import { scheduleImportedVideoNormalization } from "./videoImportNormalizer";
 
@@ -127,21 +131,37 @@ export async function writeImportMediaFile(imageId: string, sourcePath: string):
   const extension = getSafeImportMediaExtensionFromPath(sourcePath);
 
   if (!isImportVideoExtension(extension) && !isImportAudioExtension(extension)) {
+    const imageFileName = `${imageId}${extension}`;
+    const mediaPath = getImagePath(imageFileName);
+
+    // These formats preserve original bytes, so copying avoids readFile plus nativeImage decoding.
+    // PNG/JPEG/WebP/BMP continue through the existing compression policy.
+    if (isPassthroughImportImageExtension(extension)) {
+      await copyMediaFile(sourcePath, mediaPath);
+      return imageFileName;
+    }
+
     return writeImportImageBuffer(imageId, await fs.readFile(sourcePath), extension);
   }
 
   const imageFileName = `${imageId}${extension}`;
   const mediaPath = getImagePath(imageFileName);
 
-  if (path.resolve(sourcePath) !== path.resolve(mediaPath)) {
-    await fs.copyFile(sourcePath, mediaPath);
-  }
+  await copyMediaFile(sourcePath, mediaPath);
 
   if (isImportVideoExtension(extension)) {
     scheduleImportedVideoNormalization(mediaPath);
   }
 
   return imageFileName;
+}
+
+async function copyMediaFile(sourcePath: string, mediaPath: string): Promise<void> {
+  if (path.resolve(sourcePath) === path.resolve(mediaPath)) {
+    return;
+  }
+
+  await fs.copyFile(sourcePath, mediaPath);
 }
 
 const imageExtensionByMime: Record<string, string> = {

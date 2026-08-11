@@ -1,5 +1,6 @@
 import { nativeImage } from "electron";
 import {
+  isPassthroughImportImageExtension,
   normalizeImportImageExtension,
   selectCompressedImageCandidate,
   type ImageCompressionCandidate,
@@ -17,18 +18,6 @@ export type CompressedImportImage = {
 const jpegQualityCandidates = [82, 74] as const;
 const maxCompressiblePixels = 48_000_000;
 
-const passthroughImageExtensions = new Set<ImportImageExtension>([
-  ".gif",
-  ".avif",
-  ".heic",
-  ".heif",
-  ".tif",
-  ".tiff",
-  ".svg",
-  ".ico",
-  ".apng",
-]);
-
 export function compressImageBufferForImport(buffer: Buffer, extension: string): CompressedImportImage {
   const normalizedExtension = normalizeImportImageExtension(extension);
 
@@ -37,7 +26,7 @@ export function compressImageBufferForImport(buffer: Buffer, extension: string):
   }
 
   // 这些格式要么带动画/矢量，要么 Electron nativeImage 解码不稳定，直接原样入库。
-  if (buffer.length === 0 || passthroughImageExtensions.has(normalizedExtension)) {
+  if (buffer.length === 0 || isPassthroughImportImageExtension(normalizedExtension)) {
     return createOriginalImage(buffer, normalizedExtension);
   }
 

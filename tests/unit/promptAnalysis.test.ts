@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   analyzePromptText,
+  analyzePromptTags,
   applyCategoryToTags,
   applyAnalysisInlineChips,
   applyAnalysisTemplate,
@@ -13,6 +14,7 @@ import {
   filterPromptOptionValues,
   getNegativePromptValues,
   moveNegativePromptValuesFromPrompt,
+  normalizePromptAnalysisSections,
   normalizeConcretePromptTags,
   omitNegativeAnalysisSections,
   splitNegativePromptFromPrompt,
@@ -27,16 +29,122 @@ describe("promptAnalysis", () => {
       tags: ["图像风格"],
     });
 
-    expect(suggestions.length).toBeGreaterThanOrEqual(5);
-    expect(suggestions.length).toBeLessThanOrEqual(10);
-    expect(suggestions).toContain("赛博朋克");
-    expect(suggestions).toContain("海报设计");
+    // Only formal photography ontology leaves are selectable as categories.
+    expect(suggestions.length).toBeGreaterThanOrEqual(1);
+    expect(suggestions.length).toBeLessThanOrEqual(8);
+    expect(suggestions.every((label) => label.endsWith("摄影") || label.includes("摄影"))).toBe(true);
+  });
+
+  it("routes beverage ads to beverage leaves instead of generic product or food photography", () => {
+    const suggestions = suggestPromptCategories({
+      title: "抹茶奶茶夏季广告",
+      prompt: "抹茶奶茶，奶油顶，户外绿色场景，品牌广告画面，竖版排版",
+      tags: [],
+    });
+
+    expect(suggestions).toContain("茶饮摄影");
+    expect(suggestions).not.toContain("产品摄影");
+    expect(suggestions).not.toContain("食品摄影");
+  });
+
+  it("prioritizes beverage-making process when the action is the visual subject", () => {
+    const suggestions = suggestPromptCategories({
+      title: "鸡尾酒调制",
+      prompt: "调酒师将冰块与鸡尾酒摇匀并倒入杯中",
+      tags: [],
+    });
+
+    expect(suggestions[0]).toBe("饮品制作过程摄影");
+    expect(suggestions).toContain("酒精饮品摄影");
+  });
+
+  it("routes pre-wedding bridal images to bridal photography, not wedding-day events", () => {
+    const bridal = suggestPromptCategories({
+      title: "户外婚纱照",
+      prompt: "新娘穿婚纱在花海中进行婚前外景拍摄，成片用于婚纱相册",
+      tags: [],
+    });
+    expect(bridal).toContain("婚纱摄影");
+    expect(bridal).not.toContain("婚礼摄影");
+
+    const event = suggestPromptCategories({
+      title: "婚礼现场纪实",
+      prompt: "婚礼仪式、婚宴和接亲现场的纪实摄影",
+      tags: [],
+    });
+    expect(event).toContain("婚礼摄影");
+    expect(event).not.toContain("婚纱摄影");
   });
 
   it("keeps category separate from tags", () => {
     expect(applyCategoryToTags(["旧分类", "图像风格", "旧分类"], "旧分类", "新分类")).toEqual([
       "图像风格",
     ]);
+  });
+
+  it("normalizes capsule sections to the parameter schema and rejects cross-domain values", () => {
+    const sections = normalizePromptAnalysisSections(
+      "产品摄影，近景，16:9 横屏，柔和窗边自然光影",
+      [
+        {
+          key: "shot_size",
+          label: "分类标签",
+          variable: "category",
+          values: ["产品摄影", "近景"],
+          chips: [],
+        },
+        {
+          key: "aspect_ratio",
+          label: "标签",
+          variable: "tags",
+          values: ["不存在于原文的比例"],
+          chips: [],
+        },
+        {
+          key: "light_shadow",
+          label: "任意标签名",
+          variable: "tagValue",
+          values: ["柔和窗边自然光影"],
+          chips: [],
+        },
+      ],
+    );
+
+    expect(sections).toHaveLength(2);
+    expect(sections[0]).toMatchObject({
+      key: "shot_size",
+      label: "景别",
+      variable: "shotSize",
+      values: ["近景"],
+    });
+    expect(sections[1]).toMatchObject({
+      key: "light_shadow",
+      label: "光影",
+      variable: "lightShadow",
+    });
+    expect(sections.every((section) => section.variable !== "category" && section.variable !== "tags")).toBe(true);
+  });
+
+  it("keeps tag analysis isolated from parameter capsules", () => {
+    const tagResult = analyzePromptTags("近景, 柔和窗边自然光影, 香水");
+    expect(tagResult.sections).toEqual([]);
+    expect(tagResult.chips).toEqual([]);
+    expect(tagResult.suggestedCategories).toEqual([]);
+    expect(tagResult.primaryCategory).toBe("未分类");
+    expect(tagResult.suggestedTags).not.toContain("近景");
+    expect(tagResult.suggestedTags).not.toContain("柔和窗边自然光影");
+  });
+
+  it("does not restore category or tag metadata as saved parameter capsules", () => {
+    const result = buildPromptAnalysisFromSavedCapsules(
+      "{{category: \u8fd1\u666f}}, {{tags: \u9999\u6c34}}, {{imageStyle: \u6d6e\u4e16\u7ed8}}",
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.sections.map((section) => section.variable)).toEqual(["imageStyle"]);
+    expect(result?.suggestedTags).toEqual([]);
+    expect(result?.suggestedCategories).toEqual([]);
+    expect(result?.primaryCategory).toBe("\u672a\u5206\u7c7b");
   });
 
   it("filters empty dimension names from concrete image tags", () => {
@@ -48,9 +156,18 @@ describe("promptAnalysis", () => {
         "景别",
         "识别",
         "银紫色长发",
-        "近景自拍",
+        "波浪卷发",
       ]),
-    ).toEqual(["银紫色长发", "近景自拍"]);
+    ).toEqual(["银紫色长发", "波浪卷发"]);
+  });
+
+  it("strips category names from tags — so categories must never be stored in tags", () => {
+    // 这是「关闭卡片后分类只剩一个」的根因守卫：
+    // useLibraryStore.saveItem 对每个 tags 补丁都会跑 normalizeConcretePromptTags，
+    // 分类名会被整体剥掉。次分类因此只能存 genreIds，绝不能借道 tags 传递。
+    expect(
+      normalizeConcretePromptTags(["肖像摄影", "少女写真", "汉服造型", "团扇", "木质栈道"]),
+    ).toEqual(["团扇", "木质栈道"]);
   });
 
   it("filters parameter-like and model-source noise from concrete tags", () => {
@@ -68,7 +185,20 @@ describe("promptAnalysis", () => {
         "冰爽水雾水果广告海报",
         "水梨",
       ]),
-    ).toEqual(["海报设计", "商业视觉", "冰爽水雾水果广告海报", "水梨"]);
+      // 「海报设计」是分类叶子（平面设计域），按分类/标签边界必须从标签里剥掉，
+      // 不再降级成「海报」留在标签中。见 photographyCategories.resolveLabelLayer。
+    ).toEqual(["商业视觉", "冰爽水雾水果广告海报", "水梨"]);
+  });
+
+  it("rejects sentence clauses that describe a scene instead of naming a tag", () => {
+    expect(
+      normalizeConcretePromptTags([
+        "地平线上有一位长发侠客剪影",
+        "画面中出现一位女性",
+        "白色抹胸长裙",
+        "自然光斑",
+      ]),
+    ).toEqual(["白色抹胸长裙", "自然光斑"]);
   });
 
   it("builds replacement chips and applies one chip to prompt text", () => {
@@ -78,6 +208,18 @@ describe("promptAnalysis", () => {
 
     expect(chip).toBeDefined();
     expect(applyReplacementChip(prompt, chip!)).toContain("{{imageStyle: 水彩手绘风格}}");
+  });
+
+  it("keeps only the highest-value replaceable parameters (5-10 chips)", () => {
+    const prompt =
+      "水彩手绘风格，近景，16:9 横屏，俯视拍摄角度，主体居中构图，柔和窗边自然光影，低饱和莫兰迪配色，安静温柔氛围，自然站姿动作，丝绸礼服服装细节，鹅蛋脸轮廓，杏仁眼";
+    const analysis = analyzePromptText(prompt);
+
+    expect(analysis.chips.length).toBeGreaterThanOrEqual(5);
+    expect(analysis.chips.length).toBeLessThanOrEqual(10);
+    expect(analysis.sections.length).toBeLessThanOrEqual(analysis.chips.length);
+    // Prefer high-value visual dimensions over long-tail facial micro details.
+    expect(analysis.chips.some((chip) => chip.sectionKey === "image_style")).toBe(true);
   });
 
   it("writes analyzed chips directly into the prompt text", () => {

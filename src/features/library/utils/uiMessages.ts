@@ -33,6 +33,8 @@ export const uiErrorMessage: Record<string, string> = {
   AI_SETTINGS_INVALID: "模型配置结构不合法。",
   AI_TRANSLATE_PAYLOAD_INVALID: "AI 翻译参数不合法。",
   EXTERNAL_URL_INVALID: "网页地址不合法，无法打开。",
+  FFMPEG_BINARY_NOT_FOUND: "需要视频运行时（FFmpeg），请先安装后再使用视频功能。",
+  MODULE_INSTALL_FAILED: "模块安装失败，依赖校验未通过。",
   ZIP_DATA_MISSING: "分享包缺少 data.json。",
   ZIP_IMAGE_MISSING: "分享包缺少图片文件。",
   ZIP_SCHEMA_INVALID: "分享包数据结构不合法。",

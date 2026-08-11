@@ -2,7 +2,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const projectRoot = path.resolve(__dirname, "..");
-const distDir = path.join(projectRoot, "dist");
+/**
+ * Build output directories are fully regenerated, so they must be wiped first:
+ * `tsc` never deletes stale `.js` left behind by a removed `.ts`, and such
+ * orphans would otherwise keep shipping inside `app.asar`.
+ */
+const allowedTargets = new Set(["dist", "dist-electron"]);
+const requestedTargets = process.argv.slice(2);
+const targets = requestedTargets.length > 0 ? requestedTargets : ["dist"];
 
 function assertInsideProject(targetPath) {
   const relativePath = path.relative(projectRoot, targetPath);
@@ -12,11 +19,18 @@ function assertInsideProject(targetPath) {
   }
 }
 
-assertInsideProject(distDir);
-removePathIfExists(distDir);
+for (const target of targets) {
+  if (!allowedTargets.has(target)) {
+    throw new Error(`Refusing to remove unknown build output: ${target}`);
+  }
 
-if (fs.existsSync(distDir)) {
-  throw new Error(`Directory still exists after removal: ${distDir}`);
+  const targetDir = path.join(projectRoot, target);
+  assertInsideProject(targetDir);
+  removePathIfExists(targetDir);
+
+  if (fs.existsSync(targetDir)) {
+    throw new Error(`Directory still exists after removal: ${targetDir}`);
+  }
 }
 
 function removePathIfExists(targetPath) {

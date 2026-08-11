@@ -17,6 +17,9 @@ const backgroundThumbnailConcurrency = 3;
 let activeBackgroundThumbnailCount = 0;
 
 export async function getOrCreateImageThumbnailPath(imageFileName: string): Promise<string> {
+  // An explicit request takes ownership of the queued item so the background
+  // scheduler does not perform a redundant freshness check afterwards.
+  queuedThumbnailFileNames.delete(imageFileName);
   const existingTask = pendingThumbnails.get(imageFileName);
 
   if (existingTask) {
@@ -68,6 +71,7 @@ export async function getFreshImageThumbnailPathForItem(
 export async function getOrCreateImageThumbnailPathForItem(
   item: Pick<LibraryItem, "imageFileName" | "mediaStorage">,
 ): Promise<string> {
+  queuedThumbnailFileNames.delete(item.imageFileName);
   const existingTask = pendingThumbnails.get(item.imageFileName);
 
   if (existingTask) {
@@ -121,6 +125,12 @@ async function createImageThumbnailPathFromSource(
   imagePath: string,
   options: { normalizeVideo: boolean },
 ): Promise<string> {
+  // Audio files are already represented by their source path and never need a
+  // thumbnail freshness check or thumbnail directory creation.
+  if (isAudioMediaFile(imageFileName)) {
+    return imagePath;
+  }
+
   const thumbnailPath = getImageThumbnailPath(imageFileName);
 
   if (await isFreshThumbnail(imagePath, thumbnailPath)) {
@@ -133,13 +143,14 @@ async function createImageThumbnailPathFromSource(
     return createVideoThumbnailPath(imagePath, thumbnailPath, options.normalizeVideo);
   }
 
-  if (isAudioMediaFile(imageFileName)) {
-    return imagePath;
-  }
-
   const sourceImage = nativeImage.createFromPath(imagePath);
 
   if (sourceImage.isEmpty()) {
+    // nativeImage 无法解码（常见于超大图片或特殊格式），尝试用 sharp 创建缩略图。
+    const sharpThumbnailPath = await createThumbnailWithSharp(imagePath, thumbnailPath);
+    if (sharpThumbnailPath) {
+      return sharpThumbnailPath;
+    }
     return imagePath;
   }
 
@@ -160,6 +171,40 @@ async function createImageThumbnailPathFromSource(
   await fs.rename(tempPath, thumbnailPath);
 
   return thumbnailPath;
+}
+
+async function createThumbnailWithSharp(imagePath: string, thumbnailPath: string): Promise<string | null> {
+  try {
+    const { isSharpAvailable, getSharp } = await import("../runtime/imageRuntime");
+    if (!isSharpAvailable()) {
+      logger.warn("media-thumbnail", "sharp-unavailable", { file: imagePath });
+      return null;
+    }
+
+    const sharp = getSharp();
+    const tempPath = `${thumbnailPath}.${process.pid}.tmp`;
+    const buffer = await fs.readFile(imagePath);
+
+    await sharp(buffer)
+      .resize({
+        width: maxThumbnailSide,
+        height: maxThumbnailSide,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality: thumbnailJpegQuality })
+      .toFile(tempPath);
+
+    await fs.rename(tempPath, thumbnailPath);
+    logger.info("media-thumbnail", "sharp-thumbnail-created", { file: imagePath });
+    return thumbnailPath;
+  } catch (error) {
+    logger.warn("media-thumbnail", "sharp-thumbnail-failed", {
+      file: imagePath,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 async function createVideoThumbnailPath(
@@ -237,10 +282,23 @@ function scheduleBackgroundThumbnailWarmup(): void {
 }
 
 async function isFreshThumbnail(imagePath: string, thumbnailPath: string): Promise<boolean> {
-  try {
-    const [imageStats, thumbnailStats] = await Promise.all([fs.stat(imagePath), fs.stat(thumbnailPath)]);
+  let thumbnailStats;
 
-    return thumbnailStats.mtimeMs >= imageStats.mtimeMs && thumbnailStats.size > 0;
+  try {
+    thumbnailStats = await fs.stat(thumbnailPath);
+  } catch {
+    // Missing thumbnails are the common first-run path; avoid stat-ing the source
+    // when there is no thumbnail that could possibly be fresh.
+    return false;
+  }
+
+  if (thumbnailStats.size <= 0) {
+    return false;
+  }
+
+  try {
+    const imageStats = await fs.stat(imagePath);
+    return thumbnailStats.mtimeMs >= imageStats.mtimeMs;
   } catch {
     return false;
   }

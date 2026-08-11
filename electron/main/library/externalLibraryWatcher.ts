@@ -10,7 +10,21 @@ import { isSupportedExternalMediaPath } from "./externalLibraryScanner";
 import { syncExternalLibraryRoot } from "./externalLibrarySync";
 import { readLibraryRoots, updateLibraryRoot } from "./libraryRoots";
 
-const watcherDebounceMs = 900;
+const DEFAULT_WATCHER_DEBOUNCE_MS = 900;
+const DEFAULT_WATCHER_STABILITY_THRESHOLD_MS = 700;
+const DEFAULT_WATCHER_POLL_INTERVAL_MS = 100;
+
+/**
+ * Positive integer from env, else the production default. Lets tests shrink the
+ * debounce / awaitWriteFinish windows so the watcher settles in well under a
+ * second instead of ~2s, removing the timing race with the test poll deadline
+ * under parallel load. Unset in production → identical defaults.
+ */
+function watcherTimingMs(envName: string, fallback: number): number {
+  const parsed = Number(process.env[envName]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 const watcherStates = new Map<string, RootWatcherState>();
 let syncQueue: Promise<void> = Promise.resolve();
 let watcherControlQueue: Promise<void> = Promise.resolve();
@@ -141,8 +155,8 @@ async function startExternalLibraryRootWatcher(root: LibraryRoot): Promise<void>
   const watcher = chokidar.watch(root.absolutePath, {
     atomic: true,
     awaitWriteFinish: {
-      pollInterval: 100,
-      stabilityThreshold: 700,
+      pollInterval: watcherTimingMs("SUYAN_WATCHER_POLL_MS", DEFAULT_WATCHER_POLL_INTERVAL_MS),
+      stabilityThreshold: watcherTimingMs("SUYAN_WATCHER_STABILITY_MS", DEFAULT_WATCHER_STABILITY_THRESHOLD_MS),
     },
     depth: root.recursive ? undefined : 0,
     ignoreInitial: true,
@@ -190,14 +204,20 @@ function queueWatcherPath(
     return;
   }
 
-  (kind === "added" ? state.pendingAdded : state.pendingRemoved).add(filePath);
+  if (kind === "added") {
+    state.pendingRemoved.delete(filePath);
+    state.pendingAdded.add(filePath);
+  } else {
+    state.pendingAdded.delete(filePath);
+    state.pendingRemoved.add(filePath);
+  }
   if (state.timer) {
     clearTimeout(state.timer);
   }
   state.timer = setTimeout(() => {
     state.timer = null;
     void flushWatcherEvents(root, state);
-  }, watcherDebounceMs);
+  }, watcherTimingMs("SUYAN_WATCHER_DEBOUNCE_MS", DEFAULT_WATCHER_DEBOUNCE_MS));
 }
 
 async function flushWatcherEvents(root: LibraryRoot, state: RootWatcherState): Promise<void> {
@@ -216,9 +236,8 @@ async function flushWatcherEvents(root: LibraryRoot, state: RootWatcherState): P
         return;
       }
 
-      const currentRoot = (await readLibraryRoots()).find(
-        (candidate) => candidate.id === root.id && candidate.watchEnabled,
-      );
+      const roots = await readLibraryRoots();
+      const currentRoot = roots.find((candidate) => candidate.id === root.id && candidate.watchEnabled);
 
       if (!currentRoot) {
         return;
@@ -232,7 +251,9 @@ async function flushWatcherEvents(root: LibraryRoot, state: RootWatcherState): P
 
       const data: ExternalLibrarySyncData = {
         library: result.library,
-        roots: await readLibraryRoots(),
+        // Watcher control operations stop and await this sync before changing roots,
+        // so the validated snapshot remains current for this notification.
+        roots,
         rootId: root.id,
         importedCount: result.importedCount,
         missingCount: result.missingCount,

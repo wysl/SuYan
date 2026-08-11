@@ -129,32 +129,37 @@ function obfuscateDirectory(targetDir) {
 
   const removedMaps = removeSourceMaps(absoluteTargetDir);
   const jsFiles = collectJsFiles(absoluteTargetDir);
-  const baseOptions = createBaseObfuscatorOptions();
   const sensitiveOptions = createSensitiveObfuscatorOptions();
   let obfuscatedCount = 0;
   let sensitiveCount = 0;
+  let skippedCount = 0;
 
   for (const filePath of jsFiles) {
-    const sourceCode = fs.readFileSync(filePath, "utf8");
-
-    if (sourceCode.trim().length < 40) {
+    // 仅混淆敏感模块（AI 调度、商业规则、特定协议实现）。
+    // 启动逻辑、preload、IPC 常量、窗口/托盘、Rust 通信、FFmpeg 边界、第三方依赖保持原样。
+    if (!isSensitiveModule(filePath)) {
+      skippedCount += 1;
       continue;
     }
 
-    const sensitive = isSensitiveModule(filePath);
-    const options = sensitive ? sensitiveOptions : baseOptions;
-    const result = JavaScriptObfuscator.obfuscate(sourceCode, options);
+    const sourceCode = fs.readFileSync(filePath, "utf8");
+
+    if (sourceCode.trim().length < 40) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const result = JavaScriptObfuscator.obfuscate(sourceCode, sensitiveOptions);
     fs.writeFileSync(filePath, result.getObfuscatedCode(), "utf8");
     obfuscatedCount += 1;
-    if (sensitive) {
-      sensitiveCount += 1;
-    }
+    sensitiveCount += 1;
   }
 
   return {
     directory: absoluteTargetDir,
     obfuscatedCount,
     sensitiveCount,
+    skippedCount,
     totalJsFiles: jsFiles.length,
     removedMaps,
   };

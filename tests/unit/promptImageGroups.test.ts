@@ -35,10 +35,88 @@ describe("promptImageGroups", () => {
 
     expect(groups).toHaveLength(2);
     expect(singleImageGroup?.items.map((item) => item.id)).toEqual(["career"]);
-    expect(multiImageGroup?.items.map((item) => item.id)).toEqual(["image-b", "image-a"]);
+    expect(multiImageGroup?.items.map((item) => item.id)).toEqual(["image-a", "image-b"]);
   });
 
-  it("moves liked images to the front of their group", () => {
+  it("keeps repeated generations with unchanged prompt text in one group and appends later effects", () => {
+    const cards = [
+      makeItem({
+        id: "generated-original",
+        imageFileName: "generated-original.png",
+        title: "AI generated image",
+        prompt: "A quiet lake at sunrise",
+        negativePrompt: "text, watermark",
+        generationMethod: "model-a",
+        tags: [],
+        createdAt: "2026-07-30T01:00:00.000Z",
+      }),
+      makeItem({
+        id: "generated-later",
+        imageFileName: "generated-later.webp",
+        title: "AI generated image",
+        prompt: "A quiet lake at sunrise",
+        negativePrompt: "text, watermark",
+        generationMethod: "model-b",
+        tags: [],
+        createdAt: "2026-07-31T01:00:00.000Z",
+      }),
+    ].map(toPromptCardData);
+
+    const [group] = groupPromptImages(cards, []);
+
+    expect(group.items.map((item) => item.id)).toEqual(["generated-original", "generated-later"]);
+    expect(group.primaryItem.id).toBe("generated-original");
+  });
+
+  it("appends canvas generations that inherit the origin group identity, and splits when the prompt changed", () => {
+    // 「传送到画布」血缘继承：提示词未改时新图带上来源组的 title/tags/category，
+    // 分组键与原组一致 → 追加为原组效果图；改过提示词 → 键不同 → 另立新组。
+    const originGroup = {
+      title: "新中式茶室",
+      prompt: "一间临水而建的新中式茶室",
+      negativePrompt: "低清晰度",
+      tags: ["茶室", "新中式"],
+      category: "室内设计",
+    };
+    const cards = [
+      makeItem({
+        id: "origin-image",
+        imageFileName: "origin.png",
+        ...originGroup,
+        createdAt: "2026-08-01T00:00:00.000Z",
+      }),
+      // 继承身份的画布生成图（提示词未改）。
+      makeItem({
+        id: "canvas-inherited",
+        imageFileName: "canvas-1.png",
+        ...originGroup,
+        generationMethod: "gpt-image-2",
+        createdAt: "2026-08-02T00:00:00.000Z",
+      }),
+      // 改过提示词的画布生成图：AI 另起标题、无标签分类。
+      makeItem({
+        id: "canvas-edited",
+        imageFileName: "canvas-2.png",
+        title: "黄昏茶室",
+        prompt: "一间临水而建的新中式茶室，黄昏光线",
+        negativePrompt: "低清晰度",
+        tags: [],
+        category: undefined,
+        generationMethod: "gpt-image-2",
+        createdAt: "2026-08-02T01:00:00.000Z",
+      }),
+    ].map(toPromptCardData);
+
+    const groups = groupPromptImages(cards, []);
+    const originGroupResult = groups.find((group) => group.items.some((item) => item.id === "origin-image"));
+
+    expect(groups).toHaveLength(2);
+    expect(originGroupResult?.items.map((item) => item.id)).toEqual(["origin-image", "canvas-inherited"]);
+    // 原图仍是第一张，继承图按时间追加在后（AGENTS.md 提示词组顺序铁律）。
+    expect(originGroupResult?.primaryItem.id).toBe("origin-image");
+  });
+
+  it("keeps the original image first even when a later image is liked", () => {
     const cards = [
       makeItem({ id: "old", createdAt: "2026-07-01T00:00:00.000Z" }),
       makeItem({ id: "new", createdAt: "2026-07-03T00:00:00.000Z" }),
@@ -50,7 +128,7 @@ describe("promptImageGroups", () => {
     expect(group.primaryItem.id).toBe("old");
   });
 
-  it("uses a missing external image as the group primary so its state stays visible", () => {
+  it("keeps the earliest original image first even when it is missing", () => {
     const cards = [
       makeItem({ id: "available", createdAt: "2026-07-03T00:00:00.000Z" }),
       makeItem({
@@ -105,7 +183,7 @@ describe("promptImageGroups", () => {
 
     const groups = groupPromptImages(cards, []);
 
-    expect(spreadPromptGroupImages(groups).map((item) => item.id)).toEqual(["a-1", "b-1", "a-2", "b-2"]);
+    expect(spreadPromptGroupImages(groups).map((item) => item.id)).toEqual(["a-2", "b-2", "a-1", "b-1"]);
   });
 
   it("groups blank media imported in the same batch without mixing different blank batches", () => {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, RefreshCw, Search, Wifi, X } from "lucide-react";
+import { Check, RefreshCw, Search, Wifi } from "lucide-react";
 import { AppDialog, DialogCloseButton } from "@/components/ui/AppDialog";
 import { Button } from "@/components/ui/Button";
 import { TextField } from "@/components/ui/TextField";
@@ -12,11 +12,14 @@ import {
   resolveStatusFeedbackTone,
   type StatusFeedbackMessage,
 } from "../utils/statusFeedback";
+import { useAutoSave } from "../hooks/useAutoSave";
 
 type ProxySettingsDialogProps = {
   isBusy: boolean;
   settings: ProxySettings;
-  onClose: () => void;
+  /** 嵌入系统设置壳时不渲染 AppDialog 外框。 */
+  embedded?: boolean;
+  onClose?: () => void;
   onDetect: () => Promise<ProxyDetectionData | null>;
   onSave: (settings: ProxySettings) => Promise<boolean>;
   onTest: (settings: ProxySettings) => Promise<boolean>;
@@ -48,6 +51,7 @@ const proxyModeOptions: Array<{
 export function ProxySettingsDialog({
   isBusy,
   settings,
+  embedded = false,
   onClose,
   onDetect,
   onSave,
@@ -73,12 +77,6 @@ export function ProxySettingsDialog({
     });
   }, [feedbackText, onNotify]);
 
-  useEffect(() => {
-    setDraft(settings);
-    setFeedbackText("");
-    setDetection(null);
-  }, [settings]);
-
   async function handleDetect() {
     setFeedbackText("正在检测系统和本机代理...");
     const detectedProxy = await onDetect();
@@ -92,21 +90,18 @@ export function ProxySettingsDialog({
     setDraft(detectedProxy.settings);
     setFeedbackText(
       detectedProxy.detected
-        ? `${detectedProxy.summary} 已自动填入，保存后生效。`
+        ? `${detectedProxy.summary} 已自动填入，正在应用。`
         : detectedProxy.summary,
     );
   }
 
-  async function handleSave() {
-    if (validationError) {
-      setFeedbackText(validationError);
-      return;
-    }
-
-    setFeedbackText("正在保存网络代理...");
-    const isSaved = await onSave(payload);
-    setFeedbackText(isSaved ? "网络代理已保存并应用。" : "网络代理保存失败。");
-  }
+  useAutoSave({
+    enabled: !validationError,
+    isBusy,
+    onError: setFeedbackText,
+    onSave,
+    value: payload,
+  });
 
   async function handleTest() {
     if (validationError) {
@@ -120,24 +115,8 @@ export function ProxySettingsDialog({
     setFeedbackText(isConnected ? "代理连接测试成功。" : "代理连接测试失败。");
   }
 
-  return (
-    <AppDialog panelClassName="flex max-h-[92vh] w-full max-w-3xl flex-col" titleId="proxy-settings-title" onClose={onClose}>
-      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary-soft text-foreground">
-            <Wifi size={18} />
-          </span>
-          <div className="min-w-0">
-            <h2 className="text-lg font-semibold" id="proxy-settings-title">
-              网络代理
-            </h2>
-            <p className="mt-1 text-sm text-muted">用于网页解析和远程下载</p>
-          </div>
-        </div>
-        <DialogCloseButton onClick={onClose} />
-      </header>
-
-      <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto overscroll-contain px-5 py-5">
+  const body = (
+      <div className={`grid min-h-0 flex-1 gap-4 overflow-y-auto overscroll-contain ${embedded ? "px-1 py-1" : "px-5 py-5"}`}>
         <section className="grid gap-3 rounded-md border border-border bg-background p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -151,6 +130,14 @@ export function ProxySettingsDialog({
               onClick={() => void handleDetect()}
             >
               自动检测
+            </Button>
+            <Button
+              className="min-h-9 px-2.5 py-1.5 text-xs"
+              disabled={isBusy || Boolean(validationError)}
+              icon={<RefreshCw size={14} />}
+              onClick={() => void handleTest()}
+            >
+              测试连接
             </Button>
           </div>
 
@@ -234,7 +221,7 @@ export function ProxySettingsDialog({
             </p>
           ) : (
             <p className="rounded-md border border-border bg-panel px-3 py-2 text-sm text-muted">
-              保存后立即应用；进行中的下载可能需重试。
+              修改后立即应用；进行中的下载可能需重试。
             </p>
           )}
         </section>
@@ -269,27 +256,33 @@ export function ProxySettingsDialog({
           <p className="rounded-md border border-border bg-panel px-3 py-2 text-sm text-muted">{feedbackText}</p>
         ) : null}
       </div>
+  );
 
-      <footer className="flex flex-wrap justify-end gap-2 border-t border-border px-5 py-4">
-        <Button icon={<X size={16} />} variant="ghost" onClick={onClose}>
-          取消
-        </Button>
-        <Button
-          disabled={isBusy || Boolean(validationError)}
-          icon={<RefreshCw size={16} />}
-          onClick={() => void handleTest()}
-        >
-          测试连接
-        </Button>
-        <Button
-          disabled={isBusy || Boolean(validationError)}
-          icon={<Check size={16} />}
-          variant="primary"
-          onClick={() => void handleSave()}
-        >
-          保存设置
-        </Button>
-      </footer>
+  if (embedded) {
+    return body;
+  }
+
+  return (
+    <AppDialog
+      panelClassName="flex max-h-[92vh] w-full max-w-3xl flex-col"
+      titleId="proxy-settings-title"
+      onClose={onClose ?? (() => undefined)}
+    >
+      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary-soft text-foreground">
+            <Wifi size={18} />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold" id="proxy-settings-title">
+              网络代理
+            </h2>
+            <p className="mt-1 text-sm text-muted">用于网页解析和远程下载</p>
+          </div>
+        </div>
+        <DialogCloseButton onClick={() => onClose?.()} />
+      </header>
+      {body}
     </AppDialog>
   );
 }

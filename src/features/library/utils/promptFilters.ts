@@ -9,10 +9,12 @@ import type {
 import { resolveGenerationModelLabel } from "./generationModels";
 import { prioritizeMissingMediaStatusItems } from "./externalMediaStatus";
 import { normalizeNsfwRating } from "./nsfwRating";
-import { isGenericPromptLabel, removeCategoryFromTags, suggestPromptCategories } from "./promptAnalysis";
+import { isGenericPromptLabel, sanitizePromptTags } from "./promptAnalysis";
 import { normalizePromptType } from "./promptType";
 
 export const allCategoriesValue = "all";
+export const allPromptTypesValue = "all";
+export const allSourcesValue = "all";
 
 export const localImportAuthorName = "本地导入";
 
@@ -24,6 +26,11 @@ export type PromptCardData = {
   title: string;
   prompt: string;
   category: string;
+  categoryId: string | null;
+  /** Multi-genre taxonomy ids (primary first). */
+  genreIds: string[];
+  categoryConfidence: number | null;
+  categorySource: LibraryItem["categorySource"];
   tags: string[];
   hot: number;
   createdAt: number;
@@ -36,6 +43,8 @@ export type PromptCardData = {
   sourceUrl: string | null;
   generationMethod: string;
   promptType: PromptContentType;
+  /** Orthogonal facet: local import vs remote/web share. */
+  sourceKind: "local" | "web";
   nsfwRating: LibraryItem["nsfwRating"];
   mediaStatus: ExternalMediaStatus | null;
   videoDurationSec: number | null;
@@ -55,6 +64,8 @@ export type PromptFilterOptions = {
   randomSeed?: number;
   /** 刚导入的素材 id，按导入顺序置顶显示（第一张为刚导入的提示词组）。 */
   pinnedItemIds?: readonly string[];
+  promptType?: string;
+  sourceKind?: string;
 };
 
 export function toPromptCardData(item: LibraryItem): PromptCardData {
@@ -72,6 +83,23 @@ export function toPromptCardData(item: LibraryItem): PromptCardData {
   const sourceUrl = typeof item.sourceUrl === "string" && item.sourceUrl.trim() ? item.sourceUrl.trim() : null;
   const tags = item.tags.map((tag) => tag.trim()).filter(Boolean);
   const category = resolvePromptCategory(extendedItem, tags);
+  const categoryId =
+    typeof item.categoryId === "string" && item.categoryId.trim() ? item.categoryId.trim() : null;
+  const genreIds = Array.from(
+    new Set(
+      [
+        categoryId,
+        ...(Array.isArray(item.genreIds)
+          ? item.genreIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim())
+          : []),
+      ].filter((id): id is string => Boolean(id)),
+    ),
+  );
+  const categoryConfidence =
+    typeof item.categoryConfidence === "number" && Number.isFinite(item.categoryConfidence)
+      ? item.categoryConfidence
+      : null;
+  const categorySource = item.categorySource ?? null;
   const createdAt = Date.parse(item.createdAt) || 0;
   const updatedAt = Date.parse(item.updatedAt) || createdAt;
   const hot = typeof extendedItem.hot === "number" ? extendedItem.hot : estimateHotScore(item);
@@ -97,7 +125,11 @@ export function toPromptCardData(item: LibraryItem): PromptCardData {
   const authorUrl = typeof item.authorUrl === "string" && item.authorUrl.trim() ? item.authorUrl.trim() : (derivedAuthor?.url ?? null);
   const authorAvatarUrl =
     typeof item.authorAvatarUrl === "string" && item.authorAvatarUrl.trim() ? item.authorAvatarUrl.trim() : null;
-  const displayTags = removeCategoryFromTags(tags, category);
+  // Tags stay orthogonal to formal categories (strip taxonomy names / generics).
+  const displayTags = sanitizePromptTags(tags, {
+    category,
+    maxCount: 24,
+  });
   const promptType = normalizePromptType(extendedItem.promptType, {
     category,
     generationMethod,
@@ -112,6 +144,10 @@ export function toPromptCardData(item: LibraryItem): PromptCardData {
     title: item.title,
     prompt: item.prompt,
     category,
+    categoryId,
+    genreIds,
+    categoryConfidence,
+    categorySource,
     tags: displayTags,
     hot,
     createdAt,
@@ -124,6 +160,7 @@ export function toPromptCardData(item: LibraryItem): PromptCardData {
     sourceUrl,
     generationMethod,
     promptType,
+    sourceKind: sourceUrl ? "web" : "local",
     nsfwRating: normalizeNsfwRating(item.nsfwRating),
     mediaStatus:
       item.mediaStorage && item.mediaStorage !== "managed" ? (item.mediaStorage.status ?? "available") : null,
@@ -158,8 +195,16 @@ export function filterPromptCards(cards: PromptCardData[], options: PromptFilter
     const matchesQuery = query ? card.searchText.includes(query) : true;
     const matchesCategory = options.category === allCategoriesValue || card.category === options.category;
     const matchesTag = options.activeTag ? card.tags.includes(options.activeTag) : true;
+    const matchesPromptType =
+      !options.promptType ||
+      options.promptType === allPromptTypesValue ||
+      card.promptType === options.promptType;
+    const matchesSource =
+      !options.sourceKind ||
+      options.sourceKind === allSourcesValue ||
+      card.sourceKind === options.sourceKind;
 
-    return matchesQuery && matchesCategory && matchesTag;
+    return matchesQuery && matchesCategory && matchesTag && matchesPromptType && matchesSource;
   });
 
   const sortedCards = sortPromptCards(
@@ -227,32 +272,46 @@ function resolveRawGenerationMethod(item: { generationMethod?: unknown; model?: 
 }
 
 function resolvePromptCategory(
-  item: { category?: unknown; title?: unknown; prompt?: unknown },
+  item: {
+    category?: unknown;
+    categoryId?: unknown;
+    title?: unknown;
+    prompt?: unknown;
+  },
   tags: readonly string[],
 ): string {
   if (typeof item.category === "string" && item.category.trim()) {
     return item.category.trim();
   }
 
+  // Explicit empty category (移出分类 / 未分类) — do not invent a membership
+  // label from tags or prompt text; that caused cleared items to stay visible
+  // under system categories that happened to appear as tags.
+  if (
+    item.category === null ||
+    item.category === "" ||
+    (typeof item.category === "string" && !item.category.trim())
+  ) {
+    if (!(typeof item.categoryId === "string" && item.categoryId.trim())) {
+      return "未分类";
+    }
+  }
+
+  if (typeof item.categoryId === "string" && item.categoryId.trim()) {
+    // categoryId without label should still not invent freeform names here
+    return "未分类";
+  }
+
+  // Legacy items with neither field: keep a soft fallback for display only.
+  // Prefer a real tag over inventing from prompt analysis so we do not
+  // fabricate taxonomy membership from free text.
   const tagCategory = tags.find((tag) => !isGenericPromptLabel(tag));
 
   if (tagCategory) {
     return tagCategory;
   }
 
-  const title = typeof item.title === "string" ? item.title : "";
-  const prompt = typeof item.prompt === "string" ? item.prompt : "";
-  const suggestedCategory = suggestPromptCategories({
-    title,
-    prompt,
-    tags: [...tags],
-  }, { includeFallback: false, skipHeavyAnalysis: true }).find((category) => !isGenericPromptLabel(category));
-
-  if (suggestedCategory) {
-    return suggestedCategory;
-  }
-
-  return tags.find((tag) => !isGenericPromptLabel(tag)) ?? "未分类";
+  return "未分类";
 }
 
 function deriveAuthorFromSourceUrl(sourceUrl: string | null): { name: string; url: string } | null {

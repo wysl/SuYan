@@ -1,10 +1,11 @@
-import { createRequire } from "node:module";
-import path from "node:path";
+import { FFMPEG_COMPONENT_ID, FFMPEG_EXECUTABLE_NAME } from "../modules/componentConfig";
+import { resolveInstalledComponentExeSync } from "../modules/componentLocator";
 
 let ffmpegPathCache: string | null | undefined;
 
-export function resolveAsarUnpackedPath(resolvedPath: string | null): string | null {
-  return resolvedPath ? resolvedPath.replace(/app\.asar(?=[\\/])/, "app.asar.unpacked") : null;
+/** 安装/卸载按需组件后调用，令下次 getFfmpegPath 重新解析（否则命中模块级缓存）。 */
+export function resetFfmpegPathCache(): void {
+  ffmpegPathCache = undefined;
 }
 
 export function getFfmpegPath(): string | null {
@@ -12,33 +13,8 @@ export function getFfmpegPath(): string | null {
     return ffmpegPathCache;
   }
 
-  const runtimeRequire = createRequire(__filename);
-  ffmpegPathCache = resolveFfmpegPathFromRequire(runtimeRequire) ?? resolveFfmpegPathFromVendor();
+  // 解绑后仅取按需安装的组件可执行文件；不再回退内置 ffmpeg-static / vendor。
+  ffmpegPathCache = resolveInstalledComponentExeSync(FFMPEG_COMPONENT_ID, FFMPEG_EXECUTABLE_NAME);
 
   return ffmpegPathCache;
-}
-
-function resolveFfmpegPathFromRequire(runtimeRequire: ReturnType<typeof createRequire>): string | null {
-  try {
-    const mod = runtimeRequire("ffmpeg-static") as { default?: string } | string;
-    const resolved = typeof mod === "string" ? mod : mod.default ?? null;
-
-    return resolveAsarUnpackedPath(resolved);
-  } catch {
-    return null;
-  }
-}
-
-function resolveFfmpegPathFromVendor(): string | null {
-  if (!process.resourcesPath) {
-    return null;
-  }
-
-  try {
-    const vendorRequire = createRequire(path.join(process.resourcesPath, "vendor", "package.cjs"));
-
-    return resolveFfmpegPathFromRequire(vendorRequire);
-  } catch {
-    return null;
-  }
 }

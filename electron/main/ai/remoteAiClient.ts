@@ -1,32 +1,50 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
   AiAnalyzePromptPayload,
+  AiImageGenerationData,
+  AiImageGenerationPayload,
+  AiOptimizePromptPayload,
   AiProviderModelSettings,
   AiProviderSettings,
   AiReverseImagePromptPayload,
   AiTranslatePromptData,
   AiTranslatePromptPayload,
   RemotePromptAnalysis,
-  RemotePromptAnalysisSection,
+  RemotePromptAnalysisV2,
 } from "../../../src/features/library/types/ai";
-import {
-  normalizePromptSectionValue,
-  promptSectionMeta,
-  splitPromptToTemplate,
-  type PromptSplitSectionKey,
-} from "../../../src/features/library/utils/promptSplit";
 import {
   photographyCategoryGroups,
   photographyCategoryLabels,
 } from "../../../src/features/library/utils/photographyCategories";
+import {
+  normalizeRemotePromptAnalysisV2,
+  remoteAnalysisV2FromLegacy,
+} from "../../../src/features/library/utils/remoteAnalysisV2";
 import { AppError } from "../ipc/errors";
 import { resolveLibraryMediaPath } from "../library/mediaLookup";
+import { getSharp } from "../runtime/imageRuntime";
 
 const requestTimeoutMs = 20_000;
 const analysisRequestTimeoutMs = 24_000;
 const generationRequestTimeoutMs = 45_000;
+const titleSummaryRequestTimeoutMs = 30_000;
+// 图像生成（含图生图）通常需要 30-120 秒，部分高画质模型更长；
+// 文本类操作（优化/翻译/反推）继续使用 generationRequestTimeoutMs 保持快速失败。
+const imageGenerationRequestTimeoutMs = 320_000;
+// 推理型模型（如 glm-5.2、deepseek-v4-pro 思考系）会把大量补全预算耗在内部推理上，
+// 分类/标签这类结构化任务因此需要更宽裕的超时，否则频繁 finish_reason:length（空内容）或直接超时。
+// 这些值只是上限：快速响应仍立即返回，仅慢推理才用满预算。
+const reasoningCategoryTimeoutMs = 90_000;
+const reasoningTagsTimeoutMs = 75_000;
+// 兜底重试的最后时限：重试会大幅放宽 max_tokens，需要更长时间让推理跑完再吐出结构化 JSON。
+const reasoningRetryTimeoutMs = 120_000;
+const maxReferenceImageBytes = 50 * 1024 * 1024;
 const maxRetries = 1;
+// 图像生成链路更易遇到 “other side closed” 等瞬时网络错误，
+// 单次重试在长耗时请求下成功率高，且仍受 imageGenerationRequestTimeoutMs 总截止时间约束。
+const imageGenerationMaxRetries = 2;
 const retryBaseDelayMs = 400;
 const maxVisionImageBytes = 8 * 1024 * 1024;
 const maxVisionInlineOriginalBytes = 768 * 1024;
@@ -36,8 +54,10 @@ const safetyVisionThumbnailMaxSize = 640;
 const safetyVisionThumbnailQuality = 65;
 const tagsVisionThumbnailMaxSize = 768;
 const tagsVisionThumbnailQuality = 70;
-const categoryVisionThumbnailMaxSize = 768;
-const categoryVisionThumbnailQuality = 70;
+// 分类识别对画面细节最敏感（古风写真 vs 人物艺术、厚涂插画 vs 写实 CG 都靠材质与笔触区分），
+// 因此比标签/安全分级保留更高的分辨率与画质。
+const categoryVisionThumbnailMaxSize = 1024;
+const categoryVisionThumbnailQuality = 82;
 const reliablePromptOptimizationSystemContent = [
   "你是图像生成提示词优化器。任务：把用户输入改写成更清晰、更稳定、可直接用于图像或视频生成模型的提示词正文。",
   "只输出优化后的提示词正文，不输出解释、标题、Markdown、参数胶囊、JSON 或多个版本。",
@@ -54,48 +74,16 @@ const promptTranslationSystemContent = [
   "保留 LoRA、Checkpoint、模型名、权重括号、变量占位符、URL、品牌名、文件名、比例参数、特殊符号和代码样式参数，不要意译破坏。",
   "只返回 JSON 对象，字段必须为 prompt 和 negativePrompt。没有负向提示词时 negativePrompt 返回空字符串。",
 ].join("\n");
-const reliablePromptAnalysisSectionGuide = [
-  "你是提示词参数胶囊分析器。只分析用户提供的当前提示词文本，不根据图片、历史上下文或想象补内容。",
-  "只返回 JSON 对象，不返回 Markdown 或解释。字段必须为 title、category、tags、sections、template、summary。",
-  "sections 最多 10 项；复杂提示词最多 14 项。每项包含 key、label、variable、values。",
-  "只提取可替换短参数：主体/产品、场景、风格媒介、画幅构图、主体位置、镜头视角、光影、色彩、材质、文案、负面约束。",
-  "values 必须是最短可替换短语，通常不超过 12 个汉字或 6 个英文单词；不要完整句子、因果说明、保护性要求或操作指令。",
-  "忽略模型名、平台名、SEO、Prompt Gallery、上传说明、代码字段、教程文字和分析文档字段。",
-  "常用 key：identity_attribute、product_identity、food_specific_identity、scene_identity、background_view、image_style、photography_style、commercial_visual_style、aspect_ratio、composition、subject_position、camera_angle、lens_equipment、depth_of_field、light_source、light_shadow、scene_color_palette、color_detail、material_texture、product_material、text_content、typography、negative。",
-  "如果没有足够可替换参数，sections 可以少于 6 项。不要为了数量臆造内容。",
-].join("\n");
-const reliablePromptAnalysisKeys = [
-  "identity_attribute",
-  "product_identity",
-  "food_specific_identity",
-  "scene_identity",
-  "background_view",
-  "image_style",
-  "photography_style",
-  "commercial_visual_style",
-  "aspect_ratio",
-  "composition",
-  "subject_position",
-  "camera_angle",
-  "lens_equipment",
-  "depth_of_field",
-  "light_source",
-  "light_shadow",
-  "scene_color_palette",
-  "color_detail",
-  "material_texture",
-  "product_material",
-  "text_content",
-  "typography",
-  "negative",
-].join("、");
-
-
-function logAiEvent(level: "info" | "error", event: string, details: Record<string, unknown> = {}): void {
+function logAiEvent(level: "info" | "warn" | "error", event: string, details: Record<string, unknown> = {}): void {
   void import("../appLogger")
     .then(({ logger }) => {
       if (level === "error") {
         logger.error("ai", event, details);
+        return;
+      }
+
+      if (level === "warn") {
+        logger.warn("ai", event, details);
         return;
       }
 
@@ -115,7 +103,7 @@ export type VisionImagePayloadPolicy = {
 export async function analyzePromptRemotely(
   settings: AiProviderSettings,
   payload: AiAnalyzePromptPayload,
-): Promise<RemotePromptAnalysis> {
+): Promise<RemotePromptAnalysisV2> {
   assertRemoteSettings(settings);
   const startedAt = Date.now();
   const budget = getAnalysisRequestBudget(payload.target);
@@ -123,9 +111,49 @@ export async function analyzePromptRemotely(
   try {
     const bodyReadyAt = Date.now();
     const body = await buildAnalysisBody(settings, payload);
-    const response = await requestChatCompletions(settings, body, true, budget.timeoutMs);
-    const content = readAssistantContent(response);
-    const analysis = parseRemotePromptAnalysisContent(content);
+    let response = await requestChatCompletions(settings, body, true, budget.timeoutMs);
+    let parsedAnalysis: RemotePromptAnalysisV2;
+    try {
+      const content = readAssistantContent(response);
+      parsedAnalysis = parseRemotePromptAnalysisV2Content(content);
+    } catch (contentError) {
+      // 以下两种情况都会触发重试：
+      // 1. 某些模型对 response_format: json_object 支持不佳，返回 200 但 content 为 null。
+      // 2. max_tokens 不足导致 finish_reason: length，content 被截断为空或无效 JSON。
+      // 策略：去掉 response_format + 翻倍 max_tokens 重试一次。
+      if (
+        contentError instanceof AppError &&
+        contentError.code === "AI_REMOTE_RESPONSE_INVALID"
+      ) {
+        const { response_format: _omit, ...bodyWithoutResponseFormat } = body;
+        // 重试时大幅放宽 max_tokens 与超时，避免再次因 length 截断或超时。
+        // 触发本重试的主因是推理型模型（glm/deepseek 思考系）把整份补全预算耗在内部推理上，
+        // finish_reason=length 却吐回空 content。实测重试给到 6000 仍会被吃满，故进一步抬到
+        // 12000 兜底、16000 上限，并用 reasoningRetryTimeoutMs 给足推理跑完再吐结构化 JSON 的
+        // 时间（否则会把 length 失败换成 35s/45s 超时）；max_tokens 只是天花板，正常短响应不受影响。
+        const originalMaxTokens = typeof bodyWithoutResponseFormat.max_tokens === "number"
+          ? bodyWithoutResponseFormat.max_tokens
+          : budget.maxTokens;
+        const retryMaxTokens = Math.min(Math.max(originalMaxTokens * 2, 12_000), 16_000);
+        bodyWithoutResponseFormat.max_tokens = retryMaxTokens;
+        const retryTimeoutMs = Math.max(budget.timeoutMs, reasoningRetryTimeoutMs);
+        logAiEvent("warn", "analyze:retry-without-response-format", {
+          target: payload.target,
+          reason: contentError.message,
+          retryMaxTokens,
+        });
+        response = await requestChatCompletions(
+          settings,
+          bodyWithoutResponseFormat,
+          false,
+          retryTimeoutMs,
+        );
+        const retryContent = readAssistantContent(response);
+        parsedAnalysis = parseRemotePromptAnalysisV2Content(retryContent);
+      } else {
+        throw contentError;
+      }
+    }
     logAiEvent("info", "analyze:done", {
       durationMs: Date.now() - startedAt,
       maxTokens: budget.maxTokens,
@@ -134,7 +162,7 @@ export async function analyzePromptRemotely(
       target: payload.target,
       timeoutMs: budget.timeoutMs,
     });
-    return analysis;
+    return parsedAnalysis;
   } catch (error) {
     logAiEvent("error", "analyze:failed", {
       code: error instanceof AppError ? error.code : "AI_REMOTE_REQUEST_FAILED",
@@ -151,6 +179,7 @@ export async function optimizePromptRemotely(
   settings: AiProviderSettings,
   prompt: string,
   customInstructions = "",
+  promptKind: AiOptimizePromptPayload["promptKind"] = "positive",
 ): Promise<string> {
   assertRemoteSettings(settings);
   const startedAt = Date.now();
@@ -163,7 +192,10 @@ export async function optimizePromptRemotely(
         messages: [
           {
             role: "system",
-            content: appendCustomInstructions(reliablePromptOptimizationSystemContent, customInstructions),
+            content: appendCustomInstructions(
+              reliablePromptOptimizationSystemContent,
+              [customInstructions, buildPromptOptimizationScopeInstructions(promptKind)].filter(Boolean).join("\n\n"),
+            ),
           },
           {
             role: "user",
@@ -194,6 +226,93 @@ export async function optimizePromptRemotely(
     });
     throw error;
   }
+}
+
+
+const promptTitleSummarySystemContent = [
+  "你是资深图库编辑，负责为 AI 绘画作品起标题。",
+  "根据用户给出的绘画提示词，用一个简短、贴切的中文标题概括画面主题。",
+  "要求：不超过 16 个汉字；突出画面主体与风格；只输出标题本身，不要引号、书名号、标点、序号或任何解释。",
+].join("\n");
+
+export async function summarizeTitleRemotely(
+  settings: AiProviderSettings,
+  prompt: string,
+  customInstructions = "",
+): Promise<string> {
+  assertRemoteSettings(settings);
+  const startedAt = Date.now();
+
+  try {
+    const response = await requestChatCompletions(
+      settings,
+      {
+        model: settings.model,
+        messages: [
+          {
+            role: "system",
+            content: appendCustomInstructions(promptTitleSummarySystemContent, customInstructions),
+          },
+          {
+            role: "user",
+            content: `提示词：\n${prompt}`,
+          },
+        ],
+        temperature: 0.4,
+        max_tokens: 64,
+      },
+      false,
+      titleSummaryRequestTimeoutMs,
+    );
+    const content = readAssistantContent(response);
+    const result = parseRemotePromptTitleContent(content);
+    logAiEvent("info", "summarize-title:done", {
+      durationMs: Date.now() - startedAt,
+      ok: true,
+      promptChars: prompt.length,
+    });
+    return result;
+  } catch (error) {
+    logAiEvent("error", "summarize-title:failed", {
+      code: error instanceof AppError ? error.code : "AI_REMOTE_REQUEST_FAILED",
+      durationMs: Date.now() - startedAt,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+export function parseRemotePromptTitleContent(content: string): string {
+  const firstLine = stripTextFence(content)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? "";
+  const title = firstLine
+    .replace(/^[「『"'“”《【\[]+/u, "")
+    .replace(/[」』"'“”》】\]]+$/u, "")
+    .replace(/^(标题|title)\s*[:：]\s*/iu, "")
+    .trim()
+    .slice(0, 40);
+
+  if (!title) {
+    throw new AppError("AI_REMOTE_RESPONSE_INVALID", "远程 AI 没有返回可用标题。");
+  }
+
+  return title;
+}
+
+export function buildPromptOptimizationScopeInstructions(
+  promptKind: AiOptimizePromptPayload["promptKind"],
+): string {
+  if (promptKind !== "negative") {
+    return "";
+  }
+
+  return [
+    "当前输入是负向提示词，只描述生成时应避免的缺陷、元素与风格。",
+    "优化时保留负向语义，合并重复项，去除互相冲突或会误伤主体的限制，不得改写成正向画面描述。",
+    "只输出优化后的负向提示词正文，不添加标题、解释、Markdown 或正向提示词。",
+  ].join("\n");
 }
 
 
@@ -457,7 +576,7 @@ export function parseOpenAiCompatibleModels(input: unknown): AiProviderModelSett
     models.push({
       id,
       label: id,
-      capabilities: guessModelCapabilities(id),
+      capabilities: parseModelCapabilities(item, id),
     });
   }
 
@@ -468,35 +587,53 @@ export function parseOpenAiCompatibleModels(input: unknown): AiProviderModelSett
   return models.slice(0, 120);
 }
 
-export function parseRemotePromptAnalysisContent(content: string): RemotePromptAnalysis {
+/**
+ * Read the flat V1 analysis shape. `category` may arrive as a string or an
+ * array; when it is an array the leading value wins and the rest are folded
+ * into `tags` (callers decide whether those are secondary genres or features).
+ */
+function legacyAnalysisFromRecord(parsed: Record<string, unknown>): RemotePromptAnalysis {
+  const categoryValues = Array.isArray(parsed.category)
+    ? uniqueStrings(parsed.category)
+    : uniqueStrings([parsed.category]);
+  const rawCategory = categoryValues[0] ?? "";
+  const secondaryCategories = categoryValues.slice(1);
+  const tags = uniqueStrings([
+    ...(Array.isArray(parsed.tags) ? parsed.tags : []),
+    ...secondaryCategories,
+  ]);
+  // Never invent a non-ontology genre fallback like「图像生成」.
+  const analysis: RemotePromptAnalysis = {
+    title: normalizeString(parsed.title),
+    category: rawCategory,
+    tags,
+    summary: normalizeString(parsed.summary),
+  };
+
+  if (analysis.tags.length === 0 && !rawCategory) {
+    throw new AppError("AI_REMOTE_RESPONSE_INVALID", "远程 AI 没有返回可用分析结果。");
+  }
+
+  return analysis;
+}
+
+/**
+ * Parse model output into the structured V2 shape for the adjudication
+ * pipeline. A genuine V2 payload is normalized directly; a flat V1 payload is
+ * read then lifted to V2 at reduced confidence so downstream scoring can tell
+ * verified structure apart from legacy guesses.
+ */
+export function parseRemotePromptAnalysisV2Content(content: string): RemotePromptAnalysisV2 {
   const parsed = parseJsonObject(stripJsonFence(content));
 
   if (!isRecord(parsed)) {
     throw new AppError("AI_REMOTE_RESPONSE_INVALID", "远程 AI 返回结构不合法。");
   }
 
-  const sections = normalizeRemoteSections(parsed.sections);
-  const template = normalizeString(parsed.template) || buildTemplateFromSections(sections);
-  const categoryValues = Array.isArray(parsed.category)
-    ? uniqueStrings(parsed.category)
-    : uniqueStrings([parsed.category]);
-  const rawCategory = categoryValues[0] ?? "";
-  const tags = uniqueStrings([...(Array.isArray(parsed.tags) ? parsed.tags : []), ...categoryValues.slice(1)]);
-  const category = rawCategory || tags[0] || "图像生成";
-  const analysis: RemotePromptAnalysis = {
-    title: normalizeString(parsed.title),
-    category,
-    tags,
-    sections,
-    template,
-    summary: normalizeString(parsed.summary),
-  };
-
-  if (analysis.sections.length === 0 && !analysis.template && analysis.tags.length === 0 && !rawCategory) {
-    throw new AppError("AI_REMOTE_RESPONSE_INVALID", "远程 AI 没有返回可用分析结果。");
-  }
-
-  return analysis;
+  return (
+    normalizeRemotePromptAnalysisV2(parsed) ??
+    remoteAnalysisV2FromLegacy(legacyAnalysisFromRecord(parsed))
+  );
 }
 
 export function parseRemoteOptimizedPromptContent(content: string): string {
@@ -623,17 +760,23 @@ export function resolveVisionImagePayloadPolicy(
 }
 
 
-async function requestChatCompletions(
+export async function requestChatCompletions(
   settings: AiProviderSettings,
   body: Record<string, unknown>,
   allowResponseFormatRetry: boolean,
   timeoutMs = requestTimeoutMs,
+  deadlineMs = Date.now() + timeoutMs,
 ): Promise<unknown> {
   const endpoint = normalizeOpenAiCompatibleEndpoint(settings.baseUrl);
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) {
+      throw new AppError("AI_REMOTE_TIMEOUT", "远程 AI 响应超时，请稍后重试。");
+    }
+
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), remainingMs);
 
     try {
       const response = await fetch(endpoint, {
@@ -650,7 +793,7 @@ async function requestChatCompletions(
       if (!response.ok) {
         if (allowResponseFormatRetry && shouldRetryWithoutResponseFormat(response.status, responseText)) {
           const { response_format: _responseFormat, ...bodyWithoutResponseFormat } = body;
-          return requestChatCompletions(settings, bodyWithoutResponseFormat, false, timeoutMs);
+          return requestChatCompletions(settings, bodyWithoutResponseFormat, false, timeoutMs, deadlineMs);
         }
 
         throw new AppError("AI_REMOTE_REQUEST_FAILED", buildRemoteRequestFailureMessage(response.status, responseText));
@@ -669,16 +812,17 @@ async function requestChatCompletions(
       const isAbort = error instanceof Error && error.name === "AbortError";
 
       if (isAbort) {
-        if (attempt < maxRetries) {
-          await sleep(retryBaseDelayMs * (attempt + 1));
-          continue;
-        }
-
+        // An aborted request has already consumed the entire time budget.
+        // Retrying here used to turn a 22s/26s timeout into 44s/52s waits.
         throw new AppError("AI_REMOTE_TIMEOUT", "远程 AI 响应超时，请稍后重试。");
       }
 
       if (attempt < maxRetries && isTransientNetworkError(error)) {
-        await sleep(retryBaseDelayMs * (attempt + 1));
+        const retryDelayMs = Math.min(retryBaseDelayMs * (attempt + 1), Math.max(0, deadlineMs - Date.now()));
+        if (retryDelayMs <= 0) {
+          throw new AppError("AI_REMOTE_TIMEOUT", "远程 AI 响应超时，请稍后重试。");
+        }
+        await sleep(retryDelayMs);
         continue;
       }
 
@@ -710,7 +854,10 @@ function isTransientNetworkError(error: unknown): boolean {
     message.includes("econnrefused") ||
     message.includes("epipe") ||
     message.includes("fetch failed") ||
-    message.includes("network")
+    message.includes("network") ||
+    message.includes("other side closed") ||
+    message.includes("socket hang up") ||
+    message.includes("connection reset")
   );
 }
 
@@ -845,16 +992,21 @@ function getAnalysisRequestBudget(target: AiAnalyzePromptPayload["target"]): {
 } {
   switch (target) {
     case "image-safety":
-      return { maxTokens: 180, temperature: 0, timeoutMs: 16_000 };
+      // V2 结构化安全：safety:{rating,confidence,evidence} 比 V1 单字段更长，
+      // 放宽 token 以免结构化输出被截断。
+      return { maxTokens: 320, temperature: 0, timeoutMs: 16_000 };
     case "prompt-category":
     case "image-category":
-      return { maxTokens: 420, temperature: 0.1, timeoutMs: 18_000 };
+      // V2 结构化输出：每个分类除 label 外还带 confidence/evidence/primary，3-10 个分类 + summary。
+      // 实测 glm-5.2/deepseek-v4-pro 等推理模型把补全预算大量花在内部推理上，旧值 3000 token 常被
+      // 推理吃满 → finish_reason:length、content 为空 → 几乎每次都要重试。放宽到 8000 让首轮就能
+      // 推理完并吐出完整 JSON（多数情况免去重试），超时同步放宽以匹配更长的推理生成时长。
+      return { maxTokens: 8000, temperature: 0.1, timeoutMs: reasoningCategoryTimeoutMs };
     case "prompt-tags":
     case "image-tags":
-      return { maxTokens: 700, temperature: 0.15, timeoutMs: 20_000 };
-    case "prompt-options":
-      return { maxTokens: 480, temperature: 0.55, timeoutMs: 16_000 };
-    case "prompt":
+      // V2 结构化输出：最多 15 个标签，每个带 dimension/confidence/evidence。同理，推理模型下 2000 token
+      // 易被推理耗尽（曾观测到重试仍 length 截断，甚至 35s 超时），放宽 token 与超时以匹配真实生成耗时。
+      return { maxTokens: 6000, temperature: 0.15, timeoutMs: reasoningTagsTimeoutMs };
     default:
       return { maxTokens: 1400, temperature: 0.2, timeoutMs: analysisRequestTimeoutMs };
   }
@@ -875,36 +1027,12 @@ function appendCustomInstructions(baseContent: string, customInstructions: strin
 }
 
 async function buildUserAnalysisContent(payload: AiAnalyzePromptPayload): Promise<unknown> {
-  if (payload.target === "prompt") {
-    return [
-      `提示词：\n${payload.prompt}`,
-      payload.negativePrompt ? `负向提示词：\n${payload.negativePrompt}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-  }
-
   if (payload.target === "prompt-category") {
     return buildPromptCategoryAnalysisUserText(payload);
   }
 
   if (payload.target === "prompt-tags") {
     return buildPromptTagsAnalysisUserText(payload);
-  }
-
-  if (payload.target === "prompt-options") {
-    return [
-      `当前提示词：\n${payload.prompt}`,
-      payload.negativePrompt ? `负向提示词：\n${payload.negativePrompt}` : "",
-      `需要扩展的胶囊：${payload.optionLabel || payload.optionVariable || "提示词参数"}`,
-      `变量名：${payload.optionVariable || "textContent"}`,
-      `当前词条：${payload.optionValue || ""}`,
-      "任务：只基于“当前词条”和“变量名”扩写 3-5 个同类型但不同内容的可替换参数。",
-      "要求：不要重新分析整段提示词，不要总结上下文，不要返回当前词条本身。",
-      "示例：如果变量是 imageStyle 且当前词条是 Pixar 卡通渲染风格，可返回手稿风格、二次元风格、写实风格、水彩手绘风格等。",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
   }
 
   const imageDataUrl = await readPayloadImageDataUrl(payload.imageFileName, {
@@ -923,36 +1051,116 @@ async function buildUserAnalysisContent(payload: AiAnalyzePromptPayload): Promis
   }
 
   const text = buildImageAnalysisUserText(payload);
+  // 分类识别需要看清材质/笔触/景别，low 档会把写真人像和插画压成同一种模糊图。
+  const imageDetail = payload.target === "image-category" ? "high" : "low";
 
   return [
     { type: "text", text },
-    { type: "image_url", image_url: { url: imageDataUrl, detail: "low" } },
+    { type: "image_url", image_url: { url: imageDataUrl, detail: imageDetail } },
   ];
 }
 
-function buildPromptCategoryAnalysisUserText(payload: AiAnalyzePromptPayload): string {
+/**
+ * 分类 / 标签分析一律不读负向提示词。
+ *
+ * 负向提示词描述的是「要避免的内容」，一旦进入分析就会被反向当成画面事实：
+ * 写了「不要出现食物、产品」反而会被判成 食品摄影 / 产品摄影，
+ * 「避免模糊」也会变成画质类标签。
+ *
+ * 因此这两类分析的用户消息里根本不携带负向文本，而不是依赖模型自觉忽略。
+ * 唯一需要负向原文的是提示词翻译（buildTranslationBody），那里必须原样翻译。
+ */
+const negativePromptExclusionNotice =
+  "本次分析不提供负向提示词，也不需要考虑任何负向/排除内容。";
+
+/**
+ * 场景类型与光线条件必须分开判断：有受控布光不等于拍摄地点就是影棚。
+ * 这段边界同时发给视觉模型的 user/system message，避免模型只记住“棚拍光”
+ * 而把真实室内的主题布置一并归为「专业影棚」。
+ */
+const sceneAuthenticityBoundary = [
+  "【场景真实性与专业影棚边界，优先级高于通用规则】",
+  "「专业影棚」只在画面出现明确的棚拍证据时使用：无缝纯色/渐变背景延伸到地面、背景纸或背景板边界、可见摄影灯/柔光箱/灯架/摄影台，或主体被孤立在没有建筑连续性的棚内空间。",
+  "红色或黑色幕布、帷幔、屏风、桌面摆台、主题道具、古装造型、摆拍姿态、商业布光、画面像样片等，单独都不能证明是专业影棚；有幕布不等于有无缝背景，有布景不等于影棚。",
+  "如果能看到真实室内的墙面、门窗、梁柱、地面、固定装饰、家具陈设、连续透视或明确空间纵深，按真实室内环境归类；真实庭院、园林、街巷、古建筑同理。人物被安排在真实场景中摆拍，仍不是专业影棚。",
+  "「棚拍光」只描述光源性质，可以与室内居家、室内商业、庭院园林、古镇建筑等真实场景并存；不能因为选了棚拍光就追加「专业影棚」。",
+  "无法确认是影棚时，不得猜选「专业影棚」；只保留有直接证据的真实场景类型/场景细分，真实环境也无法确认时跳过场景类型。",
+].join("\n");
+
+const portraitCategoryBoundary =
+  "【肖像摄影边界】「肖像摄影」只用于人物面部/身份肖像本身是画面主旨、人物被当作被摄者突出呈现的情况；人物只是古装、仪式、故事或真实场景中的角色，且画面同样强调空间、道具和叙事时，不得仅凭出现人脸就判为「肖像摄影」，应优先选择更能说明场景/叙事的内容类型。";
+
+const beverageCategoryBoundary = [
+  "【饮品摄影分类边界，优先级高于泛食品/产品分类】",
+  "一级分组「饮品摄影」下只能选择二级叶子：咖啡摄影、茶饮摄影、酒精饮品摄影、非酒精饮品摄影、饮品制作过程摄影、饮品与场景结合摄影；不要返回一级分组名「饮品摄影」。",
+  "优先级：①画面重点是冲泡、萃取、调酒、倒液、打奶泡、搅拌、装杯或封口等动作时选「饮品制作过程摄影」；②饮品类型明确时按类型选咖啡摄影/茶饮摄影/酒精饮品摄影/非酒精饮品摄影；③饮品类型不明确但饮品与咖啡馆、酒吧、餐桌、厨房、户外或生活方式环境形成明显关系时选「饮品与场景结合摄影」。",
+  "明确饮品主体时，不要用「食品摄影」或「产品摄影」替代饮品二级分类；商业广告、品牌宣传、海报版式、自然光、棚拍光、色调和情绪是用途/属性，不能覆盖饮品主体分类。只有画面本质是平面设计稿并满足海报边界时，才额外选择「海报设计」。",
+  "饮品类型无法从画面或提示词直接确认时，不要猜具体饮品；可选择「饮品与场景结合摄影」，否则返回空分类。",
+].join("\n");
+
+const bridalCategoryBoundary = [
+  "【婚纱摄影分类边界】",
+  "「婚纱摄影」用于婚前/婚纱照服务与成片：包括室内或外景婚纱拍摄、礼服租赁或造型、选片修片、相册/成片交付等线索；这些服务线索只是判定依据，不单独建立服务分类。",
+  "「婚礼摄影」只用于婚礼仪式、婚宴、接亲和婚礼当天的现场纪实；有婚礼现场证据时优先婚礼摄影。仅出现婚纱、礼服、新娘肖像、外景婚照或婚前拍摄，不要归入婚礼摄影。",
+  "「婚纱造型」是服饰造型维度，可与婚纱摄影同时出现；「新娘写真」是人物题材维度，不替代婚纱摄影。婚礼服务、摄影摄像等服务行业通称不作为图像内容分类，除非画面本身确实是相应摄影成片。",
+].join("\n");
+
+const aiCategoryDisplayBoundary =
+  "【分类展示范围】AI 分类只返回内容类型、人物题材、服饰造型、场景类型、场景细分、主题领域、风格流派、应用场景、文化语境、时代风格等稳定检索维度；不要返回「光线条件」「色彩体系」「技术手法」「情绪氛围」中的任何分类（包括柔光、棚拍光、红色主导、暖色主导、浅景深、深景深、浪漫唯美等），这些属于画面属性，不在分类区展示。";
+
+export function buildPromptCategoryAnalysisUserText(payload: AiAnalyzePromptPayload): string {
   return [
-    "请只根据当前提示词判断分类，不要参考效果图、缩略图、文件名或已有标签。",
+    "请只根据当前提示词判断分类，不要参考效果图、缩略图或已有标签。",
     `提示词：\n${payload.prompt}`,
-    payload.negativePrompt ? `负向提示词：\n${payload.negativePrompt}` : "",
+    negativePromptExclusionNotice,
+    payload.title ? `素材标题（辅助参考）：${payload.title}` : "",
+    payload.title
+      ? "标题里的日期、序号、文件编号一律忽略；平台名（小红书/Instagram 等）只能作为「发布媒介」的参考，不得据此判断题材。"
+      : "",
+    "按以下四步分析，再输出结果：",
+    "第一步 通读全文：先确定这段提示词要生成的是照片、绘画、3D 还是设计稿，以及整体题材方向。",
+    "第二步 要素抽取：逐句抽出主体（人物年龄/关系/服饰、物体品类、动物）、场景（室内外/地域/时代）、光线色彩、镜头与画质描述、用途说明。",
+    "第三步 多维归类：把抽出的要素分别落到下列各维度组，每个能判断的维度组各取 1 个叶子；提示词没写到的维度直接跳过，不要推断。",
+    "第四步 交叉验证：逐条检查每个分类能否在提示词原文里找到对应词句；找不到出处的一律删掉。",
     "可选细分类如下（只能从中选择，不得新增/缩写/翻译）：",
     buildCompactCategoryCatalog(payload),
-    "如果提示词同时匹配多个细分类，请按匹配度从高到低返回，最多 8 个。",
-    "返回时 category 必须是最匹配的一个细分类名称；tags 返回其余匹配分类，也必须完全等于上面的细分类名称。",
-    "不要返回上级类目、近义词或自造类目；不要输出普通标签、sections 或 template。",
+    "人像域区分依据：肖像摄影＝以人物面部、气质与写真造型为核心（含古风、汉服、时装写真）；人物艺术摄影＝人体、舞蹈、运动等以肢体艺术表达为主。以写真造型为主的人像优先归「肖像摄影」。",
+    "判定依据只能是提示词描述的题材与媒介，与素材由谁生成无关；描述真实摄影效果的提示词必须归入摄影细分类，「AI艺术」「生成艺术」只用于提示词本身描述抽象生成美学时。",
+    portraitCategoryBoundary,
+    beverageCategoryBoundary,
+    bridalCategoryBoundary,
+    aiCategoryDisplayBoundary,
+    sceneAuthenticityBoundary,
+    "把第一、二步的结论写进 summary（一句话：主体、场景、媒介、色调与光线）。",
+    "内容类型取 1-2 个；人物题材/服饰造型/场景类型/场景细分/季节时令/光线条件/主题领域/风格流派/情绪氛围/色彩体系/技术手法/应用场景/发布媒介/文化语境/时代风格各取 0 或 1 个，提示词没写到的维度直接跳过。",
+    "提示词描述了人物时，人物题材（少女/少年/情侣/亲子/职场…）与服饰造型（汉服/旗袍/JK制服/婚纱…）要一并给出。",
+    "categories 数组合计 5-15 个元素，每个 label 都必须能在提示词文本里找到依据。",
+    "严禁凑数：提示词里没写的题材一律不得返回。提示词为空或过短无法判断时，categories 必须返回空数组，不要猜测。",
+    "categories 数组第一个元素（primary 为 true）必须是最匹配的那个内容类型分类名称；其余分类依次排在后面，label 也必须完全等于上面的名称。",
+    "不要返回上级类目、近义词或自造类目；不要输出普通标签。",
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
 
-function buildPromptTagsAnalysisUserText(payload: AiAnalyzePromptPayload): string {
+export function buildPromptTagsAnalysisUserText(payload: AiAnalyzePromptPayload): string {
   return [
-    "请只根据当前提示词生成标签，不要参考效果图、缩略图、文件名或已有标签。",
+    "请只根据当前提示词生成标签，不要参考效果图、缩略图或已有标签。",
     `提示词：\n${payload.prompt}`,
-    payload.negativePrompt ? `负向提示词：\n${payload.negativePrompt}` : "",
-    "只提取文本中明确写出的具体视觉结果标签，最多 12 个。",
-    "不要输出维度名/菜单名（如“摄影风格”“景别”“构图逻辑”），应输出落地值（如“近景”“中心构图”“紫色霓虹光”）。",
+    negativePromptExclusionNotice,
+    payload.title ? `素材标题（辅助参考，其中的日期与编号忽略）：${payload.title}` : "",
+    "先逐句通读提示词，把明确写出的画面事实抽出来，再归入下列几类，只保留原文写到的：",
+    "① 景别：特写、近景、中景、全景、远景、半身、七分身",
+    "② 机位角度：平视、俯拍、仰拍、侧面、背影、过肩、低角度、高角度",
+    "③ 构图：三分构图、中心构图、对称构图、引导线、框架构图、留白",
+    "④ 光学产物：自然光斑、丁达尔光、轮廓光、光晕、镜头耀斑、斑驳树影、剪影（光源方向与性质属于分类维度「光线条件」，不要在标签里重复）",
+    "⑤ 具体事物：道具、场景元素、单件衣物与配饰、可见文字与品牌标识",
+    "风格、情绪、色彩体系、技术手法、应用场景、发布媒介、文化语境、时代风格、人物题材、服饰造型由分类识别负责，标签不要重复这些维度。",
+    "标签必须是原子词：不要把上述维度加形容词拼成复合标签（如「柔和暖调自然光」「低饱和暖色调」「极致高级感」「浓厚复古风」），维度交分类，标签只写原文写明的具体事物。",
+    "事物类标签（衣物、场景、道具、器物、家具、陈设、背景、台面、餐具等）用不带修饰的核心名词：不要在名词上叠加颜色、材质、风格、年代、状态等修饰（不写「红色丝绸连衣裙」「现代简约客厅」「水泥质感台面」，写「连衣裙」「客厅」「台面」），被剥离的颜色/材质/风格交对应分类维度，不要再作为该事物的附属标签重复；绿叶、白花、红唇这类颜色即主体特征的词保留原样。",
+    "只提取文本中明确写出的内容，提示词没写的不要补充推断，最多 15 个。",
+    "不要输出维度名/菜单名（如“摄影风格”“景别”“构图逻辑”），应输出该维度下的实际取值（如“近景”“中心构图”“紫色霓虹光”）。",
     "标签不是参数：不得输出位置关系句、生成要求、参考图说明、变量名或完整提示词片段。",
     "不得输出模型名、平台名、SEO 词或营销元信息。标签必须是简体中文短词或短语。",
   ]
@@ -960,126 +1168,202 @@ function buildPromptTagsAnalysisUserText(payload: AiAnalyzePromptPayload): strin
     .join("\n\n");
 }
 
-function buildImageAnalysisUserText(payload: AiAnalyzePromptPayload): string {
+export function buildImageAnalysisUserText(payload: AiAnalyzePromptPayload): string {
   if (payload.target === "image-category") {
     return [
       "请只根据参考图判断图片分类，不要分析提示词或现有标签。",
+      "先判断图像属于哪种大类型（摄影、插画绘画、动漫二次元、3D与CG、概念设计、平面设计、UI界面、传统艺术、像素与复古、游戏美术、影视媒体、表情包与网络文化、字体与排版、产品与电商视觉、科学与医疗视觉、建筑与空间视觉、时尚与美妆视觉、混合与实验媒介），再从该类型下的细分类中选择。",
       "可选细分类如下（只能从中选择，不得新增/缩写/翻译）：",
       buildCompactCategoryCatalog(payload),
-      "如果参考图同时匹配多个细分类，请按匹配度从高到低返回，最多 8 个。",
-      "返回时 category 必须是最匹配的一个细分类名称；tags 返回其余匹配分类，也必须完全等于上面的细分类名称。",
-      "不要返回上级类目、近义词或自造类目。",
+      "判定依据只能是画面本身呈现的题材、媒介与拍摄/绘制方式，与素材由谁生成无关。",
+      "即使参考图是 AI 生成的，只要画面呈现为真实摄影效果，就必须归入对应的摄影细分类；「AI艺术」「生成艺术」只用于画面本身以算法纹理、抽象生成美学为主体、无法归入任何具体题材时。",
+      "摄影人像域区分依据：肖像摄影＝以人物面部、气质与写真造型为核心（含古风、汉服、时装写真等）；人物艺术摄影＝人体、舞蹈、运动等以肢体艺术表达为主。以写真造型为主的人像应优先归「肖像摄影」。",
+      portraitCategoryBoundary,
+      beverageCategoryBoundary,
+      bridalCategoryBoundary,
+      aiCategoryDisplayBoundary,
+      "按以下四步分析，再输出结果：",
+      "第一步 全局感知：整体色调（暖/冷/高对比/低饱和）、光线条件（自然光/人工光/逆光/侧光）、构图方式（对称/三分/引导线/框架）、空间层次（前景-中景-背景）。",
+      "第二步 主体识别：人物（数量/关系/年龄段/姿态/表情/服饰）、物体（品类/材质/用途）、场景（室内外/自然人造/城乡）、动物（物种/行为）、文字（语言/含义）。",
+      "第三步 多维分类：把上面两步的观察分别落到下列各个维度组，每个能判断的维度组各取 1 个最贴切的叶子；判断不了的维度组直接跳过，不要硬填。",
+      "画面里有人物时，必须判断「人物题材」（拍的是谁：少女/少年/情侣/亲子/职场/群像…）与「服饰造型」（穿的是什么：汉服/旗袍/JK制服/婚纱/长裙连衣裙/休闲穿搭…）这两个维度；画面里没有人物时跳过这两个维度。",
+      "只要画面能看出拍摄环境，就必须判断「场景类型」（户外自然/户外城市/室内居家/专业影棚…）与「场景细分」（森林树木/草地原野/街道巷弄/咖啡馆…）；能看出时令时判断「季节时令」（春夏秋冬/清晨/黄昏/夜晚/雨雪天候）。",
+      "当内容类型只说明形式而未表明主题时（App界面/信息图表/海报设计/插画/UI 等），必须给出「主题领域」（建筑空间/历史文化/美食餐饮/健康医疗/教育学习/家居园艺…）；摄影类内容若主题已由内容类型隐含（食品摄影/建筑摄影），可跳过该维度。",
+      "只要能判断光源方向或性质，就必须给出「光线条件」（自然光/逆光/侧光/顺光/顶光/柔光/硬光/棚拍光/窗边光/黄昏金光/夜间人工光/混合光）。注意：具体的光斑、丁达尔光、轮廓光、剪影属于标签，不要写进分类。",
+      "场景细分最多取 2 个（例如庭院园林+古镇建筑），其余稳定检索维度各取 1 个；光线、色彩、景深/技法和情绪不属于本次分类输出。",
+      "关键边界判断（第三步内必须遵守，优先级高于通用规则）：",
+      "①「海报设计」须同时出现主标题+正文/卖点文案块+品牌标识+版权或联系信息四要素才触发；单一 Logo、摄影水印、装饰性挂牌文字均不触发。",
+      "②食品实拍 vs CG分界：画面可见食材纹理/景深过渡/气孔/光泽等真实质感→「食品摄影」；完美几何体+连续流体飘带+失重悬浮+纯色虚空背景→「产品CG渲染」；以 CG 媒介呈现食品题材时必须补主题领域「美食餐饮」。",
+      "③礼盒与食品主体作用域：礼盒/包装外观为视觉主体时取「产品摄影」并补主题领域「美食餐饮」；菜品/糕点/饮品本身为主体时取「食品摄影」并跳过主题领域。",
+      "④主题领域作用域：食品摄影/建筑摄影/风光摄影/肖像摄影/宠物摄影等摄影类内容类型已隐含主题，跳过主题领域；产品摄影（腕表/珠宝→时尚美妆，宠物设备→宠物动物）、产品CG渲染、海报设计、App界面、信息图表、插画等内容类型不隐含主题，必须给出主题领域。",
+      sceneAuthenticityBoundary,
+      "⑥菜单/包装/电商详情边界：图片适合用于上述用途≠该内容类型；菜单设计需有价目表或点餐栏目结构；包装设计需有刀模/展开图/设计规范；电商详情需有价格标注或购买入口。",
+      "⑦应用场景区分：有明确转化卖点/促销/行动号召→「商业广告」；以品牌形象/工作室样片展示为主、无价格促销→「品牌宣传」。",
+      "第四步 交叉验证：逐条检查每个分类是否都能在第一、二步的观察里找到直接依据；找不到依据的一律删掉。",
+      "把第一、二步的观察结论写进 summary（一句话，说明主体、场景、媒介、色调与光线）。",
+      "categories 数组合计返回 3-10 个稳定分类：内容类型最多 2 个，其余只保留有直接证据的检索维度。",
+      "严禁凑数：画面里没有的题材一律不得返回。例如画面是人像时，不得返回产品摄影、食品摄影、风光摄影等与主体无关的内容类型。",
+      "如果参考图不可见或无法辨认内容，categories 必须返回空数组，不要猜测。",
+      "categories 数组第一个元素（primary 为 true）必须是最匹配的那个内容类型分类名称；其余分类依次排在后面，label 也必须完全等于上面列表里的名称。",
+      "不要返回上级类目、维度组名（如「情绪氛围」「色彩体系」）、近义词或自造类目。",
     ].join("\n");
   }
 
   if (payload.target === "image-safety") {
     return [
       "请只根据参考图进行 NSFW 安全分级，不要参考标题、提示词或已有标签。",
-      "分级只能是 SFW、NSFW 或 UNKNOWN。",
-      "明显裸露、成人色情、强性暗示或限制级内容判为 NSFW；普通人像、时尚穿搭、泳装、情侣合影、室内外日常照如果没有明显成人露骨内容判为 SFW。",
+      "把分级结果写进 safety.rating，只能是 safe、nsfw 或 unknown。",
+      "明显裸露、成人色情、强性暗示或限制级内容判为 nsfw；普通人像、时尚穿搭、泳装、情侣合影、室内外日常照如果没有明显成人露骨内容判为 safe；看不清或无法判断判为 unknown。",
     ].join("\n");
   }
 
   return [
     "请只根据参考图生成图片标签，不要分析分类或提示词。",
     "必须先观察画面事实，再输出具体结果标签。",
-    "不要输出维度名或菜单名，例如不要输出“摄影风格”“景别”“构图逻辑”“图像风格”“镜头器材”“光影表现”。",
-    "应该输出实际判断值，例如“杂志封面摄影”“近景”“低角度仰拍”“中心构图”“紫色霓虹光”“丝绸长裙”。",
+    "人物题材、服饰造型、场景、季节、光线条件、风格、情绪、色彩体系、技术手法、应用场景、发布媒介、文化语境、时代风格由分类识别负责，标签不要重复这些维度。",
+    "标签必须是原子词：不要把上述维度加形容词拼成复合标签（如「柔和暖调自然光」「低饱和暖色调」「极致高级感」「浓厚复古风」），维度交分类，标签只写画面里能指出的具体事物。",
+    "事物类标签（衣物、场景、道具、器物、家具、陈设、背景、台面、餐具等）用不带修饰的核心名词：不要在名词上叠加颜色、材质、风格、年代、状态等修饰（不写「红色丝绸连衣裙」「现代简约客厅」「水泥质感台面」，写「连衣裙」「客厅」「台面」），被剥离的颜色/材质/风格交对应分类维度，不要再作为该事物的附属标签重复；绿叶、白花、红唇这类颜色即主体特征的词保留原样。",
+    "标签写画面执行层面的具体事实：景别（特写/近景/中景/全景/远景）、机位角度（平视/俯拍/仰拍/侧面/背影）、构图（三分构图/中心构图/对称构图/引导线/留白）、光学产物（自然光斑/丁达尔光/轮廓光/剪影），以及道具、场景元素、单件衣物与配饰、可见文字。",
+    "关键边界（必须遵守）：",
+    "①食品/CG动态质感：芝士拉丝/奶浆流动/融化流体等可摆拍的黏滞延展→输出具体描述标签（如「芝士拉丝」「融化芝士」），不触发技术手法分类「高速凝固」；「高速凝固」由分类识别决定，标签不输出该维度叶子名本身。",
+    "②CG/合成悬浮元素：3D或合成画面中的飘带/悬浮食材/失重组合→输出事实标签（如「悬浮构图」「奶浆飘带」「失重悬浮」），不视为真实拍摄动态。",
+    "③局部手部入画：手持道具/局部手部动作→输出动作事实标签（如「手持餐铲」「手持团扇」），不触发人物题材分类，不重复到分类维度。",
+    "④食品/产品剖面细节：剖面/切面/内馅/流心→输出质感标签（如「剖面展示」「流心馅」「夹心层次」「气孔纹理」）；颜色/材质等修饰不写进食品名词（写「流心馅」而非「琥珀色流心馅」），但剖面/流心/拉丝/融化/悬浮等动态或结构描述是内容本身、无对应分类维度可归，予以保留；不新增内容类型分类。",
+    "⑤画面版式与多品陈列：海报版式→「竖版海报」「横版海报」；多件商品/多杯同框→「多产品组合」「三款同框」「阶梯式陈列」；均为标签，不影响分类。",
+    "⑥商业布景道具：合成/模拟布景元素（模拟水面/假球场线/合成天空）→以真实可见的具体物品为标签（如「模拟水面」「同心水波纹」「荷叶」），不误写成真实户外场景词汇。",
+    "不要输出维度名或菜单名，例如不要输出”摄影风格””景别””构图逻辑””图像风格””镜头器材””光影表现”，而要输出这些维度下的实际取值。",
+    "应该输出实际观察到的取值，例如“近景”“仰拍”“三分构图”“逆光”“长裙”“团扇”“栈道”“湖水”。",
     "标签不是参数：不得输出位置关系句、生成要求、参考图说明、保留/避免约束、画面目标、变量名或完整提示词片段。",
     "不得输出模型名、平台名、SEO 词、prompt/gallery/ecommerce 等不可见来源或营销元信息；截图里真实可见的站点标识可作为短标签保留。",
-    "标签必须是简体中文短词或短语，最多 12 个。",
+    "标签必须是简体中文短词或短语，最多 15 个。",
   ].join("\n");
 }
 
 
-function buildSystemAnalysisContent(target: AiAnalyzePromptPayload["target"]): string {
-  const analysisKeys = Object.keys(promptSectionMeta).filter((key) => key !== "other").join("、");
-  const base = [
-    "只返回一个 JSON 对象，不要返回 Markdown，不要解释。",
-    "JSON 字段必须为：title、category、tags、sections、template、summary。",
-    "sections 是数组，每项必须包含 key、label、variable、values。",
-  ];
+const v1JsonContract = [
+  "只返回一个 JSON 对象，不要返回 Markdown，不要解释。",
+  "JSON 字段必须为：title、category、tags、summary。",
+];
 
+const v2JsonContractBase = [
+  "只返回一个 JSON 对象，不要返回 Markdown，不要解释。",
+  "顶层字段：schemaVersion（数字，恒为 2）、title（字符串，可留空）、summary（字符串）、categories（数组）、tags（数组）、safety（对象）。",
+];
 
+const v2CategoryOutputSpec = [
+  '每个 categories 元素形如 {"label":"分类名","confidence":0.82,"evidence":["支撑该分类的画面或原文依据短语"],"primary":false}。',
+  "confidence 取 0-1 小数表示把握程度；evidence 填 1-3 条能在画面/原文里核对的依据短语；categories 中有且仅有主分类的 primary 为 true。",
+  '本任务只输出分类：tags 必须为空数组 []，safety 固定为 {"rating":"unknown","confidence":0,"evidence":[]}。',
+];
+
+const v2TagOutputSpec = [
+  '每个 tags 元素形如 {"label":"标签","dimension":"composition","confidence":0.7,"evidence":["依据短语"]}。',
+  "dimension 从 subject、scene、style、composition、lighting、color、mood、technique、era、other 中选最贴切的一个，拿不准填 other；confidence 取 0-1 小数；evidence 填 1-2 条原文/画面依据短语。",
+  '本任务只输出标签：categories 必须为空数组 []，safety 固定为 {"rating":"unknown","confidence":0,"evidence":[]}。',
+];
+
+const v2SafetyOutputSpec = [
+  "本任务只做安全分级：categories 与 tags 必须为空数组 []，判定结果写进 safety 对象。",
+  'safety 形如 {"rating":"safe","confidence":0.9,"evidence":["支撑分级的画面依据短语"]}。',
+  "rating 只能是 safe、nsfw 或 unknown：safe＝普通人像/时尚穿搭/泳装/情侣合影/日常照等无明显成人露骨内容；nsfw＝明显裸露、成人色情、强性暗示或限制级；看不清或无法判断＝unknown。",
+  "confidence 取 0-1 小数表示把握程度；evidence 填 1-2 条能在画面里核对的依据短语，不要写露骨细节。",
+];
+
+export function buildSystemAnalysisContent(target: AiAnalyzePromptPayload["target"]): string {
   if (target === "image-category") {
     return [
-      ...base,
-      "你是图片分类识别器。只能根据参考图判断 category 和分类候选。",
-      "category 必须从用户提供的固定细分类中原文选择最匹配的一个；严禁新增、缩写、翻译或返回上级类目。",
-      "若还匹配其他细分类，tags 返回其余匹配分类，按匹配度排序；category + tags 合计最多 8 个。",
-      "不要分析提示词；不要输出普通标签、sections 或 template；sections 空数组，template 空字符串。",
+      ...v2JsonContractBase,
+      "你是图像分类识别器。根据参考图判断这张图片属于哪种图像类型和具体分类。",
+      "图像类型涵盖摄影、插画绘画、动漫二次元、3D与CG、概念设计、平面设计、UI界面、传统艺术、像素与复古、游戏美术、影视媒体、表情包与网络文化、字体与排版、产品与电商视觉、科学与医疗视觉、建筑与空间视觉、时尚与美妆视觉、混合与实验媒介等。",
+      "categories 数组第一个元素（primary 为 true）的 label 必须从用户提供的固定分类列表中原文选择最匹配的一个作为主分类；严禁新增、缩写、翻译或返回一级大类。",
+      "分类目录含内容类型组与稳定检索维度组（人物题材/服饰造型/场景类型/场景细分/主题领域/风格流派/应用场景/文化语境/时代风格）。",
+      "categories 数组共 3-10 个元素（含主分类）：内容类型取 1-2 个；上述稳定检索维度各取 0 或 1 个，场景细分最多取 2 个，判断不了的维度直接跳过。宁少勿滥。",
+      "画面中出现人物时，人物题材与服饰造型这两个维度必须给出判断，不得跳过。",
+      sceneAuthenticityBoundary,
+      portraitCategoryBoundary,
+      beverageCategoryBoundary,
+      bridalCategoryBoundary,
+      "categories 数组中主分类之后按此顺序排列其余检索分类：内容类型 → 主题领域 → 人物题材 → 场景类型 → 场景细分 → 服饰造型 → 风格流派 → 应用场景 → 时代风格 → 文化语境。",
+      "分类必须由画面证据支撑：先在 summary 里写出看到的主体、场景、媒介与叙事重点，再让每个分类的 evidence 都能对应到这句描述。找不到依据的分类一律删掉。",
+      "看不到参考图、图片无法辨认时，categories 返回空数组，不要用分类列表里的词猜测。",
+      "素材是否由 AI 生成不是分类依据。写实摄影效果的 AI 图必须归入摄影分类；「AI艺术」「生成艺术」仅用于画面本身是抽象生成美学、无具体题材时。",
+      aiCategoryDisplayBoundary,
+      "不要分析提示词；不要输出普通特征标签。",
+      ...v2CategoryOutputSpec,
     ].join("\n");
   }
-
 
   if (target === "prompt-category") {
     return [
-      ...base,
-      "你是提示词分类识别器。只能根据提示词文本判断 category 和分类候选。",
-      "category 必须从用户提供的固定细分类中原文选择最匹配的一个；严禁新增、缩写、翻译或返回上级类目。",
-      "若还匹配其他细分类，tags 返回其余匹配分类，按匹配度排序；category + tags 合计最多 8 个。",
-      "不要推断效果图；不要输出普通标签、sections 或 template；sections 空数组，template 空字符串。",
+      ...v2JsonContractBase,
+      "你是提示词分类识别器。根据提示词文本判断这段提示词对应的图像类型和具体分类。",
+      "图像类型涵盖摄影、插画绘画、动漫二次元、3D与CG、概念设计、平面设计、UI界面、传统艺术、像素与复古、游戏美术、影视媒体、表情包与网络文化、字体与排版、产品与电商视觉、科学与医疗视觉、建筑与空间视觉、时尚与美妆视觉、混合与实验媒介等。",
+      "categories 数组第一个元素（primary 为 true）的 label 必须从用户提供的固定分类列表中原文选择最匹配的一个；严禁新增、缩写、翻译或返回一级大类。",
+      "分类目录含内容类型组与稳定检索维度组（人物题材/服饰造型/场景类型/场景细分/主题领域/风格流派/应用场景/文化语境/时代风格）。",
+      "categories 数组共 3-10 个元素（含主分类）：内容类型取 1-2 个；上述稳定检索维度各取 0 或 1 个，场景细分最多取 2 个，判断不了的维度直接跳过。宁少勿滥。",
+      "提示词描述了人物时，人物题材与服饰造型这两个维度必须给出判断，不得跳过。",
+      "categories 数组中主分类之后按此顺序排列其余检索分类：内容类型 → 主题领域 → 人物题材 → 场景类型 → 场景细分 → 服饰造型 → 风格流派 → 应用场景 → 时代风格 → 文化语境。",
+      "分类必须由提示词文本支撑：先在 summary 里概括主体、场景、媒介与叙事重点，再让每个分类的 evidence 都能在原文里找到对应词句。找不到出处的一律删掉，宁可少也不许凑数。",
+      "负向提示词只说明要避免什么，绝不能作为任何分类的依据。",
+      "提示词为空或过短无法判断时，categories 返回空数组，不要用分类列表里的词猜测。",
+      "素材是否由 AI 生成不是分类依据。描述写实摄影效果的提示词必须归入摄影分类；「AI艺术」「生成艺术」仅用于提示词本身描述抽象生成美学时。",
+      portraitCategoryBoundary,
+      aiCategoryDisplayBoundary,
+      "不要推断效果图；不要输出普通特征标签。",
+      ...v2CategoryOutputSpec,
     ].join("\n");
   }
-
 
   if (target === "image-tags") {
     return [
-      ...base,
-      "你是图片标签识别器。只能根据参考图生成 tags。",
-      "不要分析分类或提示词；不要输出 sections/template。",
-      "tags 返回明确匹配的简体中文短标签，最多 12 个；category 空字符串，sections 空数组，template 空字符串。",
-      "禁止返回维度名/菜单名（摄影风格、景别、构图逻辑等）；应输出落地值（近景、中心构图、紫色霓虹光等）。",
-      "优先主体、主题、景别、角度、构图、材质、色彩、光影、媒介等可检索视觉结果。",
-      "标签不是参数：不得输出位置关系句、生成要求、变量名或完整提示词片段。",
-      "不得输出模型名、平台名、SEO 词；截图可见站点标识可作短标签保留。",
+      ...v2JsonContractBase,
+      "你是图片标签识别器。只能根据参考图生成特征标签（tags），不生成分类。",
+      "分工：人物题材、服饰造型、场景类型、场景细分、季节时令、光线条件、风格流派、情绪氛围、色彩体系、技术手法、应用场景、发布媒介、文化语境、时代风格这 14 个维度已由分类识别负责，标签不要再输出这些维度的词（如少女写真、汉服造型、写实主义、宁静平和、暖色主导、浅景深、商业广告、中式国风、复古怀旧）。",
+      "标签负责画面执行层面的具体事实，必须覆盖这几类：",
+      "① 景别：特写、近景、中景、全景、远景、半身、七分身",
+      "② 机位角度：平视、俯拍、仰拍、侧面、背影、过肩、低角度、高角度",
+      "③ 构图：三分构图、中心构图、对称构图、引导线、框架构图、留白",
+      "④ 光学产物：自然光斑、丁达尔光、轮廓光、光晕、镜头耀斑、斑驳树影、剪影（光源方向与性质属于分类维度「光线条件」，不要在标签里重复）",
+      "⑤ 具体事物：道具、场景元素、单件衣物与配饰、可见文字与品牌标识",
+      "⑥ 商业画面专项：画面版式（竖版海报/横版海报）、多品陈列（多产品组合/三款同框/阶梯式陈列）、食品动态质感（芝士拉丝/剖面展示/流心/奶浆飘带）、CG悬浮元素（悬浮构图/失重悬浮）、局部手部动作（手持餐铲/持团扇）、商业布景道具（模拟水面/同心水波纹/荷叶）",
+      "「高速凝固」是技术手法的分类维度叶子，由分类识别负责；标签只写具体动态事实（如「芝士拉丝」「牛奶飞溅」），不输出「高速凝固」本身。",
+      "示例：近景、仰拍、三分构图、轮廓光、长裙、团扇、发簪、栈道、湖水、绿叶、芝士拉丝、竖版海报、模拟水面、手持餐铲。",
+      "禁止返回图像分类名（如产品摄影、数字插画、3D角色），也禁止红色产品摄影、咖啡摄影等伪分类；颜色+物体应拆成「红色」「产品主体」而不是新类型。",
+      "标签必须是不可再拆的原子词：不要把光线/色彩/风格/情绪/技术手法/时代/文化/季节等分类维度加形容词拼成复合标签（如「柔和暖调自然光」「低饱和暖色调」「极致高级感」「浓厚复古风」「宁静温柔氛围」）；这些维度一律交分类识别，标签只写画面里能指出的具体事物、单件衣饰配饰、动作与可见文字。",
+      "事物类标签（衣物、场景、道具、器物、家具、陈设、背景、台面、餐具等）一律用不带修饰的核心名词：不要在名词上叠加颜色、材质、风格、年代、状态等修饰（不写「红色丝绸连衣裙」「现代简约客厅」「水泥质感台面」，写「连衣裙」「客厅」「台面」）；被剥离的颜色、材质、风格等交对应分类维度识别，不要再作为该事物的附属标签重复。绿叶、白花、红唇这类颜色本身即主体特征的词保留原样。",
+      "tags 数组最多 15 个元素，label 用简体中文短标签。",
+      "禁止维度名本身（不要返回「光影」「风格」当标签）；禁止模型名、平台名、SEO 词。",
+      ...v2TagOutputSpec,
     ].join("\n");
   }
 
-
   if (target === "prompt-tags") {
     return [
-      ...base,
-      "你是提示词标签识别器。只能根据提示词文本生成 tags。",
-      "不要推断效果图；不要输出分类、sections 或 template。",
-      "tags 返回明确来自提示词的简体中文短标签，最多 12 个；category 空字符串，sections 空数组，template 空字符串。",
-      "禁止返回维度名/菜单名；应输出落地值（近景、中心构图、紫色霓虹光等）。",
-      "标签不是参数：不得输出位置关系句、生成要求、变量名或完整提示词片段。",
-      "不得输出模型名、平台名、SEO 词或营销元信息。",
+      ...v2JsonContractBase,
+      "你是提示词标签识别器。只能根据提示词文本生成特征标签（tags），不生成分类。",
+      "分工：人物题材、服饰造型、场景类型、场景细分、季节时令、光线条件、风格流派、情绪氛围、色彩体系、技术手法、应用场景、发布媒介、文化语境、时代风格这 14 个维度已由分类识别负责，标签不要再输出这些维度的词（如少女写真、汉服造型、写实主义、宁静平和、暖色主导、浅景深、商业广告、中式国风、复古怀旧）。",
+      "标签负责提示词里写明的画面事实，覆盖这几类：景别（特写/近景/中景/全景/远景）、机位角度（平视/俯拍/仰拍/侧面/背影）、构图（三分构图/中心构图/对称构图/引导线/留白）、光学产物（自然光斑/丁达尔光/轮廓光/剪影），以及道具、场景元素、单件衣物与配饰、可见文字。",
+      "只抽取原文明确写出的内容，不要补充推断；颜色+物体拆开写。",
+      "禁止伪分类（红色产品摄影、高级感摄影等）；禁止返回图像分类名；禁止模型名、平台名、变量名、整句提示词。",
+      "标签必须是不可再拆的原子词：不要把光线/色彩/风格/情绪/技术手法/时代/文化/季节等分类维度加形容词拼成复合标签（如「柔和暖调自然光」「低饱和暖色调」「极致高级感」「浓厚复古风」「宁静温柔氛围」）；这些维度一律交分类识别，标签只写原文写明的具体事物、单件衣饰配饰、动作与可见文字。",
+      "事物类标签（衣物、场景、道具、器物、家具、陈设、背景、台面、餐具等）一律用不带修饰的核心名词：不要在名词上叠加颜色、材质、风格、年代、状态等修饰（不写「红色丝绸连衣裙」「现代简约客厅」「水泥质感台面」，写「连衣裙」「客厅」「台面」）；被剥离的颜色、材质、风格等交对应分类维度识别，不要再作为该事物的附属标签重复。绿叶、白花、红唇这类颜色本身即主体特征的词保留原样。",
+      "tags 数组最多 15 个元素。",
+      ...v2TagOutputSpec,
     ].join("\n");
   }
 
 
   if (target === "image-safety") {
     return [
-      ...base,
-      "你是图片 NSFW 安全分级器。只能根据参考图判断安全分级。",
-      "category 必须且只能返回 SFW、NSFW 或 UNKNOWN。",
-      "tags 必须返回一个数组，只包含与 category 相同的一个值。",
-      "summary 用一句简短中文说明依据；sections 返回空数组，template 返回空字符串。",
+      ...v2JsonContractBase,
+      "你是图片 NSFW 安全分级器。只能根据参考图判断安全分级，判定结果写进 safety 对象。",
       "不要输出具体露骨细节，不要生成标签、提示词胶囊或普通分类。",
+      ...v2SafetyOutputSpec,
     ].join("\n");
   }
 
-  if (target === "prompt-options") {
-    return [
-      ...base,
-      "你是提示词胶囊参数扩写器，不是提示词整体分析器。",
-      "你的任务是：根据用户给出的变量名、胶囊标签、当前词条，生成 3-5 个同类型但内容不同的可替换参数。",
-      `key 只能从这些值中选择：${analysisKeys}。`,
-      "sections 只能返回一项，variable 必须完全等于用户给出的变量名，label 使用用户给出的胶囊标签，values 返回 3-5 个短词条。",
-      "values 必须全部是同一个参数类型的候选值，例如 imageStyle 只能返回风格类词条，cameraAngle 只能返回拍摄角度类词条。",
-      "不要返回当前词条本身，不要返回整句提示词，不要带解释、序号、标点包装或上下文描述。",
-      "不要改写整段提示词，不要输出图片分类或图片标签。tags 返回空数组，category 返回空字符串，template 返回空字符串。",
-    ].join("\n");
-  }
-
-  return [
-    reliablePromptAnalysisSectionGuide,
-    `key 优先从这些稳定字段中选择：${reliablePromptAnalysisKeys}。如果确实不匹配，可使用系统已有的更精确 key。`,
-    "用户用括号或引号明确标记的短词，优先作为胶囊；但仍要过滤指令词、模型名、平台名、教程字段和不可见来源信息。",
-    "tags 返回空数组，category 返回空字符串。template 必须使用 {{variable: value}} 占位符，适合用户直接复制后编辑。",
-  ].join("\n");
+  // prompt 参数分析已删除
+  return v1JsonContract.join("\n");
 }
 
 function getPromptCategoryLabels(payload: AiAnalyzePromptPayload): string[] {
@@ -1100,18 +1384,34 @@ function buildCompactCategoryCatalog(payload: AiAnalyzePromptPayload): string {
     : [];
   const knownSet = known.length > 0 ? new Set(known) : null;
 
-  if (knownSet) {
-    // 自定义/子集分类：扁平短列表即可，避免无分组信息时再附带完整描述。
-    return Array.from(knownSet).join("，");
+  // 始终保留「一级大类 → 细分类」结构：用户侧提示要求模型先判大类再选叶子，
+  // 旧实现在传入 knownCategories 时退化成扁平逗号串，模型失去大类锚点后
+  // 会跳选风格化叶子（例如把 AI 生成的古风写真判成「AI艺术」）。
+  const grouped = photographyCategoryGroups
+    .map((group) => {
+      const labels = group.categories
+        .map(([label]) => label)
+        .filter((label) => !knownSet || knownSet.has(label));
+
+      return labels.length > 0 ? `【${group.group}】${labels.join("，")}` : "";
+    })
+    .filter(Boolean);
+
+  if (!knownSet) {
+    return grouped.join("\n");
   }
 
-  // 默认完整摄影细分类：只保留分组 + 名称，去掉冗长描述（通常可减少约一半输入 token）。
-  return photographyCategoryGroups
-    .map((group) => {
-      const labels = group.categories.map(([label]) => label).join("，");
-      return `【${group.group}】${labels}`;
-    })
-    .join("\n");
+  // 用户自定义 / AI 新增的分类不在本体里，单独挂一个分组，避免被整段丢弃。
+  const ontologyLabels = new Set(
+    photographyCategoryGroups.flatMap((group) => group.categories.map(([label]) => label as string)),
+  );
+  const customLabels = [...new Set(known.filter((label) => !ontologyLabels.has(label)))];
+
+  if (customLabels.length > 0) {
+    grouped.push(`【自定义分类】${customLabels.join("，")}`);
+  }
+
+  return grouped.join("\n");
 }
 
 async function readPayloadImageDataUrl(
@@ -1132,7 +1432,19 @@ async function readPayloadImageDataUrl(
     const imageBuffer = await fs.readFile(await resolveLibraryMediaPath(imageFileName));
     const policy = resolveVisionImagePayloadPolicy(imageBuffer.byteLength, options);
 
+    // 原图超过 8MB 时不能直接内联，但可以尝试创建缩略图。
+    // 缩略图通常远小于 8MB，能正常用于视觉分析。
     if (imageBuffer.byteLength > maxVisionImageBytes) {
+      const thumbnailDataUrl = await createVisionThumbnailDataUrl(imageBuffer, {
+        maxSize: policy.thumbnailMaxSize,
+        quality: policy.thumbnailQuality,
+      });
+
+      if (thumbnailDataUrl) {
+        return thumbnailDataUrl;
+      }
+
+      // 缩略图也失败时（如 nativeImage 无法解码），只能放弃。
       return null;
     }
 
@@ -1147,11 +1459,9 @@ async function readPayloadImageDataUrl(
       }
     }
 
-    if (policy.useOriginal) {
-      return `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
-    }
-
-    return null;
+    // 缩略图解码失败时回退到内联原图，避免"有效果图却报缺图"（AI_IMAGE_REQUIRED）。
+    // 常见于 nativeImage 无法解码的部分 JPEG。buffer 已在上方确认 ≤ maxVisionImageBytes(8MB)，可安全内联。
+    return `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
   } catch {
     return null;
   }
@@ -1226,24 +1536,44 @@ function readAssistantContent(input: unknown): string {
 
   const firstChoice = input.choices[0] as unknown;
 
-  if (!isRecord(firstChoice) || !isRecord(firstChoice.message)) {
+  if (!isRecord(firstChoice)) {
     throw new AppError("AI_REMOTE_RESPONSE_INVALID", "远程 AI 返回内容为空。");
   }
 
-  const content = firstChoice.message.content;
+  // 某些模型（如 DeepSeek-R1）把正文放在 reasoning_content 里，message.content 可能为 null。
+  const message = isRecord(firstChoice.message) ? firstChoice.message : null;
+  const finishReason = normalizeString(firstChoice.finish_reason);
 
-  if (typeof content === "string") {
-    return content;
-  }
+  const rawContent = message?.content;
+  const reasoningContent = message?.reasoning_content;
 
-  if (Array.isArray(content)) {
-    return content
+  let content = "";
+
+  if (typeof rawContent === "string") {
+    content = rawContent;
+  } else if (Array.isArray(rawContent)) {
+    content = rawContent
       .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
       .join("")
       .trim();
   }
 
-  throw new AppError("AI_REMOTE_RESPONSE_INVALID", "远程 AI 返回内容为空。");
+  // content 为空时回退到 reasoning_content（兼容 DeepSeek 等 R 系列模型）。
+  if (!content && typeof reasoningContent === "string") {
+    content = reasoningContent;
+  } else if (!content && Array.isArray(reasoningContent)) {
+    content = reasoningContent
+      .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
+      .join("")
+      .trim();
+  }
+
+  if (!content) {
+    const detail = finishReason ? `（finish_reason: ${finishReason}）` : "";
+    throw new AppError("AI_REMOTE_RESPONSE_INVALID", `远程 AI 返回内容为空${detail}。`);
+  }
+
+  return content;
 }
 
 function parseJsonObject(content: string): unknown {
@@ -1257,12 +1587,120 @@ function parseJsonObject(content: string): unknown {
       try {
         return JSON.parse(content.slice(startIndex, endIndex + 1)) as unknown;
       } catch {
-        throw new AppError("AI_REMOTE_RESPONSE_INVALID", "远程 AI 返回的分析结果不是有效 JSON。");
+        // 尝试修复被 max_tokens 截断的 JSON。
+        const repaired = repairTruncatedJson(content.slice(startIndex));
+        if (repaired) {
+          return repaired;
+        }
+      }
+    }
+
+    // 最后尝试：即使没有 } 也尝试修复截断内容。
+    if (startIndex >= 0) {
+      const repaired = repairTruncatedJson(content.slice(startIndex));
+      if (repaired) {
+        return repaired;
       }
     }
 
     throw new AppError("AI_REMOTE_RESPONSE_INVALID", "远程 AI 返回的分析结果不是有效 JSON。");
   }
+}
+
+/**
+ * 修复被 max_tokens 截断的 JSON 字符串。
+ * 策略：先尝试直接补全括号；若失败，回退到最后一个安全断点（逗号/引号/闭合括号）再补全。
+ */
+function repairTruncatedJson(text: string): unknown | null {
+  const trimmed = text.trimEnd();
+  if (!trimmed.startsWith("{")) return null;
+
+  // 第一次尝试：直接在末尾补全。
+  const directRepair = closeJsonBrackets(trimmed);
+  if (directRepair !== null) {
+    try {
+      return JSON.parse(directRepair) as unknown;
+    } catch {
+      // 继续尝试回退。
+    }
+  }
+
+  // 第二次尝试：回退到最后一个安全断点（", " 或 "]," 或 "}" 等后面）。
+  // 匹配逗号后、闭合引号后、闭合括号后的位置。
+  const safeBreakPattern = /["'\]},]\s*/g;
+  let lastSafeIndex = -1;
+  let match: RegExpExecArray | null;
+  while ((match = safeBreakPattern.exec(trimmed)) !== null) {
+    lastSafeIndex = match.index + match[0].length;
+  }
+
+  if (lastSafeIndex > 0) {
+    const candidate = trimmed.slice(0, lastSafeIndex).trimEnd().replace(/,\s*$/, "");
+    const repaired = closeJsonBrackets(candidate);
+    if (repaired !== null) {
+      try {
+        return JSON.parse(repaired) as unknown;
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 对可能截断的 JSON 字符串补全缺失的闭合符号。
+ */
+function closeJsonBrackets(text: string): string | null {
+  let result = text.trimEnd();
+
+  // 移除末尾悬垂的逗号。
+  result = result.replace(/,\s*$/, "");
+
+  // 统计未闭合的括号。
+  const stack: string[] = [];
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < result.length; i++) {
+    const ch = result[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === "{") stack.push("}");
+    else if (ch === "[") stack.push("]");
+    else if (ch === "}" || ch === "]") {
+      const expected = stack.pop();
+      if (expected !== ch) return null; // 括号不匹配，放弃。
+    }
+  }
+
+  // 如果字符串未闭合，补一个引号。
+  if (inString) {
+    result += '"';
+  }
+
+  // 移除补引号后可能悬垂的逗号。
+  result = result.replace(/,\s*$/, "");
+
+  // 按栈逆序补全闭合符号。
+  while (stack.length > 0) {
+    result += stack.pop();
+  }
+
+  return result;
 }
 
 function stripJsonFence(content: string): string {
@@ -1279,106 +1717,6 @@ function stripTextFence(content: string): string {
     .replace(/^```(?:text|txt|markdown|md)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
-}
-
-function normalizeRemoteSections(input: unknown): RemotePromptAnalysisSection[] {
-  if (!Array.isArray(input)) {
-    return [];
-  }
-
-  return input.reduce<RemotePromptAnalysisSection[]>((sections, section) => {
-      if (!isRecord(section)) {
-        return sections;
-      }
-
-      const key = normalizeSectionKey(section.key);
-
-      if (!key) {
-        return sections;
-      }
-
-      const meta = promptSectionMeta[key];
-      const values = uniqueStrings(Array.isArray(section.values) ? section.values : []).slice(0, 8);
-
-      if (values.length === 0) {
-        return sections;
-      }
-
-      for (const value of values) {
-        const splitSections = splitPromptToTemplate(value).sections.filter(
-          (splitSection) => splitSection.key !== "negative" && splitSection.key !== "other",
-        );
-
-        if (splitSections.length > 0) {
-          for (const splitSection of splitSections) {
-            const splitMeta = promptSectionMeta[splitSection.key];
-
-            upsertRemoteSection(sections, {
-              key: splitMeta.key,
-              label: splitMeta.label,
-              variable: splitMeta.variable,
-              values: splitSection.values,
-            });
-          }
-
-          continue;
-        }
-
-        upsertRemoteSection(sections, {
-          key: meta.key,
-          label: normalizeString(section.label) || meta.label,
-          variable: normalizeVariable(section.variable) || meta.variable,
-          values: [normalizePromptSectionValue(key, value)],
-        });
-      }
-
-      return sections;
-    }, []);
-}
-
-function upsertRemoteSection(
-  sections: RemotePromptAnalysisSection[],
-  section: RemotePromptAnalysisSection,
-): void {
-  const values = uniqueStrings(section.values).slice(0, 8);
-
-  if (values.length === 0) {
-    return;
-  }
-
-  const existingSection = sections.find(
-    (existing) => existing.key === section.key && existing.variable === section.variable,
-  );
-
-  if (existingSection) {
-    existingSection.values = uniqueStrings([...existingSection.values, ...values]).slice(0, 8);
-    return;
-  }
-
-  sections.push({
-    ...section,
-    values,
-  });
-}
-
-function buildTemplateFromSections(sections: RemotePromptAnalysisSection[]): string {
-  return sections.map((section) => `${section.label}：{{${section.variable}: ${section.values.join("，")}}}`).join("\n");
-}
-
-function normalizeSectionKey(input: unknown): PromptSplitSectionKey | null {
-  const key = normalizeString(input);
-
-  if (!Object.prototype.hasOwnProperty.call(promptSectionMeta, key) || key === "other") {
-    return null;
-  }
-
-  return key as PromptSplitSectionKey;
-}
-
-function normalizeVariable(input: unknown): string {
-  return normalizeString(input)
-    .replace(/[^a-zA-Z0-9_-]/g, "")
-    .slice(0, 32);
 }
 
 function normalizeString(input: unknown): string {
@@ -1405,12 +1743,76 @@ function assertModelListSettings(settings: AiProviderSettings): void {
   }
 }
 
+const visionModelPattern =
+  /(?:vision|vl|visual|omni|gpt-4o|gpt-4\.1|gpt-5|o3|o4|gemini|pixtral|llava|qwen[^/]*vl|glm-4v|internvl|minicpm-v)/i;
+const imageGenerationModelPattern =
+  /(?:dall-?e|gpt-image|flux|sdxl|stable-diffusion|\bsd[-_]|midjourney|ideogram|playground|recraft|kolors|hidream|cogview|wanxiang|tongyiwan|emi)/i;
+
+/**
+ * 解析平台 /models 返回的单条模型，优先读取平台声明的模态字段，
+ * 字段缺失或无法判定时回退到按模型名称正则猜测。
+ */
+function parseModelCapabilities(item: Record<string, unknown>, modelId: string): AiProviderModelSettings["capabilities"] {
+  const fieldCapabilities = parseModelCapabilitiesFromFields(item);
+
+  return fieldCapabilities.length > 0 ? fieldCapabilities : guessModelCapabilities(modelId);
+}
+
+/**
+ * 优先依据平台返回的真实模态字段判定能力；无法从字段判定时返回空数组，
+ * 由调用方回退到名称正则。
+ */
+function parseModelCapabilitiesFromFields(item: Record<string, unknown>): AiProviderModelSettings["capabilities"] {
+  const inputModalities = uniqueStrings(asStringArray(item.input_modalities));
+  const outputModalities = uniqueStrings(asStringArray(item.output_modalities));
+  const modalities = uniqueStrings(asStringArray(item.modalities));
+  const visionField = asTruthy(item.vision);
+  const supportsImageField = asTruthy(item.supports_image);
+
+  const declared = inputModalities.length > 0 || outputModalities.length > 0 || modalities.length > 0;
+  // 图片「输入」只来自 input_modalities / modalities 或显式视觉字段，不把 output_modalities 的 image 误判为视觉输入。
+  const hasImageInput = inputModalities.includes("image") || modalities.includes("image") || visionField || supportsImageField;
+  // 图片「输出」只来自 output_modalities，用于判定纯生图模型。
+  const hasImageOutput = outputModalities.includes("image");
+
+  if (!declared && !hasImageInput && !hasImageOutput) {
+    return [];
+  }
+
+  // 纯生图模型（仅图片输出、无视觉输入）与现有名称正则的约定一致：只标 image-generation。
+  if (!hasImageInput && hasImageOutput) {
+    return ["image-generation"];
+  }
+
+  return hasImageInput ? ["text", "vision"] : ["text"];
+}
+
 function guessModelCapabilities(modelId: string): AiProviderModelSettings["capabilities"] {
   const normalizedModelId = modelId.toLowerCase();
-  const visionPattern =
-    /(?:vision|vl|visual|omni|gpt-4o|gpt-4\.1|gpt-5|o3|o4|gemini|pixtral|llava|qwen[^/]*vl|glm-4v|internvl|minicpm-v)/i;
 
-  return visionPattern.test(normalizedModelId) ? ["text", "vision"] : ["text"];
+  if (imageGenerationModelPattern.test(normalizedModelId)) {
+    return ["image-generation"];
+  }
+
+  return visionModelPattern.test(normalizedModelId) ? ["text", "vision"] : ["text"];
+}
+
+/** 将值规整为字符串数组（数组保留元素，非数组按整串处理）。 */
+function asStringArray(input: unknown): string[] {
+  if (Array.isArray(input)) {
+    return input.map((value) => (typeof value === "string" ? value : "")).filter(Boolean);
+  }
+
+  return typeof input === "string" ? [input] : [];
+}
+
+/** 布尔/字符串真值判定：布尔 true 或非空非假字符串。 */
+function asTruthy(input: unknown): boolean {
+  if (typeof input === "boolean") {
+    return input;
+  }
+
+  return typeof input === "string" && input.length > 0 && input.toLowerCase() !== "false";
 }
 
 const imagePromptReverseSystemContent = `===== 全局像素级图像反推规则（EcomPhotoForge · 最终优化执行版）=====
@@ -1511,4 +1913,740 @@ const imagePromptReverseSystemContent = `===== 全局像素级图像反推规则
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === "object" && input !== null;
+}
+
+
+export async function generateImagesWithOpenAiCompatible(
+  settings: AiProviderSettings,
+  payload: AiImageGenerationPayload,
+  resolvedCustomInstructions = payload.customInstructions ?? "",
+): Promise<AiImageGenerationData> {
+  assertRemoteSettings(settings);
+  const startedAt = Date.now();
+  const batchId = randomUUID();
+  const requestedCount = normalizeImageGenerationCount(payload.n);
+  const referenceImage = await resolveImageGenerationReference(payload);
+  const endpoint = referenceImage
+    ? normalizeOpenAiCompatibleImageEditsEndpoint(settings.baseUrl)
+    : normalizeOpenAiCompatibleImagesEndpoint(settings.baseUrl);
+  const endpointUrl = new URL(endpoint);
+  const initialBody = buildImageGenerationRequestBody(settings, payload, {
+    customInstructions: resolvedCustomInstructions,
+    requestedCount,
+  });
+  const requestContext: ImageGenerationRequestContext = {
+    background: String(initialBody.background ?? "auto"),
+    batchId,
+    customInstructionsChars: resolvedCustomInstructions.trim().length,
+    endpointHost: endpointUrl.host,
+    endpointPath: endpointUrl.pathname,
+    hasReference: Boolean(referenceImage),
+    generationProvider: payload.generationProvider ?? "api",
+    model: String(initialBody.model),
+    negativePromptChars: payload.negativePrompt?.trim().length ?? 0,
+    notificationEnabled: payload.notificationEnabled === true,
+    outputFormat: String(initialBody.output_format),
+    promptChars: payload.prompt.trim().length,
+    quality: String(initialBody.quality),
+    referenceImageBytes: referenceImage?.bytes.byteLength,
+    referenceImageMime: referenceImage?.mime,
+    requestedCount,
+    size: String(initialBody.size),
+  };
+  const resolvedImages: ResolvedGeneratedImage[] = [];
+  let requestCount = 0;
+
+  try {
+    while (resolvedImages.length < requestedCount && requestCount < requestedCount) {
+      const remainingCount = requestedCount - resolvedImages.length;
+      requestCount += 1;
+      const body = buildImageGenerationRequestBody(settings, payload, {
+        customInstructions: resolvedCustomInstructions,
+        requestedCount: remainingCount,
+      });
+      const currentRequestContext = {
+        ...requestContext,
+        accumulatedCount: resolvedImages.length,
+        requestImageCount: remainingCount,
+        requestIndex: requestCount,
+      };
+
+      logAiEvent("info", "image-generation:request", currentRequestContext);
+      const response = await requestImageGenerations(
+        endpoint,
+        settings.apiKey,
+        () => referenceImage
+          ? buildImageEditRequestForm(settings, payload, referenceImage, {
+              customInstructions: resolvedCustomInstructions,
+              requestedCount: remainingCount,
+            })
+          : JSON.stringify(body),
+        currentRequestContext,
+      );
+      const responseImages = await resolveGeneratedImages(response);
+      if (responseImages.length === 0) {
+        logAiEvent("warn", "image-generation:response-empty", {
+          ...currentRequestContext,
+          accumulatedCount: resolvedImages.length,
+        });
+        continue;
+      }
+
+      const acceptedImages = responseImages.slice(0, remainingCount);
+      for (const image of acceptedImages) {
+        try {
+          validateGeneratedImageSettings(image.inspection, payload);
+        } catch (error) {
+          logAiEvent("warn", "image-generation:settings-mismatch", {
+            ...currentRequestContext,
+            actualFormat: image.inspection.format,
+            actualHasAlpha: image.inspection.hasAlpha,
+            actualHasTransparency: image.inspection.hasTransparency,
+            actualSize: `${image.inspection.width}x${image.inspection.height}`,
+            code: error instanceof AppError ? error.code : "AI_IMAGE_OUTPUT_MISMATCH",
+            message: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+      }
+      resolvedImages.push(...acceptedImages);
+
+      logAiEvent("info", "image-generation:response", {
+        ...currentRequestContext,
+        acceptedCount: acceptedImages.length,
+        actualFormats: acceptedImages.map((image) => image.inspection.format),
+        actualHasAlpha: acceptedImages.map((image) => image.inspection.hasAlpha),
+        actualHasTransparency: acceptedImages.map((image) => image.inspection.hasTransparency),
+        actualSizes: acceptedImages.map((image) => `${image.inspection.width}x${image.inspection.height}`),
+        accumulatedCount: resolvedImages.length,
+        returnedCount: responseImages.length,
+      });
+
+      if (resolvedImages.length < requestedCount) {
+        logAiEvent("warn", "image-generation:supplement-requested", {
+          ...requestContext,
+          accumulatedCount: resolvedImages.length,
+          nextRequestImageCount: requestedCount - resolvedImages.length,
+          requestCount,
+        });
+      }
+    }
+
+    if (resolvedImages.length < requestedCount) {
+      throw new AppError(
+        "AI_IMAGE_COUNT_MISMATCH",
+        `图像接口返回数量不足，期望 ${requestedCount} 张，实际仅获得 ${resolvedImages.length} 张。`,
+      );
+    }
+
+    logAiEvent("info", "image-generation:done", {
+      ...requestContext,
+      actualFormats: resolvedImages.map((image) => image.inspection.format),
+      actualHasAlpha: resolvedImages.map((image) => image.inspection.hasAlpha),
+      actualHasTransparency: resolvedImages.map((image) => image.inspection.hasTransparency),
+      actualSizes: resolvedImages.map((image) => `${image.inspection.width}x${image.inspection.height}`),
+      durationMs: Date.now() - startedAt,
+      imageCount: resolvedImages.length,
+      ok: true,
+      requestCount,
+    });
+    return {
+      images: resolvedImages.map(({ dataUrl, revisedPrompt }) => ({ dataUrl, revisedPrompt })),
+      model: String(initialBody.model),
+    };
+  } catch (error) {
+    logAiEvent("error", "image-generation:failed", {
+      ...requestContext,
+      code: error instanceof AppError ? error.code : "AI_IMAGE_GENERATION_FAILED",
+      durationMs: Date.now() - startedAt,
+      imageCount: resolvedImages.length,
+      message: error instanceof Error ? error.message : String(error),
+      requestCount,
+    });
+    throw error;
+  }
+}
+
+
+export function buildImageGenerationRequestBody(
+  settings: AiProviderSettings,
+  payload: AiImageGenerationPayload,
+  options: { customInstructions?: string; requestedCount?: number } = {},
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: settings.model,
+    prompt: buildImageGenerationPrompt(
+      payload.prompt,
+      payload.negativePrompt,
+      options.customInstructions ?? payload.customInstructions,
+    ),
+    n: normalizeImageGenerationCount(options.requestedCount ?? payload.n),
+    size: payload.size ?? "auto",
+    quality: payload.quality ?? "auto",
+    output_format: payload.outputFormat ?? "png",
+  };
+
+  if (payload.background && payload.background !== "auto") {
+    body.background = payload.background;
+  }
+
+  return body;
+}
+
+export type SupportedImageMime = "image/jpeg" | "image/png" | "image/webp";
+type SupportedReferenceImageMime = SupportedImageMime;
+
+export type GeneratedImageInspection = {
+  format: "jpeg" | "png" | "webp";
+  hasAlpha: boolean;
+  hasTransparency: boolean;
+  height: number;
+  mime: SupportedImageMime;
+  width: number;
+};
+
+type ResolvedGeneratedImage = {
+  dataUrl: string;
+  inspection: GeneratedImageInspection;
+  revisedPrompt: string | null;
+};
+
+async function resolveImageGenerationReference(
+  payload: Pick<AiImageGenerationPayload, "referenceImageDataUrl" | "referenceImageFileName">,
+): Promise<ReferenceImageUpload | null> {
+  const dataUrl = payload.referenceImageDataUrl?.trim();
+  if (dataUrl) {
+    return parseReferenceImageDataUrl(dataUrl, payload.referenceImageFileName);
+  }
+
+  const fileName = payload.referenceImageFileName?.trim();
+  if (!fileName) {
+    return null;
+  }
+
+  const { readCanvasReferenceImage } = await import("../library/canvasReferenceImages");
+  const restored = await readCanvasReferenceImage(fileName);
+  return parseReferenceImageDataUrl(restored.dataUrl, restored.fileName);
+}
+
+export type ReferenceImageUpload = {
+  bytes: Buffer;
+  fileName: string;
+  mime: SupportedReferenceImageMime;
+};
+
+type ImageGenerationRequestContext = {
+  background: string;
+  batchId: string;
+  customInstructionsChars: number;
+  endpointHost: string;
+  endpointPath: string;
+  generationProvider: string;
+  hasReference: boolean;
+  model: string;
+  negativePromptChars: number;
+  notificationEnabled: boolean;
+  outputFormat: string;
+  promptChars: number;
+  quality: string;
+  referenceImageBytes?: number;
+  referenceImageMime?: SupportedReferenceImageMime;
+  requestedCount: number;
+  size: string;
+};
+
+async function resolveGeneratedImages(response: unknown): Promise<ResolvedGeneratedImage[]> {
+  const data = isRecord(response) && Array.isArray(response.data) ? response.data : [];
+  const images = await Promise.all(
+    data.slice(0, 4).map(async (entry): Promise<ResolvedGeneratedImage | null> => {
+      if (!isRecord(entry)) {
+        return null;
+      }
+
+      const revisedPrompt = typeof entry.revised_prompt === "string" ? entry.revised_prompt : null;
+      const base64 = typeof entry.b64_json === "string" ? entry.b64_json.trim() : "";
+      if (base64) {
+        return resolveGeneratedImageBytes(decodeGeneratedImageBase64(base64), revisedPrompt);
+      }
+
+      const url = typeof entry.url === "string" ? entry.url.trim() : "";
+      if (!url) {
+        return null;
+      }
+
+      return resolveGeneratedImageBytes(await fetchGeneratedImageBytes(url), revisedPrompt);
+    }),
+  );
+  return images.filter((image): image is ResolvedGeneratedImage => Boolean(image));
+}
+
+function decodeGeneratedImageBase64(base64: string): Buffer {
+  const normalized = base64.replace(/\s+/g, "");
+  if (!normalized || normalized.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
+    throw new AppError("AI_IMAGE_OUTPUT_INVALID", "图像接口返回了无效的 base64 图片内容。");
+  }
+
+  const bytes = Buffer.from(normalized, "base64");
+  if (bytes.byteLength === 0) {
+    throw new AppError("AI_IMAGE_OUTPUT_INVALID", "图像接口返回了空图片内容。");
+  }
+  return bytes;
+}
+
+async function resolveGeneratedImageBytes(
+  bytes: Buffer,
+  revisedPrompt: string | null,
+): Promise<ResolvedGeneratedImage> {
+  const inspection = await inspectGeneratedImage(bytes);
+  return {
+    dataUrl: `data:${inspection.mime};base64,${bytes.toString("base64")}`,
+    inspection,
+    revisedPrompt,
+  };
+}
+
+export async function inspectGeneratedImage(bytes: Buffer): Promise<GeneratedImageInspection> {
+  const mime = detectImageMimeFromBytes(bytes);
+  if (!mime) {
+    throw new AppError(
+      "AI_IMAGE_OUTPUT_FORMAT_UNSUPPORTED",
+      "图像接口返回的内容不是可识别的 PNG、JPEG 或 WebP 图片。",
+    );
+  }
+
+  try {
+    const metadata = await getSharp()(bytes).metadata() as {
+      channels?: number;
+      format?: string;
+      hasAlpha?: boolean;
+      height?: number;
+      width?: number;
+    };
+    if (!metadata.width || !metadata.height) {
+      throw new Error("missing dimensions");
+    }
+    const hasAlpha = mime !== "image/jpeg" &&
+      (metadata.hasAlpha === true || metadata.channels === 2 || metadata.channels === 4);
+    let hasTransparency = false;
+    if (hasAlpha) {
+      const stats = await getSharp()(bytes).stats();
+      const alphaIndex = metadata.channels === 2 ? 1 : 3;
+      hasTransparency = (stats.channels[alphaIndex]?.min ?? 255) < 255;
+    }
+
+    return {
+      format: mime === "image/jpeg" ? "jpeg" : mime === "image/webp" ? "webp" : "png",
+      hasAlpha,
+      hasTransparency,
+      height: metadata.height,
+      mime,
+      width: metadata.width,
+    };
+  } catch (error) {
+    throw new AppError(
+      "AI_IMAGE_OUTPUT_INVALID",
+      `图像接口返回了无法解码的 ${mime.replace("image/", "").toUpperCase()} 图片。`,
+    );
+  }
+}
+
+export function validateGeneratedImageSettings(
+  inspection: GeneratedImageInspection,
+  payload: Pick<AiImageGenerationPayload, "background" | "outputFormat" | "size">,
+): void {
+  if (payload.outputFormat && inspection.format !== payload.outputFormat) {
+    throw new AppError(
+      "AI_IMAGE_OUTPUT_FORMAT_MISMATCH",
+      `服务商未应用输出格式设置：请求 ${payload.outputFormat.toUpperCase()}，实际返回 ${inspection.format.toUpperCase()}。`,
+    );
+  }
+
+  const requestedSize = parseExplicitImageGenerationSize(payload.size);
+  if (
+    requestedSize &&
+    (inspection.width !== requestedSize.width || inspection.height !== requestedSize.height)
+  ) {
+    throw new AppError(
+      "AI_IMAGE_OUTPUT_SIZE_MISMATCH",
+      `服务商未应用尺寸设置：请求 ${requestedSize.width}x${requestedSize.height}，实际返回 ${inspection.width}x${inspection.height}。`,
+    );
+  }
+
+  if (payload.background === "transparent" && !inspection.hasTransparency) {
+    throw new AppError(
+      "AI_IMAGE_OUTPUT_ALPHA_MISMATCH",
+      "服务商未应用透明背景设置：返回图片没有透明像素。",
+    );
+  }
+
+  if (payload.background === "opaque" && inspection.hasTransparency) {
+    throw new AppError(
+      "AI_IMAGE_OUTPUT_OPACITY_MISMATCH",
+      "服务商未应用不透明背景设置：返回图片仍包含透明像素。",
+    );
+  }
+}
+
+function parseExplicitImageGenerationSize(
+  size: AiImageGenerationPayload["size"],
+): { height: number; width: number } | null {
+  if (!size || size === "auto") {
+    return null;
+  }
+  const match = /^(\d+)x(\d+)$/.exec(size);
+  if (!match) {
+    return null;
+  }
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+function normalizeImageGenerationCount(count: number | undefined): number {
+  return Math.max(1, Math.min(4, Math.floor(count ?? 1)));
+}
+
+export function parseReferenceImageDataUrl(
+  dataUrl: string,
+  sourceFileName?: string,
+): ReferenceImageUpload {
+  const match = /^data:([^;,]+);base64,([\s\S]+)$/i.exec(dataUrl.trim());
+  if (!match) {
+    throw createReferenceImageError(
+      "AI_REFERENCE_IMAGE_INVALID",
+      "参考图数据无效，请重新选择 PNG、JPEG 或 WebP 图片后重试。",
+      { dataUrlChars: dataUrl.length },
+    );
+  }
+
+  const declaredMime = match[1].toLowerCase();
+  const base64 = match[2].replace(/\s+/g, "");
+  if (!base64 || base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+    throw createReferenceImageError(
+      "AI_REFERENCE_IMAGE_INVALID",
+      "参考图 base64 编码无效，请重新选择图片后重试。",
+      { declaredMime, encodedChars: base64.length },
+    );
+  }
+
+  const paddingLength = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  const estimatedBytes = (base64.length * 3) / 4 - paddingLength;
+  if (estimatedBytes > maxReferenceImageBytes) {
+    throwReferenceImageTooLarge(estimatedBytes);
+  }
+
+  const bytes = Buffer.from(base64, "base64");
+  if (bytes.byteLength === 0 || bytes.toString("base64") !== base64) {
+    throw createReferenceImageError(
+      "AI_REFERENCE_IMAGE_INVALID",
+      "参考图内容已损坏，请重新导出或重新选择图片后重试。",
+      { declaredMime, referenceImageBytes: bytes.byteLength },
+    );
+  }
+  if (bytes.byteLength > maxReferenceImageBytes) {
+    throwReferenceImageTooLarge(bytes.byteLength);
+  }
+
+  const mime = detectImageMimeFromBytes(bytes);
+  if (!mime) {
+    throw createReferenceImageError(
+      "AI_REFERENCE_IMAGE_FORMAT_UNSUPPORTED",
+      "参考图格式不受支持，请转换为 PNG、JPEG 或 WebP 后重试。",
+      { declaredMime, referenceImageBytes: bytes.byteLength },
+    );
+  }
+
+  const extension = mime === "image/jpeg" ? ".jpg" : mime === "image/webp" ? ".webp" : ".png";
+  const sourceStem = path.parse(path.basename(sourceFileName?.trim() || "reference-image")).name;
+  const safeStem = sourceStem.replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 80) || "reference-image";
+  return { bytes, fileName: `${safeStem}${extension}`, mime };
+}
+
+export function buildImageEditRequestForm(
+  settings: AiProviderSettings,
+  payload: AiImageGenerationPayload,
+  referenceImage = parseReferenceImageDataUrl(
+    payload.referenceImageDataUrl ?? "",
+    payload.referenceImageFileName,
+  ),
+  options: { customInstructions?: string; requestedCount?: number } = {},
+): FormData {
+  const body = buildImageGenerationRequestBody(settings, payload, options);
+  const form = new FormData();
+
+  for (const key of ["model", "prompt", "n", "size", "quality", "output_format", "background"] as const) {
+    const value = body[key];
+    if (value !== undefined && value !== null && String(value) !== "") {
+      form.append(key, String(value));
+    }
+  }
+
+  form.append(
+    "image",
+    new Blob([new Uint8Array(referenceImage.bytes)], { type: referenceImage.mime }),
+    referenceImage.fileName,
+  );
+  return form;
+}
+
+export function detectImageMimeFromBytes(bytes: Buffer): SupportedImageMime | null {
+  if (
+    bytes.byteLength >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (bytes.byteLength >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.byteLength >= 12 &&
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+function throwReferenceImageTooLarge(byteLength: number): never {
+  const sizeMb = Math.ceil((byteLength / (1024 * 1024)) * 10) / 10;
+  throw createReferenceImageError(
+    "AI_REFERENCE_IMAGE_TOO_LARGE",
+    `参考图大小约 ${sizeMb} MB，超过 50 MB 上限。请压缩或缩小图片后重试。`,
+    { referenceImageBytes: byteLength },
+  );
+}
+
+function createReferenceImageError(
+  code: string,
+  message: string,
+  details: Record<string, unknown>,
+): AppError {
+  logAiEvent("error", "image-generation:reference-invalid", { code, message, ...details });
+  return new AppError(code, message);
+}
+
+
+export function normalizeOpenAiCompatibleImagesEndpoint(baseUrl: string): string {
+  return normalizeOpenAiCompatibleImageEndpoint(baseUrl, "generations");
+}
+
+export function normalizeOpenAiCompatibleImageEditsEndpoint(baseUrl: string): string {
+  return normalizeOpenAiCompatibleImageEndpoint(baseUrl, "edits");
+}
+
+function normalizeOpenAiCompatibleImageEndpoint(
+  baseUrl: string,
+  action: "edits" | "generations",
+): string {
+  const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+
+  if (!normalizedBaseUrl) {
+    throw new AppError("AI_BASE_URL_INVALID", "AI 接口地址不合法。");
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(normalizedBaseUrl);
+  } catch {
+    throw new AppError("AI_BASE_URL_INVALID", "AI 接口地址不合法。");
+  }
+
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new AppError("AI_BASE_URL_INVALID", "AI 接口地址必须以 http 或 https 开头。");
+  }
+
+  if (/\/images\/(?:generations|edits)\/?$/i.test(parsedUrl.pathname)) {
+    parsedUrl.pathname = parsedUrl.pathname.replace(
+      /\/images\/(?:generations|edits)\/?$/i,
+      `/images/${action}`,
+    );
+    return parsedUrl.toString();
+  }
+
+  if (parsedUrl.pathname.endsWith("/chat/completions")) {
+    parsedUrl.pathname = parsedUrl.pathname.replace(/\/chat\/completions\/?$/i, `/images/${action}`);
+    return parsedUrl.toString();
+  }
+
+  parsedUrl.pathname = `${parsedUrl.pathname.replace(/\/+$/, "")}/images/${action}`;
+  return parsedUrl.toString();
+}
+
+async function requestImageGenerations(
+  endpoint: string,
+  apiKey: string,
+  buildBody: () => BodyInit,
+  context: ImageGenerationRequestContext,
+): Promise<unknown> {
+  const deadlineMs = Date.now() + imageGenerationRequestTimeoutMs;
+
+  for (let attempt = 0; attempt <= imageGenerationMaxRetries; attempt += 1) {
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) {
+      throw createImageGenerationTimeoutError(context.hasReference);
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remainingMs);
+
+    try {
+      const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` };
+      if (!context.hasReference) {
+        headers["Content-Type"] = "application/json";
+      }
+      const response = await fetch(endpoint, {
+        body: buildBody(),
+        headers,
+        method: "POST",
+        signal: controller.signal,
+      });
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        throw buildImageGenerationRequestError(response.status, responseText, context.hasReference);
+      }
+
+      try {
+        return JSON.parse(responseText) as unknown;
+      } catch {
+        throw new AppError("AI_REMOTE_RESPONSE_INVALID", "图像接口返回的响应不是有效 JSON。");
+      }
+    } catch (error) {
+      if (error instanceof AppError) {
+        throw error;
+      }
+
+      const isAbort = error instanceof Error && error.name === "AbortError";
+      if (isAbort) {
+        throw createImageGenerationTimeoutError(context.hasReference);
+      }
+
+      // 瞬时网络错误（如 "other side closed"）可重试
+      if (attempt < imageGenerationMaxRetries && isTransientNetworkError(error)) {
+        const retryDelayMs = Math.min(
+          retryBaseDelayMs * (attempt + 1),
+          Math.max(0, deadlineMs - Date.now()),
+        );
+        if (retryDelayMs <= 0) {
+          throw createImageGenerationTimeoutError(context.hasReference);
+        }
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      const networkMessage = buildRemoteNetworkFailureMessage(error);
+      throw new AppError(
+        context.hasReference ? "AI_REFERENCE_IMAGE_NETWORK_FAILED" : "AI_REMOTE_REQUEST_FAILED",
+        context.hasReference
+          ? `${networkMessage} 请检查网络、代理，并确认接口支持 /images/edits。`
+          : networkMessage,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new AppError("AI_REMOTE_REQUEST_FAILED", "图像生成失败，已达最大重试次数。");
+}
+
+function createImageGenerationTimeoutError(hasReference: boolean): AppError {
+  return hasReference
+    ? new AppError(
+        "AI_REFERENCE_IMAGE_TIMEOUT",
+        "参考图生成请求超时。请先压缩参考图后重试，并确认当前接口支持 /images/edits 图生图。",
+      )
+    : new AppError("AI_REMOTE_TIMEOUT", "图像生成超时，请稍后重试。");
+}
+
+function buildImageGenerationRequestError(
+  status: number,
+  responseText: string,
+  hasReference: boolean,
+): AppError {
+  if (!hasReference) {
+    return new AppError("AI_REMOTE_REQUEST_FAILED", buildRemoteRequestFailureMessage(status, responseText));
+  }
+
+  const detail = extractRemoteErrorDetail(responseText);
+  if (status === 413) {
+    return new AppError(
+      "AI_REFERENCE_IMAGE_TOO_LARGE",
+      "参考图被接口判定为过大。请压缩图片、降低分辨率后重试。",
+    );
+  }
+  if (status === 404 || status === 405 || status === 501) {
+    return new AppError(
+      "AI_REFERENCE_IMAGE_EDIT_UNSUPPORTED",
+      `当前接口不支持参考图生成（状态码 ${status}）。请改用支持 /images/edits 的模型或 API。`,
+    );
+  }
+  if (status === 415) {
+    return new AppError(
+      "AI_REFERENCE_IMAGE_FORMAT_UNSUPPORTED",
+      "接口不接受当前参考图格式。请转换为 PNG 或 JPEG 后重试。",
+    );
+  }
+
+  return new AppError(
+    "AI_REFERENCE_IMAGE_REQUEST_FAILED",
+    detail
+      ? `参考图生成失败，状态码 ${status}。原因：${detail}`
+      : `参考图生成失败，状态码 ${status}。请检查模型是否支持图生图，或压缩参考图后重试。`,
+  );
+}
+
+async function fetchGeneratedImageBytes(url: string): Promise<Buffer> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), imageGenerationRequestTimeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new AppError("AI_REMOTE_REQUEST_FAILED", `图像下载失败，状态码 ${response.status}。`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.byteLength === 0) {
+      throw new AppError("AI_IMAGE_OUTPUT_INVALID", "图像下载结果为空。");
+    }
+    return buffer;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new AppError("AI_REMOTE_TIMEOUT", "图像下载超时，请稍后重试。");
+    }
+
+    throw new AppError("AI_REMOTE_REQUEST_FAILED", "图像下载失败，请检查网络或服务商返回的图片地址。");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildImageGenerationPrompt(
+  prompt: string,
+  negativePrompt?: string,
+  customInstructions?: string,
+): string {
+  const positive = prompt.trim();
+  const negative = negativePrompt?.trim() ?? "";
+  const custom = customInstructions?.trim() ?? "";
+  if (!positive) {
+    throw new AppError("AI_PROMPT_EMPTY", "请输入图像提示词。");
+  }
+
+  return [
+    positive,
+    custom ? `Additional generation instructions / 附加生成规则：${custom}` : "",
+    negative ? `Negative prompt / 反向约束：${negative}` : "",
+  ].filter(Boolean).join("\n\n");
 }

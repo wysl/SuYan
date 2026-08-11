@@ -2,6 +2,7 @@ import type {
   AiActionPreference,
   AiFeatureAction,
   AiProviderModelSettings,
+  AiRecognitionSourcePreferences,
   AiRulePreset,
   PublicAiProviderSettings,
   SaveAiProviderProfilePayload,
@@ -11,6 +12,7 @@ import {
   AI_RULE_INSTRUCTIONS_MAX_LENGTH,
   aiFeatureActionMeta,
   aiFeatureActions,
+  normalizeAiRecognitionSourcePreferences,
   normalizeAiActionRules,
   normalizeAiRulePresetIds,
   resolveAiActionRules,
@@ -28,13 +30,56 @@ export type AiActionProfileDraft = {
 export const nsfwAiAction: AiFeatureAction = "image-safety";
 export const aiSettingsGeneralActions = aiFeatureActions.filter((action) => action !== nsfwAiAction);
 
+export type AiActionModelSelection = {
+  profileId: string;
+  modelId: string;
+};
+
+/**
+ * Apply the quick-switch provider/model selection to the persistent action preference.
+ * Existing rule presets and custom instructions for the action must remain untouched.
+ */
+export function updateAiActionModelPreference(
+  settings: PublicAiProviderSettings,
+  action: AiFeatureAction,
+  selection: AiActionModelSelection,
+): PublicAiProviderSettings | null {
+  const profile = settings.profiles.find(
+    (candidate) => candidate.id === selection.profileId && candidate.enabled,
+  );
+  const model = profile?.models.find(
+    (candidate) =>
+      candidate.id === selection.modelId &&
+      candidate.capabilities.includes(aiFeatureActionMeta[action].capability),
+  );
+
+  if (!profile || !model) {
+    return null;
+  }
+
+  return {
+    ...settings,
+    actionPreferences: {
+      ...settings.actionPreferences,
+      [action]: {
+        ...settings.actionPreferences[action],
+        profileId: profile.id,
+        modelId: model.id,
+      },
+    },
+  };
+}
+
 export function buildPublicAiSettingsPayload(
   settings: PublicAiProviderSettings,
   actionPreferences: Partial<Record<AiFeatureAction, AiActionPreference>>,
+  recognitionSourcePreferences: AiRecognitionSourcePreferences = settings.recognitionSourcePreferences,
 ): SaveAiProviderSettingsPayload {
   return {
     activeProfileId: settings.activeProfileId,
+    ...(settings.actionOrder?.length ? { actionOrder: settings.actionOrder } : {}),
     actionPreferences,
+    recognitionSourcePreferences: normalizeAiRecognitionSourcePreferences(recognitionSourcePreferences),
     profiles: settings.profiles.map(toPublicProfilePayload),
   };
 }

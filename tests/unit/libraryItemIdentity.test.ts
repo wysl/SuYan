@@ -25,6 +25,26 @@ describe("library item identity reconciliation", () => {
     expect(reconciled).toHaveLength(1);
     expect(reconciled[0]).toBe(previous);
   });
+
+  it("does not reuse an item when its category assignment changes", () => {
+    const previous = { ...makeManagedItem(), categoryId: "system:portrait", category: "人像摄影" };
+    const next = { ...previous, categoryId: "system:product", category: "产品摄影" };
+
+    const reconciled = reconcileItemsByIdentity([previous], [next]);
+
+    expect(reconciled[0]).toBe(next);
+    expect(reconciled[0]).not.toBe(previous);
+  });
+
+  it("does not reuse an item when its multi-genre assignments change", () => {
+    const previous = { ...makeManagedItem(), genreIds: ["system:portrait"] };
+    const next = { ...previous, genreIds: ["system:portrait", "system:fashion"] };
+
+    const reconciled = reconcileItemsByIdentity([previous], [next]);
+
+    expect(reconciled[0]).toBe(next);
+    expect(reconciled[0]).not.toBe(previous);
+  });
 });
 
 function makeExternalItem(status: "available" | "missing"): LibraryItem {

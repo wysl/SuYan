@@ -3,6 +3,7 @@ import type {
   AiFeatureAction,
   AiProviderModelCapability,
   AiProviderModelSettings,
+  AiRecognitionSourcePreferences,
   AiProviderSettings,
   PublicAiProviderProfile,
   PublicAiProviderSettings,
@@ -13,6 +14,7 @@ import {
   AI_RULE_INSTRUCTIONS_MAX_LENGTH,
   aiFeatureActions,
   buildAiActionInstructions,
+  normalizeAiRecognitionSourcePreferences,
   normalizeAiActionRules,
   normalizeAiRulePresetIds,
 } from "../../../src/features/library/types/ai";
@@ -20,7 +22,9 @@ import { AppError } from "../ipc/errors";
 
 export type AiProviderSettingsCollection = {
   activeProfileId: string;
+  actionOrder?: string[];
   actionPreferences: Partial<Record<AiFeatureAction, AiActionPreference>>;
+  recognitionSourcePreferences: AiRecognitionSourcePreferences;
   profiles: AiProviderSettings[];
 };
 
@@ -37,7 +41,9 @@ type PersistedAiProviderProfile = {
 export type PersistedAiSettingsFile = {
   schemaVersion: 3;
   activeProfileId: string;
+  actionOrder?: string[];
   actionPreferences?: Partial<Record<AiFeatureAction, AiActionPreference>>;
+  recognitionSourcePreferences?: AiRecognitionSourcePreferences;
   profiles: PersistedAiProviderProfile[];
 };
 
@@ -60,6 +66,7 @@ export const defaultAiProviderProfile: AiProviderSettings = {
 export const defaultAiProviderSettings: AiProviderSettingsCollection = {
   activeProfileId: defaultAiProviderProfile.id,
   actionPreferences: {},
+  recognitionSourcePreferences: {},
   profiles: [{ ...defaultAiProviderProfile }],
 };
 
@@ -71,7 +78,9 @@ export function toPublicAiProviderSettings(
 
   return {
     activeProfileId: activeProfile.id,
+    ...(normalizedSettings.actionOrder?.length ? { actionOrder: normalizedSettings.actionOrder } : {}),
     actionPreferences: normalizedSettings.actionPreferences,
+    recognitionSourcePreferences: normalizedSettings.recognitionSourcePreferences,
     profiles: normalizedSettings.profiles.map(toPublicAiProviderProfile),
     enabled: activeProfile.enabled,
     baseUrl: activeProfile.baseUrl,
@@ -89,10 +98,13 @@ export function normalizeAiProviderSettings(input: unknown): AiProviderSettingsC
   if (Array.isArray(input.profiles)) {
     const profiles = normalizeProfileList(input.profiles);
     const activeProfileId = resolveActiveProfileId(normalizeString(input.activeProfileId), profiles);
+    const actionOrder = normalizeAiSettingsActionOrder(input.actionOrder);
 
     return {
       activeProfileId,
+      ...(actionOrder.length ? { actionOrder } : {}),
       actionPreferences: normalizeActionPreferences(input.actionPreferences, profiles),
+      recognitionSourcePreferences: normalizeAiRecognitionSourcePreferences(input.recognitionSourcePreferences),
       profiles,
     };
   }
@@ -114,10 +126,13 @@ export function normalizeAiProviderSettings(input: unknown): AiProviderSettingsC
         ]
       : undefined,
   }, 0);
+  const actionOrder = normalizeAiSettingsActionOrder(input.actionOrder);
 
   return {
     activeProfileId: legacyProfile.id,
+    ...(actionOrder.length ? { actionOrder } : {}),
     actionPreferences: {},
+    recognitionSourcePreferences: normalizeAiRecognitionSourcePreferences(input.recognitionSourcePreferences),
     profiles: [legacyProfile],
   };
 }
@@ -132,9 +147,14 @@ export function mergeAiProviderSettingsPayload(
     mergeAiProviderProfilePayload(currentById.get(normalizeProfileId(profile.id, index)), profile, index),
   );
   const profiles = normalizeProfileList(payloadProfiles);
+  const actionOrder = normalizeAiSettingsActionOrder(payload.actionOrder ?? currentSettings.actionOrder);
   const nextSettings: AiProviderSettingsCollection = {
     activeProfileId: resolveActiveProfileId(payload.activeProfileId, profiles),
+    ...(actionOrder.length ? { actionOrder } : {}),
     actionPreferences: normalizeActionPreferences(payload.actionPreferences ?? currentSettings.actionPreferences, profiles),
+    recognitionSourcePreferences: normalizeAiRecognitionSourcePreferences(
+      payload.recognitionSourcePreferences ?? currentSettings.recognitionSourcePreferences,
+    ),
     profiles,
   };
 
@@ -149,10 +169,11 @@ export function toPersistedAiSettingsFile(
 ): PersistedAiSettingsFile {
   const normalizedSettings = normalizeAiProviderSettings(settings);
 
-  return {
+  const persisted: PersistedAiSettingsFile = {
     schemaVersion: 3,
     activeProfileId: resolveActiveProfileId(normalizedSettings.activeProfileId, normalizedSettings.profiles),
     actionPreferences: normalizedSettings.actionPreferences,
+    recognitionSourcePreferences: normalizedSettings.recognitionSourcePreferences,
     profiles: normalizedSettings.profiles.map((profile) => {
       const fileProfile: PersistedAiProviderProfile = {
         id: profile.id,
@@ -179,6 +200,12 @@ export function toPersistedAiSettingsFile(
       };
     }),
   };
+
+  if (normalizedSettings.actionOrder?.length) {
+    persisted.actionOrder = normalizedSettings.actionOrder;
+  }
+
+  return persisted;
 }
 
 export function resolveAiProviderProfile(
@@ -384,7 +411,7 @@ export function normalizeAiProviderModel(input: unknown): AiProviderModelSetting
 export function normalizeModelCapabilities(input: unknown): AiProviderModelCapability[] {
   const capabilities = Array.isArray(input)
     ? input.filter((capability): capability is AiProviderModelCapability =>
-        capability === "text" || capability === "vision",
+        capability === "text" || capability === "vision" || capability === "image-generation",
       )
     : [];
 
@@ -395,8 +422,34 @@ function createDefaultAiProviderSettings(): AiProviderSettingsCollection {
   return {
     activeProfileId: defaultAiProviderProfile.id,
     actionPreferences: {},
+    recognitionSourcePreferences: {},
     profiles: [{ ...defaultAiProviderProfile }],
   };
+}
+
+export function normalizeAiSettingsActionOrder(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const used = new Set<string>();
+  const order: string[] = [];
+
+  for (const value of input) {
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    const id = value.trim();
+    if (!id || used.has(id)) {
+      continue;
+    }
+
+    used.add(id);
+    order.push(id);
+  }
+
+  return order.slice(0, 40);
 }
 
 function normalizeActionPreferences(

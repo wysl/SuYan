@@ -46,11 +46,13 @@ if (startupFiles.length !== expected.length || startupFiles.some((name, i) => na
   fail("startup-assets mismatch: " + startupFiles.join(", "));
 }
 
-for (const name of ["library", "logs", "userData"]) {
+for (const name of ["library", "userData"]) {
   if (fs.existsSync(path.join(releaseRoot, name))) {
     fail("unexpected runtime residue folder: " + name);
   }
 }
+
+// win-unpacked/data 与 logs 是正式运行时目录，开发打包后应保留，不视为夹带用户库。
 
 function walk(dir) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

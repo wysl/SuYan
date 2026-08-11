@@ -17,6 +17,10 @@ let compressAbortController = new AbortController();
 
 export function cancelCompress(): void {
   compressAbortController.abort();
+  // 若视频压缩运行在 Rust Sidecar，同步通知其取消 ffmpeg。
+  void import("../runtime/rustFileOps")
+    .then(({ cancelVideoViaRust }) => cancelVideoViaRust())
+    .catch(() => undefined);
 }
 
 export function resetCompressCancellation(): void {

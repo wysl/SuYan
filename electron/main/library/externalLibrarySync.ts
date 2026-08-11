@@ -9,6 +9,7 @@ import type {
 import { warmLibraryItemThumbnails } from "./imageThumbnails";
 import { updateLibraryFile } from "./libraryStore";
 import { createExternalLibraryItem, isSupportedExternalMediaPath } from "./externalLibraryScanner";
+import { mapWithConcurrency } from "./asyncMap";
 
 export type ExternalLibraryChangeSet = {
   addedOrChangedPaths: readonly string[];
@@ -198,7 +199,7 @@ export async function reconcileExternalLibraryEvents(
     await mapWithConcurrency(
       newFiles.filter((file) => !renamedFilePaths.has(file.absolutePath)),
       4,
-      (file) => createExternalLibraryItem(root, file.absolutePath, now).catch(() => null),
+      (file) => createExternalLibraryItem(root, file.absolutePath, now, file).catch(() => null),
     )
   ).filter((item): item is LibraryItem => item !== null);
 
@@ -289,24 +290,4 @@ function createFileSignature(
   return typeof size === "number" && typeof mtimeMs === "number"
     ? `${path.extname(filePath).toLowerCase()}:${size}:${Math.round(mtimeMs)}`
     : null;
-}
-
-async function mapWithConcurrency<T, R>(
-  values: readonly T[],
-  concurrency: number,
-  mapper: (value: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(values.length);
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (nextIndex < values.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await mapper(values[index]);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, () => worker()));
-  return results;
 }

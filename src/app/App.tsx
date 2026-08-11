@@ -1,4 +1,4 @@
-import { lazy, Profiler, Suspense, type ProfilerOnRenderCallback } from "react";
+import { lazy, Profiler, Suspense, useEffect, type ProfilerOnRenderCallback } from "react";
 
 const LibraryView = lazy(() => import("@/features/library").then((module) => ({ default: module.LibraryView })));
 
@@ -32,12 +32,68 @@ export function App() {
   );
 }
 
+/**
+ * Keep the static HTML bootstrap shell visible while the lazy LibraryView chunk
+ * downloads/parses. Replacing #root with a minimal React fallback caused a
+ * visible white/blank flash between the HTML shell and the startup gallery.
+ */
 function AppLoadingFallback() {
+  useEffect(() => {
+    try {
+      window.suyanApi.logStartupEvent("app:chunk-suspense", {
+        sinceStartMs: Date.now() - profilerStartMs,
+      });
+    } catch {
+    }
+  }, []);
+
   return (
-    <main className="grid h-screen place-items-center bg-background text-foreground">
-      <div className="rounded-lg border border-border bg-panel px-5 py-4 text-sm text-muted shadow-elevated">
-        正在加载素言...
+    <main className="app-loading-shell" aria-label="正在加载素言">
+      <div className="app-loading-magic" aria-hidden="true">
+        <span className="app-loading-particle" />
+        <span className="app-loading-particle" />
+        <span className="app-loading-particle" />
+        <span className="app-loading-particle" />
+        <span className="app-loading-particle" />
+        <span className="app-loading-particle" />
+        <span className="app-loading-particle" />
+        <span className="app-loading-particle" />
       </div>
+      <div className="app-loading-titlebar" />
+      <section className="app-loading-stage">
+        <div className="app-loading-panel">
+          <div className="app-loading-brand">
+            <span className="app-loading-mark" aria-hidden="true">
+              素
+            </span>
+            <div>
+              <strong>素言</strong>
+              <p className="app-loading-copy">正在加载素材库...</p>
+            </div>
+          </div>
+          <div className="app-loading-progress" aria-hidden="true" />
+          <div className="app-loading-skeleton" aria-hidden="true">
+            <div className="app-loading-thumb" />
+            <div className="app-loading-lines">
+              <div className="app-loading-line" />
+              <div className="app-loading-line" />
+              <div className="app-loading-line" />
+            </div>
+          </div>
+        </div>
+        <div className="app-loading-transform" aria-hidden="true">
+          <div className="app-loading-prompt-card">
+            <span className="app-loading-prompt-chip">柔和自然光</span>
+            <span className="app-loading-prompt-chip">产品构图</span>
+            <span className="app-loading-prompt-chip">细腻材质</span>
+            <span className="app-loading-prompt-chip">背景层次</span>
+          </div>
+          <div className="app-loading-generate-flow" />
+          <div className="app-loading-image-preview">
+            <span />
+          </div>
+        </div>
+      </section>
     </main>
   );
 }

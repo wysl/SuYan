@@ -169,6 +169,7 @@ export function VideoDetailSection({
         {isUrlInputOpen ? (
           <div className="flex items-center gap-2 rounded-lg border border-border bg-background p-1.5">
             <input
+              aria-label="媒体链接（http/https）"
               className="min-w-0 flex-1 bg-transparent px-2 text-xs text-foreground outline-none placeholder:text-muted"
               disabled={busy}
                placeholder="粘贴媒体链接（http/https）"

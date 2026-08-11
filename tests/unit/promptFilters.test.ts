@@ -10,7 +10,8 @@ import {
 } from "@/features/library/utils/promptFilters";
 
 type PromptItemFixture = LibraryItem & {
-  category?: string;
+  category?: string | null;
+  categoryId?: string | null;
   hot?: number;
 };
 
@@ -29,6 +30,16 @@ function makeItem(patch: Partial<PromptItemFixture>): PromptItemFixture {
 }
 
 describe("promptFilters", () => {
+  it("does not expose sentence clauses as card tags", () => {
+    const card = toPromptCardData(
+      makeItem({
+        tags: ["地平线上有一位长发侠客剪影", "白色抹胸长裙", "自然光斑"],
+      }),
+    );
+
+    expect(card.tags).toEqual(["白色抹胸长裙", "自然光斑"]);
+  });
+
   it("carries an external missing state to the rendered card model", () => {
     const card = toPromptCardData(
       makeItem({
@@ -254,11 +265,42 @@ describe("promptFilters", () => {
     expect(getPromptCategories([card])).toEqual(["角色"]);
   });
 
+  it("keeps explicitly cleared category as 未分类 and strips taxonomy names from tags", () => {
+    const card = toPromptCardData(
+      makeItem({
+        category: null,
+        categoryId: null,
+        tags: ["电商产品摄影", "广告商业摄影", "木质托盘"],
+      }),
+    );
+
+    expect(card.category).toBe("未分类");
+    expect(card.categoryId).toBeNull();
+    // Formal/legacy category names must not remain as tags — keep only fine-grained labels.
+    expect(card.tags).toEqual(["木质托盘"]);
+  });
+
   it("uses stored category and removes duplicated category from tags", () => {
-    const card = toPromptCardData(makeItem({ category: "人像", tags: ["人像", "柔光"] }));
+    // 「柔光」已升格为分类维度「光线条件」，标签层用光斑这类光学产物来验证。
+    const card = toPromptCardData(makeItem({ category: "人像", tags: ["人像", "自然光斑"] }));
 
     expect(card.category).toBe("人像");
-    expect(card.tags).toEqual(["柔光"]);
+    expect(card.tags).toEqual(["自然光斑"]);
+  });
+
+  it("strips formal photography category names even when not the item category", () => {
+    const card = toPromptCardData(
+      makeItem({
+        category: "城市风光",
+        tags: ["城市风光", "航拍摄影", "青绿色调", "低角度俯拍"],
+      }),
+    );
+
+    expect(card.category).toBe("城市风光");
+    // Formal taxonomy names must not remain as tags.
+    expect(card.tags).not.toContain("城市风光");
+    expect(card.tags).not.toContain("航拍摄影");
+    expect(card.tags).toEqual(expect.arrayContaining(["青绿色调", "低角度俯拍"]));
   });
 
   it("resolves real model labels from model-like categories when source labels are generic", () => {

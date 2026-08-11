@@ -1,7 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AiAnalyzePromptPayload,
+  AiImageGenerationPayload,
   AiOptimizePromptPayload,
+  AiSummarizePromptTitlePayload,
   AiReverseImagePromptPayload,
   AiTranslatePromptPayload,
   SaveAiProviderSettingsPayload,
@@ -16,6 +18,7 @@ import type { ProxySettings } from "../../src/features/library/types/proxy";
 import type {
   CompressProgress,
   ExternalLibrarySyncData,
+  FfmpegInstallProgress,
   ImportProgress,
   IpcResult,
   ModuleInstallProgress,
@@ -32,6 +35,7 @@ const suyanApi: SuyanApi = {
   notifyStartupScreenReady: () => ipcRenderer.send(IpcChannelName.AppStartupScreenReady),
   logStartupEvent: (event, details = {}) => ipcRenderer.send(IpcChannelName.AppStartupLog, event, details),
   openExternalUrl: (url: string) => invoke(IpcChannelName.AppOpenExternalUrl, url),
+  openDataDirectory: () => invoke(IpcChannelName.AppOpenDataDirectory),
   checkForUpdates: () => invoke(IpcChannelName.AppUpdateCheck),
   readAccelerationStatus: () => invoke(IpcChannelName.AppAccelerationStatusRead),
   saveAccelerationSettings: (settings) => invoke(IpcChannelName.AppAccelerationSettingsSave, settings),
@@ -41,6 +45,7 @@ const suyanApi: SuyanApi = {
   saveLibraryViewSettings: (settings: LibraryViewSettings) =>
     invoke(IpcChannelName.LibraryViewSettingsSave, settings),
   listLibraryRoots: () => invoke(IpcChannelName.LibraryRootsList),
+  reorderLibraryRoots: (rootIds: string[]) => invoke(IpcChannelName.LibraryRootOrderSet, rootIds),
   chooseAndScanLibraryRoot: () => invoke(IpcChannelName.LibraryRootChooseAndScan),
   chooseAndImportLibraryDirectory: () => invoke(IpcChannelName.LibraryDirectoryChooseAndImport),
   scanLibraryRoot: (rootId: string) => invoke(IpcChannelName.LibraryRootScan, rootId),
@@ -62,6 +67,7 @@ const suyanApi: SuyanApi = {
   resetStartupGallery: () => invoke(IpcChannelName.StartupGalleryReset),
   importImageFiles: () => invoke(IpcChannelName.ImageImportFiles),
   importImageBuffers: (images) => invoke(IpcChannelName.ImageImportBuffers, images),
+  importGeneratedImages: (payload) => invoke(IpcChannelName.ImageImportGenerated, payload),
   importImageFilesForItem: (itemId: string) => invoke(IpcChannelName.ImageImportFilesForItem, itemId),
   onImportProgress: (callback) => {
     const handler = (_event: unknown, progress: unknown) => callback(progress as ImportProgress);
@@ -75,10 +81,17 @@ const suyanApi: SuyanApi = {
   downloadRemoteMaterial: (itemId: string) => invoke(IpcChannelName.ImageRemoteMaterialDownload, itemId),
   copyImage: (imageFileName: string) => invoke(IpcChannelName.ImageCopy, imageFileName),
   exportImage: (imageFileName: string) => invoke(IpcChannelName.ImageExport, imageFileName),
+  getImageFileSize: (imageFileName: string) => invoke(IpcChannelName.ImageGetFileSize, imageFileName),
   resolveImageThumbnail: (imageFileName: string) => invoke(IpcChannelName.ImageThumbnailResolve, imageFileName),
   resolveImageThumbnails: (imageFileNames: string[]) =>
     invoke(IpcChannelName.ImageThumbnailsResolve, imageFileNames),
   writeClipboardText: (text: string) => invoke(IpcChannelName.ClipboardWriteText, text),
+  readClipboardText: () => invoke(IpcChannelName.ClipboardReadText),
+  readClipboardImage: () => invoke(IpcChannelName.ClipboardReadImage),
+  saveCanvasReferenceImage: (dataUrl: string, sourceFileName?: string, previousFileName?: string) =>
+    invoke(IpcChannelName.CanvasReferenceImageSave, dataUrl, sourceFileName, previousFileName),
+  readCanvasReferenceImage: (fileName: string) => invoke(IpcChannelName.CanvasReferenceImageRead, fileName),
+  removeCanvasReferenceImage: (fileName: string) => invoke(IpcChannelName.CanvasReferenceImageRemove, fileName),
   importPromptLexiconImage: () => invoke(IpcChannelName.LexiconImageImport),
   exportPromptLexicon: (kind: PromptLexiconKind, items: PromptLexiconEntry[]) =>
     invoke(IpcChannelName.LexiconExport, kind, items),
@@ -98,13 +111,25 @@ const suyanApi: SuyanApi = {
   readAiSettings: () => invoke(IpcChannelName.AiSettingsRead),
   saveAiSettings: (settings: SaveAiProviderSettingsPayload) => invoke(IpcChannelName.AiSettingsSave, settings),
   copyAiApiKey: (profileId: string) => invoke(IpcChannelName.AiApiKeyCopy, profileId),
+  readAiApiKey: (profileId: string) => invoke(IpcChannelName.AiApiKeyRead, profileId),
   testAiSettings: (settings: SaveAiProviderSettingsPayload) => invoke(IpcChannelName.AiSettingsTest, settings),
   listAiModels: (settings: SaveAiProviderSettingsPayload) => invoke(IpcChannelName.AiModelsList, settings),
   analyzePromptWithAi: (payload: AiAnalyzePromptPayload) => invoke(IpcChannelName.AiAnalyzePrompt, payload),
   optimizePromptWithAi: (payload: AiOptimizePromptPayload) => invoke(IpcChannelName.AiOptimizePrompt, payload),
+  summarizePromptTitleWithAi: (payload: AiSummarizePromptTitlePayload) =>
+    invoke(IpcChannelName.AiSummarizePromptTitle, payload),
   translatePromptWithAi: (payload: AiTranslatePromptPayload) => invoke(IpcChannelName.AiTranslatePrompt, payload),
   reverseImagePromptWithAi: (payload: AiReverseImagePromptPayload) =>
     invoke(IpcChannelName.AiReverseImagePrompt, payload),
+  generateImagesWithAi: (payload: AiImageGenerationPayload) =>
+    invoke(IpcChannelName.AiGenerateImages, payload),
+  prepareDoubaoWebCanvas: () => invoke(IpcChannelName.DoubaoWebCanvasPrepare),
+  refreshDoubaoWebCanvasAuth: () => invoke(IpcChannelName.DoubaoWebCanvasAuth),
+  setDoubaoWebCanvasBounds: (bounds) => invoke(IpcChannelName.DoubaoWebCanvasBounds, bounds),
+  showDoubaoWebCanvas: () => invoke(IpcChannelName.DoubaoWebCanvasShow),
+  hideDoubaoWebCanvas: () => invoke(IpcChannelName.DoubaoWebCanvasHide),
+  generateImagesWithDoubaoWeb: (payload: AiImageGenerationPayload) =>
+    invoke(IpcChannelName.DoubaoWebCanvasGenerate, payload),
   readProxySettings: () => invoke(IpcChannelName.ProxySettingsRead),
   saveProxySettings: (settings: ProxySettings) => invoke(IpcChannelName.ProxySettingsSave, settings),
   testProxySettings: (settings: ProxySettings) => invoke(IpcChannelName.ProxySettingsTest, settings),
@@ -131,6 +156,13 @@ const suyanApi: SuyanApi = {
     const handler = (_event: unknown, progress: unknown) => callback(progress as ModuleInstallProgress);
     ipcRenderer.on(IpcChannelName.ModuleInstallProgress, handler);
     return () => ipcRenderer.removeListener(IpcChannelName.ModuleInstallProgress, handler);
+  },
+  installFfmpegComponentFromDownload: () => invoke(IpcChannelName.ComponentFfmpegInstallDownload),
+  installFfmpegComponentFromLocal: () => invoke(IpcChannelName.ComponentFfmpegInstallLocal),
+  onFfmpegInstallProgress: (callback) => {
+    const handler = (_event: unknown, progress: unknown) => callback(progress as FfmpegInstallProgress);
+    ipcRenderer.on(IpcChannelName.ComponentFfmpegInstallProgress, handler);
+    return () => ipcRenderer.removeListener(IpcChannelName.ComponentFfmpegInstallProgress, handler);
   },
   minimizeWindow: () => invoke(IpcChannelName.WindowMinimize),
   toggleMaximizeWindow: () => invoke(IpcChannelName.WindowMaximizeToggle),

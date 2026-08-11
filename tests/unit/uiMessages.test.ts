@@ -11,4 +11,10 @@ describe("uiMessages", () => {
   it("uses stable mapped messages for non-dynamic errors", () => {
     expect(getUiErrorMessage("AI_SETTINGS_INCOMPLETE", "raw message")).toBe("请先填写接口地址、模型和 API Key。");
   });
+
+  it("maps missing FFmpeg runtime to a stable install hint", () => {
+    expect(getUiErrorMessage("FFMPEG_BINARY_NOT_FOUND", "raw")).toBe(
+      "需要视频运行时（FFmpeg），请先安装后再使用视频功能。",
+    );
+  });
 });

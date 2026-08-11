@@ -6,15 +6,16 @@ export type WindowState = {
   y?: number;
 };
 
+/** Minimum resizable window. Fits 1366×768 laptops and short viewports; UI scrolls. */
+export const minimumWindowSize = {
+  width: 900,
+  height: 560,
+};
+
 export const defaultWindowState: WindowState = {
   width: 1280,
   height: 820,
   isMaximized: false,
-};
-
-export const minimumWindowSize = {
-  width: 1040,
-  height: 680,
 };
 
 export function normalizeWindowStateShape(input: unknown): WindowState {

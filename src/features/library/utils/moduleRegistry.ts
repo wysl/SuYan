@@ -40,7 +40,6 @@ export type BuiltinModuleDefinition = {
   defaultInstalled: boolean;
   defaultEnabled: boolean;
   dependencies: readonly BuiltinModuleId[];
-  packageDependencies: readonly string[];
   capabilities: readonly BuiltinModuleCapability[];
 };
 
@@ -62,7 +61,6 @@ export const builtinModuleDefinitions: readonly BuiltinModuleDefinition[] = [
     defaultInstalled: true,
     defaultEnabled: true,
     dependencies: [],
-    packageDependencies: [],
     capabilities: ["library-core"],
   },
   {
@@ -74,31 +72,28 @@ export const builtinModuleDefinitions: readonly BuiltinModuleDefinition[] = [
     defaultInstalled: true,
     defaultEnabled: true,
     dependencies: ["core-library"],
-    packageDependencies: [],
     capabilities: ["image-prompt-card", "image-import", "prompt-edit", "prompt-copy"],
   },
   {
     id: "video-runtime",
     label: "视频运行时",
-    description: "为视频提示词与视频压缩提供 ffmpeg 运行能力。",
+    description: "为视频提示词与视频压缩提供 ffmpeg 运行能力。首次使用时按需下载安装。",
     category: "runtime",
     required: false,
-    defaultInstalled: true,
-    defaultEnabled: true,
+    defaultInstalled: false,
+    defaultEnabled: false,
     dependencies: ["core-library"],
-    packageDependencies: ["ffmpeg-static"],
     capabilities: ["video-runtime"],
   },
   {
     id: "video-prompt",
     label: "视频提示词卡片",
-    description: "提供视频提示词卡片、关键帧抽取与视频参考图管理能力。",
+    description: "提供视频提示词卡片能力。关键帧抽取与参考图管理需要视频运行时（FFmpeg）。",
     category: "prompt",
     required: false,
     defaultInstalled: true,
     defaultEnabled: true,
-    dependencies: ["core-library", "video-runtime"],
-    packageDependencies: [],
+    dependencies: ["core-library"],
     capabilities: ["video-prompt-card", "video-frame-extraction", "video-reference-images"],
   },
   {
@@ -110,7 +105,6 @@ export const builtinModuleDefinitions: readonly BuiltinModuleDefinition[] = [
     defaultInstalled: true,
     defaultEnabled: true,
     dependencies: ["core-library"],
-    packageDependencies: ["sharp"],
     capabilities: ["image-runtime"],
   },
   {
@@ -122,7 +116,6 @@ export const builtinModuleDefinitions: readonly BuiltinModuleDefinition[] = [
     defaultInstalled: true,
     defaultEnabled: true,
     dependencies: ["core-library", "image-runtime"],
-    packageDependencies: [],
     capabilities: ["image-compression"],
   },
   {
@@ -134,7 +127,6 @@ export const builtinModuleDefinitions: readonly BuiltinModuleDefinition[] = [
     defaultInstalled: true,
     defaultEnabled: true,
     dependencies: ["core-library", "video-runtime"],
-    packageDependencies: [],
     capabilities: ["video-compression"],
   },
   {
@@ -146,7 +138,6 @@ export const builtinModuleDefinitions: readonly BuiltinModuleDefinition[] = [
     defaultInstalled: true,
     defaultEnabled: true,
     dependencies: ["core-library"],
-    packageDependencies: [],
     capabilities: ["deduplicate-scan"],
   },
 ];
@@ -165,8 +156,23 @@ export function createDefaultBuiltinModuleState(): BuiltinModuleState {
   ) as BuiltinModuleState;
 }
 
-export function resolveBuiltinModuleState(_patch: BuiltinModuleStatePatch = {}): BuiltinModuleState {
-  return createDefaultBuiltinModuleState();
+export function resolveBuiltinModuleState(patch: BuiltinModuleStatePatch = {}): BuiltinModuleState {
+  const base = createDefaultBuiltinModuleState();
+
+  for (const definition of builtinModuleDefinitions) {
+    const entry = patch[definition.id];
+    if (!entry) {
+      continue;
+    }
+
+    const current = base[definition.id];
+    base[definition.id] = {
+      installed: definition.required ? true : entry.installed ?? current.installed,
+      enabled: definition.required ? true : entry.enabled ?? current.enabled,
+    };
+  }
+
+  return base;
 }
 
 export function isBuiltinModuleState(input: unknown): input is BuiltinModuleState {

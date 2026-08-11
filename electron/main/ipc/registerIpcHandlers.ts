@@ -1,7 +1,10 @@
 import { BrowserWindow, clipboard, dialog, ipcMain } from "electron";
+import fs from "node:fs/promises";
 import type {
   AiAnalyzePromptPayload,
+  AiImageGenerationPayload,
   AiOptimizePromptPayload,
+  AiSummarizePromptTitlePayload,
   AiReverseImagePromptPayload,
   AiTranslatePromptPayload,
   SaveAiProviderSettingsPayload,
@@ -15,6 +18,7 @@ import type {
 import type { ProxySettings } from "../../../src/features/library/types/proxy";
 import { IpcChannelName, ipcChannels } from "../../shared/ipcChannels";
 import { openExternalUrl } from "../app/externalUrl";
+import { openAppDataDirectory } from "../app/dataDirectory";
 import { checkForAppUpdates } from "../app/updateChecker";
 import {
   readAppAccelerationStatus,
@@ -27,15 +31,30 @@ import {
 } from "../ai/aiSettingsStore";
 import {
   analyzePromptWithRemoteAi,
+  generateImagesWithRemoteAi,
   listAiProviderModels,
   optimizePromptWithRemoteAi,
   reverseImagePromptWithRemoteAi,
+  summarizePromptTitleWithRemoteAi,
   testAiProviderSettings,
   translatePromptWithRemoteAi,
 } from "../ai/promptAnalysisService";
+import {
+  generateImagesWithDoubaoWeb,
+  hideDoubaoWebCanvas,
+  prepareDoubaoWebCanvas,
+  refreshDoubaoWebCanvasAuth,
+  setDoubaoWebCanvasBounds,
+  showDoubaoWebCanvas,
+} from "../ai/doubaoWebCanvas";
 import { importClipboardImage } from "../clipboard/readClipboardImage";
 import { exportLibraryZip, importLibraryZip } from "../library/archiveStore";
 import { chooseAndImportManagedDirectory } from "../library/directoryImport";
+import {
+  readCanvasReferenceImage,
+  removeCanvasReferenceImage,
+  saveCanvasReferenceImage,
+} from "../library/canvasReferenceImages";
 import {
   cancelImport,
   copyImageToClipboard,
@@ -45,6 +64,8 @@ import {
   importImageFilesForItem,
   importImageFiles,
   importImageBuffers,
+  importGeneratedImages,
+  type GeneratedImageImportPayload,
   type ImportImageBufferInput,
   importVideoReferenceImagesForItem,
   deleteVideoReferenceImageForItem,
@@ -58,9 +79,14 @@ import {
   importPromptLexicon,
   importPromptLexiconImage,
 } from "../library/lexiconFiles";
-import { getImageThumbnailPath } from "../library/libraryPaths";
-import { readLibraryFile, saveLibraryFileFromRenderer } from "../library/libraryStore";
-import { chooseAndAddLibraryRoot, readLibraryRoots } from "../library/libraryRoots";
+import { getImageThumbnailPath, getImagePath } from "../library/libraryPaths";
+import { resolveMediaAbsolutePath } from "../library/mediaPathResolver";
+import {
+  findLibraryItemByImageFileName,
+  readLibraryFile,
+  saveLibraryFileFromRenderer,
+} from "../library/libraryStore";
+import { chooseAndAddLibraryRoot, readLibraryRoots, reorderLibraryRoots } from "../library/libraryRoots";
 import { scanExternalLibraryRoot } from "../library/externalLibraryScanner";
 import {
   detachExternalLibraryRoot,
@@ -105,6 +131,10 @@ import {
   installModuleFromGithub,
   installModuleFromLocal,
 } from "../modules/moduleInstaller";
+import {
+  installFfmpegComponentFromDownload,
+  installFfmpegComponentFromLocal,
+} from "../modules/ffmpegComponentInstall";
 import { AppError, toErrorPayload } from "./errors";
 
 type IpcResult<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
@@ -122,6 +152,9 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle(ipcChannels.appOpenExternalUrl, (_event, url: string) =>
     handleResult("app:open-external-url", () => openExternalUrl(url)),
+  );
+  ipcMain.handle(ipcChannels.appOpenDataDirectory, () =>
+    handleResult("app:open-data-directory", () => openAppDataDirectory()),
   );
   ipcMain.handle(ipcChannels.appUpdateCheck, () =>
     handleResult("app:update-check", () => checkForAppUpdates()),
@@ -150,6 +183,15 @@ export function registerIpcHandlers(): void {
     handleResult("library:view-settings-save", () => writeLibraryViewSettings(settings)),
   );
   ipcMain.handle(ipcChannels.libraryRootsList, () => handleResult("library:roots-list", () => readLibraryRoots()));
+  ipcMain.handle(ipcChannels.libraryRootOrderSet, (_event, rootIds: unknown) =>
+    handleResult("library:root-order-set", () => {
+      if (!Array.isArray(rootIds) || !rootIds.every((rootId) => typeof rootId === "string")) {
+        throw new Error("素材目录顺序数据无效。");
+      }
+
+      return reorderLibraryRoots(rootIds);
+    }),
+  );
   ipcMain.handle(ipcChannels.libraryDirectoryChooseAndImport, (event) =>
     handleResult("library:directory-choose-and-import", () =>
       chooseAndImportManagedDirectory(
@@ -265,6 +307,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(ipcChannels.imageImportBuffers, (_event, images: unknown) =>
     handleResult("image:import-buffers", () => importImageBuffers(normalizeImportImageBuffers(images))),
   );
+  ipcMain.handle(ipcChannels.imageImportGenerated, (_event, payload: unknown) =>
+    handleResult("image:import-generated", () => importGeneratedImages(normalizeGeneratedImageImportPayload(payload))),
+  );
   ipcMain.handle(ipcChannels.imageImportFilesForItem, (event, itemId: string) =>
     handleResult("image:import-files-for-item", () =>
       importImageFilesForItem(itemId, BrowserWindow.fromWebContents(event.sender)),
@@ -316,11 +361,45 @@ export function registerIpcHandlers(): void {
       return { sources };
     }),
   );
+  ipcMain.handle(ipcChannels.imageGetFileSize, (_event, imageFileName: string) =>
+    handleResult("image:get-file-size", async () => {
+      const item = await findLibraryItemByImageFileName(imageFileName);
+      const imagePath = item ? await resolveMediaAbsolutePath(item) : getImagePath(imageFileName);
+      const stats = await fs.stat(imagePath).catch(() => null);
+      return { size: stats?.size ?? 0 };
+    }),
+  );
   ipcMain.handle(ipcChannels.clipboardWriteText, (_event, text: string) =>
     handleResult("clipboard:write-text", async () => {
       clipboard.writeText(text);
       return { copied: true };
     }),
+  );
+  ipcMain.handle(ipcChannels.clipboardReadText, () =>
+    handleResult("clipboard:read-text", async () => ({ text: clipboard.readText() })),
+  );
+  ipcMain.handle(ipcChannels.clipboardReadImage, () =>
+    handleResult("clipboard:read-image", async () => {
+      const image = clipboard.readImage();
+      if (image.isEmpty()) {
+        throw new AppError("CLIPBOARD_EMPTY", "剪切板中没有可用图片。");
+      }
+      const dataUrl = image.toDataURL();
+      return { dataUrl, width: image.getSize().width, height: image.getSize().height };
+    }),
+  );
+  ipcMain.handle(
+    ipcChannels.canvasReferenceImageSave,
+    (_event, dataUrl: string, sourceFileName?: string, previousFileName?: string) =>
+      handleResult("canvas:reference-image-save", () =>
+        saveCanvasReferenceImage(dataUrl, sourceFileName, previousFileName),
+      ),
+  );
+  ipcMain.handle(ipcChannels.canvasReferenceImageRead, (_event, fileName: string) =>
+    handleResult("canvas:reference-image-read", () => readCanvasReferenceImage(fileName)),
+  );
+  ipcMain.handle(ipcChannels.canvasReferenceImageRemove, (_event, fileName: string) =>
+    handleResult("canvas:reference-image-remove", () => removeCanvasReferenceImage(fileName)),
   );
   ipcMain.handle(ipcChannels.lexiconImageImport, () =>
     handleResult("lexicon:image-import", () => importPromptLexiconImage()),
@@ -371,6 +450,17 @@ export function registerIpcHandlers(): void {
       return { copied: true };
     }),
   );
+  ipcMain.handle(ipcChannels.aiApiKeyRead, (_event, profileId: string) =>
+    handleResult("ai:api-key-read", async () => {
+      const profile = await readPrivateAiProviderProfileById(profileId);
+
+      if (!profile.apiKey) {
+        throw new AppError("AI_SETTINGS_INCOMPLETE", "\u8fd9\u4e2a API \u8fd8\u6ca1\u6709\u53ef\u5c55\u793a\u7684\u5bc6\u94a5\u3002");
+      }
+
+      return { apiKey: profile.apiKey };
+    }),
+  );
   ipcMain.handle(ipcChannels.aiSettingsTest, (_event, settings: SaveAiProviderSettingsPayload) =>
     handleResult("ai:settings-test", () => testAiProviderSettings(settings)),
   );
@@ -383,11 +473,37 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(ipcChannels.aiOptimizePrompt, (_event, payload: AiOptimizePromptPayload) =>
     handleResult("ai:optimize-prompt", () => optimizePromptWithRemoteAi(payload)),
   );
+  ipcMain.handle(ipcChannels.aiSummarizePromptTitle, (_event, payload: AiSummarizePromptTitlePayload) =>
+    handleResult("ai:summarize-prompt-title", () => summarizePromptTitleWithRemoteAi(payload)),
+  );
   ipcMain.handle(ipcChannels.aiTranslatePrompt, (_event, payload: AiTranslatePromptPayload) =>
     handleResult("ai:translate-prompt", () => translatePromptWithRemoteAi(payload)),
   );
   ipcMain.handle(ipcChannels.aiReverseImagePrompt, (_event, payload: AiReverseImagePromptPayload) =>
     handleResult("ai:reverse-image-prompt", () => reverseImagePromptWithRemoteAi(payload)),
+  );
+  ipcMain.handle(ipcChannels.aiGenerateImages, (_event, payload: AiImageGenerationPayload) =>
+    handleResult("ai:generate-images", () => generateImagesWithRemoteAi(payload)),
+  );
+  ipcMain.handle(ipcChannels.doubaoWebCanvasPrepare, (event) =>
+    handleResult("doubao-web:prepare", () => prepareDoubaoWebCanvas(requireOwnerWindow(event))),
+  );
+  ipcMain.handle(ipcChannels.doubaoWebCanvasAuth, (event) =>
+    handleResult("doubao-web:auth", () => refreshDoubaoWebCanvasAuth(requireOwnerWindow(event))),
+  );
+  ipcMain.handle(ipcChannels.doubaoWebCanvasBounds, (event, bounds: unknown) =>
+    handleResult("doubao-web:bounds", () =>
+      Promise.resolve(setDoubaoWebCanvasBounds(requireOwnerWindow(event), normalizeDoubaoWebCanvasBounds(bounds))),
+    ),
+  );
+  ipcMain.handle(ipcChannels.doubaoWebCanvasShow, (event) =>
+    handleResult("doubao-web:show", () => Promise.resolve(showDoubaoWebCanvas(requireOwnerWindow(event)))),
+  );
+  ipcMain.handle(ipcChannels.doubaoWebCanvasHide, (event) =>
+    handleResult("doubao-web:hide", () => Promise.resolve(hideDoubaoWebCanvas(requireOwnerWindow(event)))),
+  );
+  ipcMain.handle(ipcChannels.doubaoWebCanvasGenerate, (event, payload: AiImageGenerationPayload) =>
+    handleResult("doubao-web:generate", () => generateImagesWithDoubaoWeb(requireOwnerWindow(event), payload)),
   );
   ipcMain.handle(ipcChannels.proxySettingsRead, () =>
     handleResult("proxy:settings-read", () => readProxySettings()),
@@ -446,6 +562,22 @@ export function registerIpcHandlers(): void {
       ),
   );
 
+  ipcMain.handle(ipcChannels.componentFfmpegInstallDownload, (event) =>
+    handleResult("component:ffmpeg-install-download", () =>
+      installFfmpegComponentFromDownload((progress) => {
+        event.sender.send(IpcChannelName.ComponentFfmpegInstallProgress, progress);
+      }),
+    ),
+  );
+
+  ipcMain.handle(ipcChannels.componentFfmpegInstallLocal, (event) =>
+    handleResult("component:ffmpeg-install-local", () =>
+      installFfmpegComponentFromLocal((progress) => {
+        event.sender.send(IpcChannelName.ComponentFfmpegInstallProgress, progress);
+      }),
+    ),
+  );
+
   ipcMain.handle(ipcChannels.logExport, (_event, options?: unknown) =>
     handleResult("log:export", () => exportLogs(normalizeLogExportOptions(options))),
   );
@@ -497,6 +629,33 @@ async function handleResult<T>(channel: string, operation: () => Promise<T>): Pr
   }
 }
 
+function requireOwnerWindow(event: Electron.IpcMainInvokeEvent): BrowserWindow {
+  const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+  if (!ownerWindow || ownerWindow.isDestroyed()) {
+    throw new AppError("DOUBAO_OWNER_WINDOW_MISSING", "找不到当前画布窗口，请重新打开画布。");
+  }
+  return ownerWindow;
+}
+
+function normalizeDoubaoWebCanvasBounds(input: unknown): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new AppError("DOUBAO_BOUNDS_INVALID", "画布区域尺寸无效。");
+  }
+
+  const record = input as Record<string, unknown>;
+  const values = [record.x, record.y, record.width, record.height].map(Number);
+  if (!values.every(Number.isFinite) || values[2] <= 0 || values[3] <= 0) {
+    throw new AppError("DOUBAO_BOUNDS_INVALID", "画布区域尺寸无效。");
+  }
+
+  return { x: values[0], y: values[1], width: values[2], height: values[3] };
+}
+
 function logSlowIpc(channel: string, startedAt: number, ok: boolean): void {
   const durationMs = Date.now() - startedAt;
 
@@ -509,6 +668,42 @@ function logSlowIpc(channel: string, startedAt: number, ok: boolean): void {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeGeneratedImageImportPayload(input: unknown): GeneratedImageImportPayload {
+  const record = isPlainRecord(input) ? input : {};
+  const rawImages = Array.isArray(record.images) ? record.images : [];
+  const metadata = isPlainRecord(record.metadata) ? record.metadata : {};
+
+  return {
+    images: rawImages
+      .filter(isPlainRecord)
+      .map((image) => ({
+        dataUrl: typeof image.dataUrl === "string" ? image.dataUrl : "",
+        revisedPrompt: typeof image.revisedPrompt === "string" ? image.revisedPrompt : null,
+      }))
+      .filter((image) => image.dataUrl.trim().length > 0),
+    metadata: {
+      title: typeof metadata.title === "string" ? metadata.title : "",
+      prompt: typeof metadata.prompt === "string" ? metadata.prompt : "",
+      negativePrompt: typeof metadata.negativePrompt === "string" ? metadata.negativePrompt : "",
+      generationMethod: typeof metadata.generationMethod === "string" ? metadata.generationMethod : "",
+      // 血缘继承字段：仅透传合法形状，undefined 表示「不继承、按新组处理」。
+      tags: Array.isArray(metadata.tags)
+        ? metadata.tags.filter((tag): tag is string => typeof tag === "string")
+        : undefined,
+      category: typeof metadata.category === "string" ? metadata.category : undefined,
+      categoryId: typeof metadata.categoryId === "string" ? metadata.categoryId : undefined,
+      genreIds: Array.isArray(metadata.genreIds)
+        ? metadata.genreIds.filter((id): id is string => typeof id === "string")
+        : undefined,
+      categoryConfidence: typeof metadata.categoryConfidence === "number" ? metadata.categoryConfidence : undefined,
+      categorySource:
+        metadata.categorySource === "system" || metadata.categorySource === "user" || metadata.categorySource === "ai"
+          ? metadata.categorySource
+          : undefined,
+    },
+  };
 }
 
 function normalizeImportImageBuffers(input: unknown): ImportImageBufferInput[] {
@@ -550,12 +745,9 @@ function toImageProtocolSrc(imageFileName: string, source: "thumbnail" | "origin
 }
 
 async function hydrateRemoteMaterialByImageFileName(imageFileName: string): Promise<string> {
-  const library = await readLibraryFile();
-  const item = library.items.find(
-    (candidate) => candidate.imageFileName === imageFileName && candidate.remoteImageStatus === "pending",
-  );
+  const item = await findLibraryItemByImageFileName(imageFileName);
 
-  if (!item) {
+  if (!item || item.remoteImageStatus !== "pending") {
     return imageFileName;
   }
 
@@ -567,8 +759,7 @@ async function resolveImageThumbnailSource(imageFileName: string): Promise<{
   source: "thumbnail" | "original";
   src: string;
 }> {
-  const library = await readLibraryFile();
-  const item = library.items.find((candidate) => candidate.imageFileName === imageFileName);
+  const item = await findLibraryItemByImageFileName(imageFileName);
   const thumbnailPath = item
     ? await getOrCreateImageThumbnailPathForItem(item)
     : await getOrCreateImageThumbnailPath(imageFileName);

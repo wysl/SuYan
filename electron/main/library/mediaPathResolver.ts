@@ -2,7 +2,7 @@ import type { LibraryItem } from "../../../src/features/library/types/library";
 import { resolveExternalMediaPath } from "../../../src/features/library/utils/externalMediaPath";
 import { AppError } from "../ipc/errors";
 import { getImagePath } from "./libraryPaths";
-import { readLibraryRoots } from "./libraryRoots";
+import { findLibraryRootById } from "./libraryRoots";
 
 /** Resolves a LibraryItem to a readable path without exposing absolute paths to the renderer. */
 export async function resolveMediaAbsolutePath(item: Pick<LibraryItem, "imageFileName" | "mediaStorage">): Promise<string> {
@@ -11,7 +11,7 @@ export async function resolveMediaAbsolutePath(item: Pick<LibraryItem, "imageFil
   }
 
   const storage = item.mediaStorage;
-  const root = (await readLibraryRoots()).find((candidate) => candidate.id === storage.rootId);
+  const root = await findLibraryRootById(storage.rootId);
 
   if (!root) {
     throw new AppError("LIBRARY_ROOT_NOT_FOUND", "素材目录已移除，请重新添加目录。");

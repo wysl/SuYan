@@ -80,6 +80,12 @@ describe("external library persistence serialization", () => {
     await blocked;
 
     const rendererSnapshot = makeLibrary({ ...existing, title: "User edit", updatedAt: new Date().toISOString() });
+    rendererSnapshot.items[0] = {
+      ...rendererSnapshot.items[0],
+      category: "肖像摄影",
+      categoryId: "system:人像摄影:肖像摄影",
+      genreIds: ["system:人像摄影:肖像摄影", "system:人像摄影:婚礼摄影"],
+    };
     const userSave = saveLibraryFileFromRenderer(rendererSnapshot);
     releaseLstat?.();
 
@@ -88,6 +94,10 @@ describe("external library persistence serialization", () => {
 
     expect(saved.items).toHaveLength(2);
     expect(saved.items.find((item) => item.id === existing.id)?.title).toBe("User edit");
+    expect(saved.items.find((item) => item.id === existing.id)?.genreIds).toEqual([
+      "system:人像摄影:肖像摄影",
+      "system:人像摄影:婚礼摄影",
+    ]);
     expect(saved.items.some((item) => item.mediaStorage !== "managed" && item.mediaStorage?.relativePath === "watcher-added.jpg"))
       .toBe(true);
   });

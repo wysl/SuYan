@@ -8,7 +8,7 @@
 
 Keep your artwork and prompts together — find, edit, and take them anywhere
 
-[GitHub](https://github.com/guliacer/SuYan) · [Highlights](#-highlights) · [Features](#-features) · [Quick start](#-quick-start) · [FAQ](#-faq) · [Paid listings](#-paid-listings)
+[GitHub](https://github.com/guliacer/SuYan) · [Highlights](#-highlights) · [Features](#-features) · [Quick start](#-quick-start) · [Changelog](#-changelog) · [FAQ](#-faq) · [Paid listings](#-paid-listings) · [Acknowledgements](#-acknowledgements)
 
 **Forever free · Open source · Report paid resellers via [Issues](https://github.com/guliacer/SuYan/issues)**
 
@@ -192,12 +192,44 @@ Six default splash images ship with the app; replace them with your own for next
 ### Install
 
 1. **Download** the latest installer from [GitHub Releases](https://github.com/guliacer/SuYan/releases) (e.g. `SuYan-Setup-x.y.z.exe`), or portable ZIP then run `素言.exe`  
-   (Free software. Current version is `v0.2.0`; first release `v0.1.0` remains separate and is not overwritten. Report paid resellers via [Issues](https://github.com/guliacer/SuYan/issues).)
+   (Free software. Current version is `v0.2.10`; first release `v0.1.0` remains separate and is not overwritten. Report paid resellers via [Issues](https://github.com/guliacer/SuYan/issues).)
 2. **Install or open** via the wizard, or run the portable build
 3. **Import** images, paste, documents, or share packages from the left sidebar  
    (see [Local import](#local-import) / [Network import](#network-import))
 4. **Organize** in the masonry; open detail to edit prompts; configure AI when ready  
    (see [AI assistant](#-ai-assistant) / [Model settings](#model-settings))
+
+---
+
+## 📝 Changelog
+
+### v0.2.10
+
+**New**
+
+- **Mount folders directly** — attach existing image / video folders on disk to your library without copying the originals again. Thanks to community member [@wysl](https://github.com/wysl) — see [PR #1](https://github.com/guliacer/SuYan/pull/1)
+- **Built-in canvas** — generate images right inside the app once an API is configured
+- **Default recognition source** — choose whether category / tag recognition analyzes the "prompt" or the "artwork" by default, switchable with one star click
+- **More prompt sites** — added site recommendations with matching import adapters
+- **More resource picks** — browse them whenever you need
+
+**Improved**
+
+- **Sharing** — delivers on the "packaged share" intent; share packages are more complete
+- **Data storage** — cleaner rules for where portable and installer builds keep data
+- **Column menus** — fixed menus that were cut off at some resolutions
+- **Drag-to-group** — smarter grouping when dropping multiple images into a prompt group
+- **Native dialogs** — unified the look and behavior of native dialogs across the app
+- **Category / tags** — reworked category and tag features for more accurate, easier-to-understand results
+- **AI feedback** — clearer API error messages and steadier recognition on reasoning models (e.g. GLM, DeepSeek)
+- **Tech stack** — upgraded the stack for smoother future iteration
+- **Layout** — refined many layout details
+
+**Roadmap**
+
+1. The current parameter lexicon isn't good enough yet — it will return after a rework
+2. Evaluating whether plain-text prompt saving is worth keeping
+3. Evaluating ComfyUI integration
 
 ---
 
@@ -310,6 +342,52 @@ Please include when possible:
 3. Repro steps (if any)
 
 ---
+
+## 🙏 Acknowledgements
+
+SuYan uses and thanks the open-source projects below. This section lists direct dependencies, build/test tools, and the core open-source components used by the packaged application; exact versions are tracked in [`package.json`](./package.json) and [`pnpm-lock.yaml`](./pnpm-lock.yaml). Copyright and licensing remain with the respective authors, and each project is used under its own license.
+
+### Feature references and implementation sources
+
+The projects below informed feature, interaction, or low-level technology choices. Unless stated otherwise, SuYan does not copy their source code; the implementation in this repository is authoritative.
+
+| Feature | Reference / project used | Notes |
+| --- | --- | --- |
+| Creative canvas | [CookSleep/gpt_image_playground](https://github.com/CookSleep/gpt_image_playground) | Canvas interaction and layout reference |
+| Image compression | [meowtec/Imagine](https://github.com/meowtec/Imagine) | Compression UX reference; actual image processing uses [Sharp](https://github.com/lovell/sharp) |
+| Image deduplication | [Node.js](https://github.com/nodejs/node) | The current implementation uses `node:crypto` SHA-256 exact file-content matching; no separate third-party image-deduplication project is bundled |
+| Video compression | [FFmpeg](https://ffmpeg.org/) / [eugeneware/ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) | FFmpeg encoding; the FFmpeg binary is downloaded on demand, signature-verified, and installed on first use of video features — no longer bundled with the app |
+
+### Runtime and core capabilities
+
+| Project | Use in SuYan | License | Project |
+| --- | --- | --- | --- |
+| [Electron](https://github.com/electron/electron) | Cross-platform desktop runtime | MIT | [electron/electron](https://github.com/electron/electron) |
+| [Node.js](https://github.com/nodejs/node) | Main-process Node APIs provided by Electron | MIT | [nodejs/node](https://github.com/nodejs/node) |
+| [React / React DOM](https://github.com/facebook/react) | UI rendering and components | MIT | [facebook/react](https://github.com/facebook/react) |
+| [Zustand](https://github.com/pmndrs/zustand) | Renderer state management | MIT | [pmndrs/zustand](https://github.com/pmndrs/zustand) |
+| [Lucide](https://github.com/lucide-icons/lucide) | UI icons (`lucide-react`) | ISC | [lucide-icons/lucide](https://github.com/lucide-icons/lucide) |
+| [JSZip](https://github.com/Stuk/jszip) | ZIP shares, log packages, and document reads | MIT / GPL-3.0-or-later | [Stuk/jszip](https://github.com/Stuk/jszip) |
+| [Sharp](https://github.com/lovell/sharp) | Image compression, thumbnails, and processing | Apache-2.0 | [lovell/sharp](https://github.com/lovell/sharp) |
+| [libvips](https://github.com/libvips/libvips) | High-performance image layer used by Sharp | LGPL-3.0-or-later | [libvips/libvips](https://github.com/libvips/libvips) |
+| [Chokidar](https://github.com/paulmillr/chokidar) | External material-folder watching | MIT | [paulmillr/chokidar](https://github.com/paulmillr/chokidar) |
+| [uuid](https://github.com/uuidjs/uuid) | Unique IDs for materials and records | MIT | [uuidjs/uuid](https://github.com/uuidjs/uuid) |
+| [FFmpeg](https://ffmpeg.org/) | Video compression and keyframes; the binary is downloaded, signature-verified, and installed on demand (`ffmpeg-static` is used only for build-time development and testing) | GPL-3.0-or-later | [ffmpeg.org](https://ffmpeg.org/) |
+
+### Build, test, and release tooling
+
+| Project | Use in SuYan | License | Project |
+| --- | --- | --- | --- |
+| [Vite](https://github.com/vitejs/vite) | Renderer development and builds | MIT | [vitejs/vite](https://github.com/vitejs/vite) |
+| [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react) | React compiler plugin for Vite | MIT | [vitejs/vite-plugin-react](https://github.com/vitejs/vite-plugin-react) |
+| [Tailwind CSS](https://github.com/tailwindlabs/tailwindcss) / `@tailwindcss/vite` | Styling system and Vite integration | MIT | [tailwindlabs/tailwindcss](https://github.com/tailwindlabs/tailwindcss) |
+| [TypeScript](https://github.com/microsoft/TypeScript) | Type checking and Electron builds | Apache-2.0 | [microsoft/TypeScript](https://github.com/microsoft/TypeScript) |
+| [Vitest](https://github.com/vitest-dev/vitest) | Unit tests and regression checks | MIT | [vitest-dev/vitest](https://github.com/vitest-dev/vitest) |
+| [electron-builder](https://github.com/electron-userland/electron-builder) | Windows installer and portable builds | MIT | [electron-userland/electron-builder](https://github.com/electron-userland/electron-builder) |
+| [javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator) | Electron code protection for release builds | BSD-2-Clause | [javascript-obfuscator/javascript-obfuscator](https://github.com/javascript-obfuscator/javascript-obfuscator) |
+| [DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) | `@types/node`, `@types/react`, and `@types/react-dom` declarations | MIT | [DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| [Go](https://github.com/golang/go) | Builds the file-copy helper (standard library only) | BSD-3-Clause | [golang/go](https://github.com/golang/go) |
+| [pnpm](https://github.com/pnpm/pnpm) | Dependency installation and lockfile management | MIT | [pnpm/pnpm](https://github.com/pnpm/pnpm) |
 
 ## Disclaimer
 

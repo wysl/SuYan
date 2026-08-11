@@ -9,8 +9,11 @@ type SharpPipeline = {
   jpeg(options: { quality: number; mozjpeg?: boolean }): SharpPipeline;
   png(options: { compressionLevel: number; palette: boolean; quality: number }): SharpPipeline;
   webp(options: { quality: number }): SharpPipeline;
-  metadata(): Promise<unknown>;
+  resize(options: { width?: number; height?: number; fit?: string; withoutEnlargement?: boolean }): SharpPipeline;
+  metadata(): Promise<{ width?: number; height?: number }>;
+  stats(): Promise<{ channels: Array<{ max: number; min: number }> }>;
   toBuffer(): Promise<Buffer>;
+  toFile(path: string): Promise<unknown>;
 };
 
 export type { Sharp, SharpPipeline };

@@ -18,8 +18,9 @@ describe("buildLibraryFile", () => {
       },
     ]);
 
-    expect(file.schemaVersion).toBe(1);
+    expect(file.schemaVersion).toBe(2);
     expect(file.items[0].title).toBe("标题");
+    expect(file.items[0].mediaStorage).toBe("managed");
     expect(file.items[0].tags).toEqual(["人物", "光影"]);
     expect(file.items[0].nsfwRating).toBe("nsfw");
     expect(file.items[0].nsfwCheckedAt).toBe("2026-07-06T00:00:00.000Z");

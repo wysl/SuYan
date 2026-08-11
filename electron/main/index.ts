@@ -1,6 +1,5 @@
-import { app, BrowserWindow, ipcMain, Menu, net, protocol, shell, type IpcMainEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, shell, type IpcMainEvent } from "electron";
 import fs from "node:fs/promises";
-import fsSync from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { registerIpcHandlers } from "./ipc/registerIpcHandlers";
@@ -9,8 +8,8 @@ import { isVideoMediaFile } from "../../src/features/library/utils/mediaFileType
 import {
   getFreshImageThumbnailPath,
   getFreshImageThumbnailPathForItem,
-  warmImageThumbnails,
-  warmLibraryItemThumbnails,
+  getOrCreateImageThumbnailPath,
+  getOrCreateImageThumbnailPathForItem,
 } from "./library/imageThumbnails";
 import { getImagePath, getStartupGalleryImagePath } from "./library/libraryPaths";
 import { findLibraryItemByImageFileName } from "./library/libraryStore";
@@ -24,54 +23,100 @@ import {
   configureHardwareAccelerationForBoot,
   readAppAccelerationStatus,
 } from "./app/gpuAccelerationSettings";
+import { prepareAppUserDataSync } from "./app/appStoragePath";
 import { installGpuCrashGuard, watchWindowForGpuCrash } from "./app/gpuCrashGuard";
 import { assertRuntimeIntegrityOrExit } from "./app/runtimeIntegrity";
 import { startPerformanceMonitor } from "./performance/performanceMonitor";
+import { rustCoreRuntime } from "./runtime/rustCoreRuntime";
 import { readWindowState, watchWindowState } from "./window/windowStateStore";
 import {
   restoreExternalLibraryWatchers,
   shutdownExternalLibraryWatchers,
 } from "./library/externalLibraryWatcher";
+import { minimumWindowSize } from "./window/windowStateModel";
 
 app.setName("素言");
-
-function migrateLegacyUserDataSync(legacyDir: string, currentDir: string): void {
-  try {
-    if (fsSync.existsSync(currentDir)) {
-      return;
-    }
-    if (!fsSync.existsSync(legacyDir)) {
-      return;
-    }
-    try {
-      fsSync.renameSync(legacyDir, currentDir);
-    } catch {
-      fsSync.cpSync(legacyDir, currentDir, { recursive: true });
-      fsSync.rmSync(legacyDir, { recursive: true, force: true });
-    }
-    logStartupEvent("main:userdata-migrated", { legacyDir, currentDir });
-  } catch (error) {
-    logStartupEvent("main:userdata-migrate-failed", {
-      legacyDir,
-      currentDir,
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
+if (process.platform === "win32") {
+  app.setAppUserModelId("local.suyan");
 }
 
-const appDataDir = app.getPath("appData");
-const legacyUserDataDir = path.join(appDataDir, "PromptImageLibrary");
-const currentUserDataDir = path.join(appDataDir, "SuYan");
-migrateLegacyUserDataSync(legacyUserDataDir, currentUserDataDir);
-app.setPath("userData", currentUserDataDir);
+// Only one main process should own the UI. A second double-click must focus the
+// existing window instead of starting another invisible cold-start sequence.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+  process.exit(0);
+}
+
+// Packaged builds store library/settings under <install-or-portable-root>\data.
+// Development still uses %APPDATA%\SuYan. Legacy AppData libraries migrate once on upgrade.
+const appUserDataPreparation = prepareAppUserDataSync({
+  isPackaged: app.isPackaged,
+  execPath: process.execPath,
+  appDataPath: app.getPath("appData"),
+  portableExecutableDir: process.env.PORTABLE_EXECUTABLE_DIR,
+});
+if (appUserDataPreparation.reason === "not-writable") {
+  // Data lives next to the executable by design. When that directory is read-only
+  // (Program Files without elevation, read-only media, locked-down policy), fail loudly
+  // instead of crashing before any window exists.
+  const detail = [
+    `数据目录：${appUserDataPreparation.userDataPath}`,
+    appUserDataPreparation.writeErrorCode ? `错误代码：${appUserDataPreparation.writeErrorCode}` : null,
+    "",
+    "素言把素材库保存在软件所在目录，因此该目录必须可写。",
+    "请把软件安装或解压到有写入权限的位置（例如 D:\\Apps\\SuYan 或用户目录），然后重新启动。",
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
+
+  logStartupEvent("main:userdata-not-writable", {
+    userDataPath: appUserDataPreparation.userDataPath,
+    packagedRoot: appUserDataPreparation.packagedRoot,
+    code: appUserDataPreparation.writeErrorCode,
+    message: appUserDataPreparation.errorMessage,
+  });
+
+  app.whenReady().then(() => {
+    dialog.showErrorBox("素言无法写入数据目录", detail);
+    app.exit(1);
+  });
+} else {
+  app.setPath("userData", appUserDataPreparation.userDataPath);
+}
+
+const canStartApp = appUserDataPreparation.reason !== "not-writable";
+
+if (appUserDataPreparation.migrated) {
+  logStartupEvent("main:userdata-migrated", {
+    from: appUserDataPreparation.from,
+    to: appUserDataPreparation.userDataPath,
+    reason: appUserDataPreparation.reason,
+  });
+} else if (appUserDataPreparation.reason === "migrate-failed") {
+  logStartupEvent("main:userdata-migrate-failed", {
+    from: appUserDataPreparation.from,
+    to: appUserDataPreparation.userDataPath,
+    message: appUserDataPreparation.errorMessage,
+  });
+}
+logStartupEvent("main:userdata-ready", {
+  isPackaged: app.isPackaged,
+  userDataPath: appUserDataPreparation.userDataPath,
+  packagedRoot: appUserDataPreparation.packagedRoot,
+  reason: appUserDataPreparation.reason,
+});
+
 const hardwareAccelerationBootDecision = configureHardwareAccelerationForBoot();
 logStartupEvent("main:init", {
   effectiveHardwareAcceleration: hardwareAccelerationBootDecision.effectiveHardwareAcceleration,
   hardwareAccelerationMode: hardwareAccelerationBootDecision.settings.hardwareAccelerationMode,
   safeMode: hardwareAccelerationBootDecision.safeMode,
+  userDataPath: app.getPath("userData"),
 });
-
-const maxInlineOriginalFallbackBytes = 768 * 1024;
+app.once("gpu-info-update", () => {
+  logger.info("main", "gpu:status-ready", readAppAccelerationStatus());
+});
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -105,6 +150,51 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
+let mainWindowRef: BrowserWindow | null = null;
+
+function focusMainWindow(window: BrowserWindow | null = mainWindowRef): void {
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  if (window.isMinimized()) {
+    window.restore();
+  }
+
+  if (!window.isVisible()) {
+    window.show();
+  }
+
+  window.focus();
+  if (process.platform === "win32") {
+    // Flash briefly so a second double-click is noticeable even if already focused.
+    window.flashFrame(true);
+    setTimeout(() => {
+      if (!window.isDestroyed()) {
+        window.flashFrame(false);
+      }
+    }, 800);
+  }
+  logStartupEvent("window:focus-existing");
+}
+
+app.on("second-instance", () => {
+  logStartupEvent("app:second-instance");
+  const existing = mainWindowRef && !mainWindowRef.isDestroyed()
+    ? mainWindowRef
+    : BrowserWindow.getAllWindows().find((window) => !window.isDestroyed()) ?? null;
+
+  if (existing) {
+    focusMainWindow(existing);
+    return;
+  }
+
+  // Rare: lock held but no window (mid-quit or crash recovery). Create one.
+  if (app.isReady()) {
+    void createWindow();
+  }
+});
+
 async function createWindow(): Promise<void> {
   logStartupEvent("window:create:start");
   const windowState = await readWindowState();
@@ -114,12 +204,13 @@ async function createWindow(): Promise<void> {
     height: windowState.height,
     ...(typeof windowState.x === "number" ? { x: windowState.x } : {}),
     ...(typeof windowState.y === "number" ? { y: windowState.y } : {}),
-    minWidth: 1040,
-    minHeight: 680,
+    // Keep in sync with minimumWindowSize (supports small / high-DPI laptops).
+    minWidth: minimumWindowSize.width,
+    minHeight: minimumWindowSize.height,
     title: "素言",
     titleBarStyle: "hidden",
     autoHideMenuBar: true,
-    backgroundColor: "#f6f7f4",
+    backgroundColor: "#f6f5f1",
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
@@ -129,44 +220,73 @@ async function createWindow(): Promise<void> {
       devTools: !app.isPackaged,
     },
   });
+  mainWindowRef = mainWindow;
+  mainWindow.on("closed", () => {
+    if (mainWindowRef === mainWindow) {
+      mainWindowRef = null;
+    }
+  });
 
   let isWindowShown = false;
-  const showWindow = () => {
+  let showFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  const showWindow = (reason: string) => {
     if (isWindowShown || mainWindow.isDestroyed()) {
       return;
     }
 
     isWindowShown = true;
-    clearTimeout(showFallbackTimer);
-    logStartupEvent("window:show");
+    if (showFallbackTimer !== null) {
+      clearTimeout(showFallbackTimer);
+      showFallbackTimer = null;
+    }
+    logStartupEvent("window:show", { reason });
 
     if (windowState.isMaximized) {
       mainWindow.maximize();
     }
 
     mainWindow.show();
+    mainWindow.focus();
   };
-  const showFallbackTimer = setTimeout(showWindow, 2000);
+  const armShowFallback = (delayMs: number, reason: string) => {
+    if (isWindowShown || showFallbackTimer !== null) {
+      return;
+    }
+
+    showFallbackTimer = setTimeout(() => {
+      showFallbackTimer = null;
+      showWindow(reason);
+    }, delayMs);
+  };
   const handleStartupScreenReady = (event: IpcMainEvent) => {
     if (event.sender !== mainWindow.webContents) {
       return;
     }
 
     logStartupEvent("renderer:startup-screen-ready");
-    showWindow();
+    showWindow("startup-screen-ready");
   };
 
   ipcMain.on(ipcChannels.appStartupScreenReady, handleStartupScreenReady);
   mainWindow.once("closed", () => {
-    clearTimeout(showFallbackTimer);
+    if (showFallbackTimer !== null) {
+      clearTimeout(showFallbackTimer);
+      showFallbackTimer = null;
+    }
     ipcMain.removeListener(ipcChannels.appStartupScreenReady, handleStartupScreenReady);
   });
+  // Show as soon as Chromium has the first document paint (HTML loading shell).
+  // Waiting for startup-gallery IPC made double-click feel like "nothing opens"
+  // for 3-4s on large libraries. startup-screen-ready still upgrades content later.
   mainWindow.once("ready-to-show", () => {
     logStartupEvent("window:ready-to-show");
+    showWindow("ready-to-show");
   });
+  // Safety only: if ready-to-show never arrives after load, force show.
+  armShowFallback(5000, "load-timeout-fallback");
   mainWindow.webContents.once("did-fail-load", (_event, errorCode, errorDescription) => {
     logStartupEvent("window:did-fail-load", { errorCode, errorDescription });
-    showWindow();
+    showWindow("did-fail-load");
   });
 
   watchWindowState(mainWindow);
@@ -188,7 +308,7 @@ async function createWindow(): Promise<void> {
     logStartupEvent("window:load-file:done");
   } catch {
     logStartupEvent("window:load:failed");
-    showWindow();
+    showWindow("load-failed");
   }
 }
 
@@ -361,9 +481,13 @@ async function serveFileWithRange(
 }
 
 app.whenReady().then(async () => {
+  if (!canStartApp) {
+    // The unwritable-data-directory handler above owns the error dialog and exit.
+    return;
+  }
+
   assertRuntimeIntegrityOrExit();
   logStartupEvent("app:ready");
-  logger.info("main", "gpu:status", readAppAccelerationStatus());
   installGpuCrashGuard();
   await migrateOldStartupLog();
   startPerformanceMonitor();
@@ -374,6 +498,11 @@ app.whenReady().then(async () => {
   } catch {
     logStartupEvent("proxy:apply-failed");
   }
+
+  // 启动 Rust Core Sidecar（骨架阶段，不阻塞其它初始化）。
+  void rustCoreRuntime.start().then(() => {
+    logStartupEvent("rust-core:startup", rustCoreRuntime.getStatus());
+  });
 
   protocol.handle("app-image", async (request) => {
     try {
@@ -413,25 +542,31 @@ app.whenReady().then(async () => {
       const url = new URL(request.url);
       const imageFileName = decodeURIComponent(url.pathname.replace(/^\//, ""));
       const item = await findLibraryItemByImageFileName(imageFileName);
-      const thumbnailPath = item
+      let thumbnailPath = item
         ? await getFreshImageThumbnailPathForItem(item)
         : await getFreshImageThumbnailPath(imageFileName);
+
+      if (!thumbnailPath) {
+        try {
+          thumbnailPath = item
+            ? await getOrCreateImageThumbnailPathForItem(item)
+            : await getOrCreateImageThumbnailPath(imageFileName);
+        } catch (error) {
+          logger.warn("media-thumbnail", "serve:generate-failed", {
+            file: imageFileName,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
 
       if (thumbnailPath) {
         return net.fetch(pathToFileURL(thumbnailPath).toString());
       }
 
       const imagePath = item ? await resolveMediaAbsolutePath(item) : getImagePath(imageFileName);
-
-      if (item) {
-        warmLibraryItemThumbnails([item]);
-      } else {
-        warmImageThumbnails([imageFileName], 1);
-      }
-
       const imageStats = await fs.stat(imagePath).catch(() => null);
 
-      if (imageStats && imageStats.size <= maxInlineOriginalFallbackBytes) {
+      if (imageStats) {
         return net.fetch(pathToFileURL(imagePath).toString());
       }
 
@@ -466,9 +601,12 @@ app.whenReady().then(async () => {
   }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow();
+    const existing = BrowserWindow.getAllWindows().find((window) => !window.isDestroyed()) ?? null;
+    if (existing) {
+      focusMainWindow(existing);
+      return;
     }
+    void createWindow();
   });
 });
 
@@ -480,6 +618,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   void shutdownExternalLibraryWatchers();
+  void rustCoreRuntime.stop();
 });
 
 function registerWindowControls(window: BrowserWindow): void {

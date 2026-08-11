@@ -5,6 +5,7 @@ import type {
   AiFeatureAction,
   AiProviderModelSettings,
   AiProviderSettings,
+  AiRecognitionSourcePreferences,
   PublicAiProviderSettings,
   SaveAiProviderProfilePayload,
   SaveAiProviderSettingsPayload,
@@ -24,6 +25,8 @@ import {
 type AiSettingsFile = {
   activeProfileId?: string;
   actionPreferences?: Partial<Record<AiFeatureAction, AiActionPreference>>;
+  actionOrder?: string[];
+  recognitionSourcePreferences?: AiRecognitionSourcePreferences;
   enabled?: boolean;
   baseUrl?: string;
   model?: string;
@@ -122,14 +125,38 @@ function toSettingsFile(settings: AiProviderSettingsCollection): AiSettingsFile 
 }
 
 function encryptApiKey(apiKey: string): string {
-  if (!apiKey || !safeStorage.isEncryptionAvailable()) {
+  const value = apiKey.trim();
+  if (!value) {
     return "";
   }
 
+  // Prefer OS-backed encryption when available (production / normal Windows installs).
+  if (safeStorage.isEncryptionAvailable()) {
+    try {
+      return safeStorage.encryptString(value).toString("base64");
+    } catch {
+      // Fall through to local development fallback below.
+    }
+  }
+
+  // Development / restricted environments: still persist the key so API settings
+  // remain usable. Packaged GitHub releases never ship this file (empty-shell).
+  return encodeLocalDevApiKey(value);
+}
+
+function encodeLocalDevApiKey(apiKey: string): string {
+  return `dev1:${Buffer.from(apiKey, "utf8").toString("base64")}`;
+}
+
+function decodeLocalDevApiKey(encoded: string): string | null {
+  if (!encoded.startsWith("dev1:")) {
+    return null;
+  }
+
   try {
-    return safeStorage.encryptString(apiKey).toString("base64");
+    return Buffer.from(encoded.slice("dev1:".length), "base64").toString("utf8").trim();
   } catch {
-    return "";
+    return null;
   }
 }
 
@@ -164,6 +191,11 @@ function readStoredApiKey(input: unknown): string {
   const file = input as AiSettingsFile | AiSettingsProfileFile;
 
   if (typeof file.apiKeyEncrypted === "string" && file.apiKeyEncrypted) {
+    const localDevKey = decodeLocalDevApiKey(file.apiKeyEncrypted);
+    if (localDevKey) {
+      return localDevKey;
+    }
+
     try {
       return safeStorage.decryptString(Buffer.from(file.apiKeyEncrypted, "base64")).trim();
     } catch {
@@ -181,7 +213,10 @@ function isSavePayload(input: unknown): input is SaveAiProviderSettingsPayload {
     Array.isArray(input.profiles) &&
     input.profiles.length > 0 &&
     input.profiles.every(isSaveProfilePayload) &&
-    (typeof input.actionPreferences === "undefined" || isActionPreferences(input.actionPreferences))
+    (typeof input.actionPreferences === "undefined" || isActionPreferences(input.actionPreferences)) &&
+    (typeof input.actionOrder === "undefined" || isStringList(input.actionOrder)) &&
+    (typeof input.recognitionSourcePreferences === "undefined" ||
+      isRecognitionSourcePreferences(input.recognitionSourcePreferences))
   );
 }
 
@@ -226,6 +261,22 @@ function isActionPreferences(input: unknown): input is Partial<Record<AiFeatureA
   );
 }
 
+function isRecognitionSourcePreferences(input: unknown): input is AiRecognitionSourcePreferences {
+  if (!isRecord(input)) {
+    return false;
+  }
+
+  return Object.entries(input).every(
+    ([kind, source]) =>
+      (kind === "category" || kind === "tags") &&
+      (source === "image" || source === "prompt"),
+  );
+}
+
+function isStringList(input: unknown): input is string[] {
+  return Array.isArray(input) && input.every((item) => typeof item === "string");
+}
+
 function isModelList(input: unknown): input is AiProviderModelSettings[] {
   return (
     Array.isArray(input) &&
@@ -235,7 +286,10 @@ function isModelList(input: unknown): input is AiProviderModelSettings[] {
         typeof model.id === "string" &&
         typeof model.label === "string" &&
         Array.isArray(model.capabilities) &&
-        model.capabilities.every((capability) => capability === "text" || capability === "vision"),
+        model.capabilities.every(
+          (capability) =>
+            capability === "text" || capability === "vision" || capability === "image-generation",
+        ),
     )
   );
 }

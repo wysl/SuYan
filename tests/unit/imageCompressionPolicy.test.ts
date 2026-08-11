@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isPassthroughImportImageExtension,
   normalizeImportImageExtension,
   selectCompressedImageCandidate,
 } from "../../electron/main/library/imageCompressionPolicy";
@@ -66,5 +67,22 @@ describe("image compression policy", () => {
     expect(selected.extension).toBe(".jpg");
     expect(selected.buffer.length).toBe(97_900);
     expect(selected.wasCompressed).toBe(true);
+  });
+});
+
+describe("image import passthrough policy", () => {
+  it("marks only formats that preserve original bytes", () => {
+    for (const extension of [".gif", ".avif", ".heic", ".heif", ".tif", ".tiff", ".svg", ".ico", ".apng"]) {
+      expect(isPassthroughImportImageExtension(extension)).toBe(true);
+    }
+
+    for (const extension of [".png", ".jpg", ".jpeg", ".webp", ".bmp"]) {
+      expect(isPassthroughImportImageExtension(extension)).toBe(false);
+    }
+  });
+
+  it("normalizes case before checking the policy", () => {
+    expect(isPassthroughImportImageExtension(".SVG")).toBe(true);
+    expect(isPassthroughImportImageExtension(".JPEG")).toBe(false);
   });
 });

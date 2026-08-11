@@ -141,9 +141,27 @@ async function reconcileImages(): Promise<StartupGalleryImage[]> {
     order: index,
   }));
 
-  await writeManifest(images);
+  if (!manifest || !areStartupGalleryImagesEqual(manifest.images, images)) {
+    await writeManifest(images);
+  }
 
   return images;
+}
+
+function areStartupGalleryImagesEqual(
+  left: readonly StartupGalleryImage[],
+  right: readonly StartupGalleryImage[],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every(
+    (image, index) =>
+      image.fileName === right[index]?.fileName &&
+      image.isDefault === right[index]?.isDefault &&
+      image.order === right[index]?.order,
+  );
 }
 
 const maxStartupThumbnailSide = 1600;
@@ -151,10 +169,22 @@ const startupThumbnailJpegQuality = 88;
 const startupThumbnailConcurrency = 3;
 
 async function isFreshStartupThumbnail(imagePath: string, thumbnailPath: string): Promise<boolean> {
-  try {
-    const [imageStats, thumbnailStats] = await Promise.all([fs.stat(imagePath), fs.stat(thumbnailPath)]);
+  let thumbnailStats;
 
-    return thumbnailStats.mtimeMs >= imageStats.mtimeMs && thumbnailStats.size > 0;
+  try {
+    thumbnailStats = await fs.stat(thumbnailPath);
+  } catch {
+    // A missing thumbnail cannot be fresh, so avoid stat-ing the source image.
+    return false;
+  }
+
+  if (thumbnailStats.size <= 0) {
+    return false;
+  }
+
+  try {
+    const imageStats = await fs.stat(imagePath);
+    return thumbnailStats.mtimeMs >= imageStats.mtimeMs;
   } catch {
     return false;
   }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownAZ, ArrowUpAZ, CheckCheck, CheckSquare, Copy, CopyCheck, Download, Eye, FileImage, Film, ImageIcon, Search, Square, Trash2, Upload, XSquare } from "lucide-react";
 import { AppDialog, DialogCloseButton } from "@/components/ui/AppDialog";
 import { Button } from "@/components/ui/Button";
+import { Capsule } from "@/components/ui/Capsule";
 import { ConfirmBubble } from "@/components/ui/ConfirmBubble";
 import { TextField } from "@/components/ui/TextField";
 import { CardScrollTopButton } from "./CardScrollTopButton";
@@ -705,27 +706,27 @@ function PromptLibraryRow({ blurNsfwImages, group, isSelected, onCopy, onOpenDet
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="truncate text-base font-semibold">{item.title || "未命名提示词"}</h3>
-          <span className="rounded-md border border-capsule-sage-border bg-capsule-sage px-2 py-1 text-xs text-capsule-sage-foreground">
+          <Capsule tone="sage" size="md" shape="rounded">
             {item.category}
-          </span>
+          </Capsule>
         </div>
         <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted">{promptPreview}</p>
         <div className="mt-3 flex max-h-8 flex-wrap gap-2 overflow-hidden">
           {visibleTags.length > 0 ? (
             <>
               {visibleTags.map((tag) => (
-                <span className="rounded-md border border-capsule-mist-border bg-capsule-mist px-2 py-1 text-xs text-capsule-mist-foreground" key={tag}>
-                {tag}
-              </span>
+                <Capsule tone="mist" size="md" shape="rounded" key={tag}>
+                  {tag}
+                </Capsule>
               ))}
               {hiddenTagCount > 0 ? (
-                <span className="rounded-md border border-capsule-fog-border bg-capsule-fog px-2 py-1 text-xs text-capsule-fog-foreground">
+                <Capsule tone="fog" size="md" shape="rounded">
                   +{hiddenTagCount}
-                </span>
+                </Capsule>
               ) : null}
             </>
           ) : (
-            <span className="rounded-md border border-capsule-fog-border bg-capsule-fog px-2 py-1 text-xs text-capsule-fog-foreground">未分类</span>
+            <Capsule tone="fog" size="md" shape="rounded">未分类</Capsule>
           )}
         </div>
       </div>

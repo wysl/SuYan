@@ -1,16 +1,25 @@
 import type { LibraryFile, LibraryItem, MediaStorage, VideoKeyframe } from "../types/library";
+import type { CategoryAssignmentSource } from "../types/category";
 import { normalizeNsfwRating } from "./nsfwRating";
 import { normalizePromptType } from "./promptType";
+import { createEmptyCategoryTaxonomy } from "./categoryTaxonomy";
+import { migrateLibraryFileCategories, LIBRARY_SCHEMA_VERSION_V2 } from "./categoryMigration";
 
 export function migrateLibrary(input: unknown): LibraryFile {
-  if (isLibraryFile(input)) {
-    return {
-      ...input,
-      items: input.items.map(normalizeItem),
-    };
+  if (!isLibraryFile(input)) {
+    throw new Error("Unsupported library schemaVersion");
   }
 
-  throw new Error("Unsupported library schemaVersion");
+  const taxonomy = input.categoryTaxonomy ?? createEmptyCategoryTaxonomy();
+  const migrated = migrateLibraryFileCategories(
+    {
+      ...input,
+      items: input.items.map(normalizeItem),
+    },
+    taxonomy,
+  );
+
+  return migrated.library;
 }
 
 export function isLibraryFile(input: unknown): input is LibraryFile {
@@ -19,7 +28,7 @@ export function isLibraryFile(input: unknown): input is LibraryFile {
   }
 
   return (
-    input.schemaVersion === 1 &&
+    (input.schemaVersion === 1 || input.schemaVersion === 2 || input.schemaVersion === LIBRARY_SCHEMA_VERSION_V2) &&
     typeof input.updatedAt === "string" &&
     Array.isArray(input.items) &&
     input.items.every(isLibraryItem)
@@ -41,6 +50,11 @@ function isLibraryItem(input: unknown): input is LibraryItem {
     Array.isArray(input.tags) &&
     input.tags.every((tag) => typeof tag === "string") &&
     isOptionalString(input.category) &&
+    isOptionalString(input.categoryId) &&
+    isOptionalStringArray(input.genreIds) &&
+    isOptionalConfidence(input.categoryConfidence) &&
+    isOptionalCategorySource(input.categorySource) &&
+    isOptionalString(input.legacyCategory) &&
     isOptionalString(input.generationMethod) &&
     isOptionalPromptType(input.promptType) &&
     isOptionalString(input.sourceUrl) &&
@@ -68,6 +82,11 @@ function normalizeItem(item: LibraryItem): LibraryItem {
     prompt: item.prompt,
     negativePrompt: item.negativePrompt,
     category: normalizeOptionalString(item.category),
+    categoryId: normalizeOptionalString(item.categoryId),
+    genreIds: normalizeOptionalStringArray(item.genreIds),
+    categoryConfidence: normalizeOptionalConfidence(item.categoryConfidence),
+    categorySource: normalizeCategorySource(item.categorySource),
+    legacyCategory: normalizeOptionalString(item.legacyCategory),
     tags: item.tags,
     generationMethod: normalizeOptionalString(item.generationMethod),
     promptType: normalizePromptType(item.promptType, item),
@@ -129,7 +148,15 @@ function isOptionalNumber(input: unknown): boolean {
 }
 
 function isOptionalStringArray(input: unknown): boolean {
-  return input === undefined || (Array.isArray(input) && input.every((entry) => typeof entry === "string"));
+  return input === undefined || input === null || (Array.isArray(input) && input.every((entry) => typeof entry === "string"));
+}
+
+function normalizeOptionalStringArray(input: unknown): string[] | null {
+  if (input === undefined || input === null) {
+    return null;
+  }
+
+  return normalizeStringArray(input);
 }
 
 function isOptionalVideoKeyframes(input: unknown): boolean {
@@ -197,6 +224,22 @@ function isOptionalString(input: unknown): boolean {
 
 function isOptionalPromptType(input: unknown): boolean {
   return input === undefined || typeof input === "string";
+}
+
+function isOptionalCategorySource(input: unknown): boolean {
+  return input === undefined || input === null || input === "system" || input === "user" || input === "ai";
+}
+
+function isOptionalConfidence(input: unknown): boolean {
+  return input === undefined || input === null || (typeof input === "number" && Number.isFinite(input));
+}
+
+function normalizeCategorySource(input: CategoryAssignmentSource | null | undefined): CategoryAssignmentSource | null {
+  return input === "system" || input === "user" || input === "ai" ? input : null;
+}
+
+function normalizeOptionalConfidence(input: number | null | undefined): number | null {
+  return typeof input === "number" && Number.isFinite(input) ? Math.min(1, Math.max(0, input)) : null;
 }
 
 function normalizeOptionalString(input: string | null | undefined): string | null {

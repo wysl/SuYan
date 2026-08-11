@@ -1,4 +1,4 @@
-export type AiProviderModelCapability = "text" | "vision";
+export type AiProviderModelCapability = "text" | "vision" | "image-generation";
 
 export type AiProviderModelSettings = {
   id: string;
@@ -7,16 +7,39 @@ export type AiProviderModelSettings = {
 };
 
 export type AiFeatureAction =
-  | "prompt"
   | "prompt-category"
   | "prompt-tags"
-  | "prompt-options"
   | "prompt-optimization"
   | "prompt-translation"
+  | "image-generation"
   | "image-reverse"
   | "image-category"
   | "image-tags"
   | "image-safety";
+
+export type AiRecognitionKind = "category" | "tags";
+export type AiRecognitionSource = "image" | "prompt";
+export type AiRecognitionSourcePreferences = Partial<Record<AiRecognitionKind, AiRecognitionSource>>;
+
+export function normalizeAiRecognitionSourcePreferences(input: unknown): AiRecognitionSourcePreferences {
+  if (!isRecord(input)) {
+    return {};
+  }
+
+  const preferences: AiRecognitionSourcePreferences = {};
+
+  for (const kind of aiRecognitionKinds) {
+    const source = input[kind];
+
+    if (source === "image" || source === "prompt") {
+      preferences[kind] = source;
+    }
+  }
+
+  return preferences;
+}
+
+export const aiRecognitionKinds: AiRecognitionKind[] = ["category", "tags"];
 
 export type AiActionPreference = {
   profileId?: string;
@@ -33,12 +56,11 @@ export type AiRulePreset = {
 };
 
 export const aiFeatureActions: AiFeatureAction[] = [
-  "prompt",
   "prompt-category",
   "prompt-tags",
-  "prompt-options",
   "prompt-optimization",
   "prompt-translation",
+  "image-generation",
   "image-reverse",
   "image-category",
   "image-tags",
@@ -211,193 +233,6 @@ function createPromptOptimizationRule(input: StructuredRuleInput): string {
     constraints: [...promptOptimizationReliableConstraints, ...input.constraints],
   });
 }
-
-const reliablePromptRulePresets: AiRulePreset[] = [
-  {
-    id: "prompt-structured-analysis",
-    label: "结构化提示词分析",
-    instructions: createStructuredRule({
-      title: "结构化提示词分析规则",
-      core:
-        "运用多维度结构化分析方法，在 Role-Background-Attention-Profile-Skills-Goals-Constrains-Workflow-Suggestions-Examples 框架基础上，深度分析用户提示词，输出可直接用于素材库的结构化分析结果。",
-      modules: [
-        {
-          title: "提示词题材与主体识别",
-          content:
-            "先识别提示词的题材方向（人像、产品、食品、插画、视频等）和核心主体，再围绕主体提取可替换参数胶囊。",
-        },
-        {
-          title: "可替换参数胶囊提取",
-          content:
-            "从提示词中提取可替换的参数胶囊，包括主体属性、服装、材质、场景、镜头、光影、色彩和风格等维度，每个胶囊应为最短可替换短语。",
-        },
-        {
-          title: "分类与标签建议生成",
-          content:
-            "基于提示词核心意图生成分类建议和具体标签，分类必须来自系统词库，标签应来自文本明确写出的主体、场景、风格、镜头、光影、色彩和材质。",
-        },
-        {
-          title: "缺失视觉控制补充",
-          content:
-            "基于工作流分析结果，识别提示词中缺失的关键视觉控制（如景别、构图、光源、色彩、材质等），并给出补充建议。",
-        },
-        {
-          title: "结构化模板输出",
-          content:
-            "将分析结果整理为结构化模板，template 使用 {{variable: value}} 占位符，确保模板可直接用于素材库。",
-        },
-      ],
-      output:
-        "只返回系统要求的 JSON。sections 每项包含 key、label、variable、values；values 必须是最短可替换短语，通常不超过 12 个汉字或 6 个英文单词。template 使用 {{variable: value}} 占位符。category 返回最匹配的分类名称，tags 返回具体标签列表，summary 返回基于以上多维度分析的综合摘要。",
-      constraints: [
-        "普通分析最多 10 个胶囊，复杂提示词最多 14 个胶囊。",
-        "不得输出 Markdown、解释、标题或额外字段。",
-        "不得臆造原文没有的主体、场景、品牌、人物身份或风格。",
-        "不得把“不要、避免、保留、参考图、上传图片、生成一张”等指令性词句作为可替换胶囊。",
-        "分析过程用于内部推理，最终只输出系统要求的 JSON 结构。",
-      ],
-    }),
-  },
-];
-
-const promptOptionsRulePresets: AiRulePreset[] = [
-  {
-    id: "same-type-options",
-    label: "同类候选",
-    instructions: createStructuredRule({
-      title: "同类词条候选生成规则",
-      core:
-        "本规则用于为当前胶囊变量生成同类型、可直接替换的候选词条，确保 AI 只处理当前变量，不改写整段提示词，不跨维度扩散。",
-      modules: [
-        {
-          title: "变量识别",
-          content:
-            "先判断当前变量属于主体、动作、服装、材质、场景、镜头、景别、构图、光源、色彩、风格或质量词中的哪一类，再围绕同一类生成候选。",
-        },
-        {
-          title: "同类替换",
-          content:
-            "候选必须能替换当前值且保持语法位置不变，例如景别只给景别，面料只给面料，光源只给光源，不能混入主体或场景。",
-        },
-        {
-          title: "差异控制",
-          content:
-            "候选之间应有明确视觉差异，能给用户提供不同方向，但不能偏离当前提示词的主体、风格和用途。",
-        },
-      ],
-      output:
-        "返回 3-5 个简体中文短词条，只输出候选值本身，不要解释、编号、Markdown、完整句子或上下文描述。",
-      constraints: [
-        "不得返回当前词条本身。",
-        "不得扩写或优化整段提示词。",
-        "不得跨变量类型生成无关候选。",
-        "不得输出无法直接替换当前胶囊的长描述。",
-      ],
-    }),
-  },
-  {
-    id: "visual-compatible",
-    label: "画面兼容",
-    instructions: createStructuredRule({
-      title: "画面兼容词条生成规则",
-      core:
-        "本规则用于生成与当前提示词整体画面兼容的替换词条，保证每个候选都能自然融入原有主体、场景、风格和商业用途。",
-      modules: [
-        {
-          title: "上下文读取",
-          content:
-            "读取当前提示词中的主体、场景、风格、色彩、光影和用途限制，判断候选词是否会破坏原画面逻辑。",
-        },
-        {
-          title: "兼容生成",
-          content:
-            "候选应与已有风格共存，例如古风人像优先给传统服饰、东方场景和柔和光影相关替换，商品摄影优先给商业材质、台面、灯光和构图相关替换。",
-        },
-        {
-          title: "视觉方向",
-          content:
-            "候选之间应提供可感知差异，例如同为色彩可覆盖冷暖、明度、饱和度变化；同为材质可覆盖光泽、纹理和厚薄变化。",
-        },
-      ],
-      output:
-        "输出 3-5 个可替换短词条，保持简洁具体，按与当前画面的匹配度排序。",
-      constraints: [
-        "不得给出会改变主体类别或核心风格的候选。",
-        "不得输出与当前变量类型无关的内容。",
-        "不得为了多样性生成违和或不可执行的词条。",
-        "不得夹带解释和推荐理由。",
-      ],
-    }),
-  },
-  {
-    id: "short-values",
-    label: "短词条",
-    instructions: createStructuredRule({
-      title: "短词条输出规则",
-      core:
-        "本规则用于约束 AI 词条扩写的输出长度和形态，使候选可以直接进入胶囊列表，不需要二次清洗。",
-      modules: [
-        {
-          title: "短语形态",
-          content:
-            "每个候选应为一个短词或短语，例如“浅景深”“丝绸面料”“冷调蓝白”“低角度仰拍”，不要写成完整句子。",
-        },
-        {
-          title: "可替换性",
-          content:
-            "候选必须能直接替换当前词条，替换后不会造成语法断裂、语义重复或画面矛盾。",
-        },
-        {
-          title: "格式清洁",
-          content:
-            "不要使用引号、括号、项目符号、序号、分号包装候选，不要输出说明性前缀。",
-        },
-      ],
-      output:
-        "只输出候选词条数组或系统要求的候选字段；每个候选保持短、准、具体。",
-      constraints: [
-        "不得输出解释、理由、教程或 Markdown。",
-        "不得输出当前词条本身。",
-        "不得生成过长句子或多概念混合词条。",
-        "不得返回空泛词，例如“高级感”“很好看”“精美”。",
-      ],
-    }),
-  },
-  {
-    id: "no-variable-drift",
-    label: "变量不跑偏",
-    instructions: createStructuredRule({
-      title: "变量边界稳定规则",
-      core:
-        "本规则用于防止 AI 在词条扩写时跑偏，确保当前变量是什么类型，就只生成同类型替换值，不把多个视觉维度混在一起。",
-      modules: [
-        {
-          title: "边界判定",
-          content:
-            "根据变量名、当前词条和值所在提示词位置判断边界；如果变量是“光影”，候选只能围绕光影；如果变量是“服装材质”，候选只能围绕材质。",
-        },
-        {
-          title: "模糊变量处理",
-          content:
-            "当变量名称过于模糊时，以当前词条的实际语义为准，选择最接近的视觉参数类别继续生成。",
-        },
-        {
-          title: "混合内容拆除",
-          content:
-            "不要把主体、风格、动作、镜头、色彩、场景混合成一个候选；如候选包含多个维度，应压缩为当前变量所需的单一维度。",
-        },
-      ],
-      output:
-        "输出同一语义槽位下的短候选，候选之间可以变化，但变量功能必须保持一致。",
-      constraints: [
-        "不得改变变量的业务含义。",
-        "不得输出完整提示词。",
-        "不得把多个维度拼接成一个候选。",
-        "不得用不确定内容填补变量。",
-      ],
-    }),
-  },
-];
 
 const promptCategoryRulePresets: AiRulePreset[] = [
   {
@@ -1927,6 +1762,14 @@ const imageSafetyRulePresets: AiRulePreset[] = [
   },
 ];
 
+const imageGenerationRulePresets: AiRulePreset[] = [
+  {
+    id: "image-generation-faithful",
+    label: "忠实生成",
+    instructions: "忠实遵循正向提示词与负向约束；使用参考图时保留其主体、构图与关键视觉特征，除非提示词明确要求改变。",
+  },
+];
+
 export const aiFeatureActionMeta: Record<
   AiFeatureAction,
   {
@@ -1938,14 +1781,6 @@ export const aiFeatureActionMeta: Record<
     rulePresets: AiRulePreset[];
   }
 > = {
-  prompt: {
-    capability: "text",
-    label: "提示词参数分析",
-    description: "运用结构化多维度框架分析提示词，拆解胶囊、标签和分类建议。",
-    rulePlaceholder: "例如：按 Role-Background-Attention-Profile-Skills-Goals 框架分析，提取可替换参数胶囊。",
-    defaultRulePreset: reliablePromptRulePresets[0],
-    rulePresets: reliablePromptRulePresets,
-  },
   "prompt-category": {
     capability: "text",
     label: "提示词分类识别",
@@ -1962,14 +1797,6 @@ export const aiFeatureActionMeta: Record<
     defaultRulePreset: promptTagsRulePresets[0],
     rulePresets: promptTagsRulePresets,
   },
-  "prompt-options": {
-    capability: "text",
-    label: "AI 词条扩写",
-    description: "基于结构化框架分析当前胶囊，生成同类可替换词条。",
-    rulePlaceholder: "例如：先按结构化框架分析变量类型，再生成同类候选词。",
-    defaultRulePreset: promptOptionsRulePresets[0],
-    rulePresets: promptOptionsRulePresets,
-  },
   "prompt-optimization": {
     capability: "text",
     label: "提示词优化",
@@ -1985,6 +1812,14 @@ export const aiFeatureActionMeta: Record<
     rulePlaceholder: "例如：先按结构化框架分析提示词，再保留 LoRA、权重和参数结构进行翻译。",
     defaultRulePreset: promptTranslationRulePresets[0],
     rulePresets: promptTranslationRulePresets,
+  },
+  "image-generation": {
+    capability: "image-generation",
+    label: "画布默认模型",
+    description: "设置创作画布默认使用的 API 与图像生成模型。",
+    rulePlaceholder: "例如：优先忠实保留参考图主体与构图，仅按提示词修改风格和细节。",
+    defaultRulePreset: imageGenerationRulePresets[0],
+    rulePresets: imageGenerationRulePresets,
   },
   "image-reverse": {
     capability: "vision",
@@ -2041,7 +1876,6 @@ export function normalizeAiRuleSelectionIds(
   const ids = input
     .filter((id): id is string => typeof id === "string")
     .map((id) => id.trim())
-    .map((id) => (action === "prompt" && (id === "prompt-parameterization-system" || id === "prompt-parameter-analysis-reliable") ? reliablePromptRulePresets[0].id : id))
     .filter((id) => validPresetIds.has(id));
 
   return [...new Set(ids)].slice(0, 8);
@@ -2087,38 +1921,7 @@ export function normalizeAiActionRules(action: AiFeatureAction, input: unknown):
     return migratePromptOptimizationRules(rules).slice(0, 80);
   }
 
-  if (action === "prompt") {
-    return migratePromptAnalysisRules(rules).slice(0, 80);
-  }
-
   return rules.slice(0, 80);
-}
-
-function migratePromptAnalysisRules(rules: AiRulePreset[]): AiRulePreset[] {
-  const defaultRule = reliablePromptRulePresets[0];
-  const usedIds = new Set<string>();
-  const migratedRules: AiRulePreset[] = [];
-  let hasDefaultRule = false;
-
-  for (const rule of rules) {
-    const isLegacyDefault = rule.id === "prompt-parameterization-system" || rule.id === "prompt-parameter-analysis-reliable" || rule.label === "提示词分析-参数化系统" || rule.label === "提示词参数分析-可靠版";
-    let nextRule = isLegacyDefault || rule.id === defaultRule.id ? defaultRule : rule;
-
-    if (nextRule.id === defaultRule.id) {
-      hasDefaultRule = true;
-      nextRule = defaultRule;
-    }
-
-    const nextId = createUniqueRuleId(nextRule.id, usedIds);
-    usedIds.add(nextId);
-    migratedRules.push(nextId === nextRule.id ? nextRule : { ...nextRule, id: nextId });
-  }
-
-  if (!hasDefaultRule) {
-    migratedRules.unshift(defaultRule);
-  }
-
-  return migratedRules;
 }
 
 function migratePromptOptimizationRules(rules: AiRulePreset[]): AiRulePreset[] {
@@ -2230,8 +2033,11 @@ export type PublicAiProviderProfile = {
 
 export type PublicAiProviderSettings = {
   activeProfileId: string;
+  /** User-defined order of the AI settings rule-entry groups. */
+  actionOrder?: string[];
   profiles: PublicAiProviderProfile[];
   actionPreferences: Partial<Record<AiFeatureAction, AiActionPreference>>;
+  recognitionSourcePreferences: AiRecognitionSourcePreferences;
   enabled: boolean;
   baseUrl: string;
   hasApiKey: boolean;
@@ -2252,15 +2058,16 @@ export type SaveAiProviderProfilePayload = {
 
 export type SaveAiProviderSettingsPayload = {
   activeProfileId: string;
+  /** User-defined order of the AI settings rule-entry groups. */
+  actionOrder?: string[];
   profiles: SaveAiProviderProfilePayload[];
   actionPreferences?: Partial<Record<AiFeatureAction, AiActionPreference>>;
+  recognitionSourcePreferences?: AiRecognitionSourcePreferences;
 };
 
 export type AiAnalyzeTarget =
-  | "prompt"
   | "prompt-category"
   | "prompt-tags"
-  | "prompt-options"
   | "image-category"
   | "image-tags"
   | "image-safety";
@@ -2278,16 +2085,16 @@ export type AiAnalyzePromptPayload = {
   knownCategories?: string[];
   runInBackground?: boolean;
   customInstructions?: string;
-  optionVariable?: string;
-  optionLabel?: string;
-  optionValue?: string;
 };
+
+export type AiOptimizePromptKind = "positive" | "negative";
 
 export type AiOptimizePromptPayload = {
   apiProfileId?: string;
   apiModelId?: string;
   customInstructions?: string;
   prompt: string;
+  promptKind?: AiOptimizePromptKind;
 };
 
 export type AiOptimizePromptData = {
@@ -2322,24 +2129,84 @@ export type AiReverseImagePromptData = {
   prompt: string;
 };
 
-export type RemotePromptAnalysisSection = {
-  key: string;
-  label: string;
-  variable: string;
-  values: string[];
-};
-
 export type RemotePromptAnalysis = {
   title: string;
   category: string;
   tags: string[];
-  sections: RemotePromptAnalysisSection[];
-  template: string;
   summary: string;
 };
 
+/** Allowed tag families for the structured V2 analysis protocol. */
+export const REMOTE_ANALYSIS_TAG_DIMENSIONS = [
+  "subject",
+  "scene",
+  "style",
+  "composition",
+  "lighting",
+  "color",
+  "mood",
+  "technique",
+  "era",
+  "other",
+] as const;
+
+export type RemoteAnalysisTagDimension = (typeof REMOTE_ANALYSIS_TAG_DIMENSIONS)[number];
+
+/** Allowed safety ratings for the structured V2 analysis protocol. */
+export const REMOTE_ANALYSIS_SAFETY_RATINGS = ["safe", "suggestive", "nsfw", "unknown"] as const;
+
+export type RemoteAnalysisSafetyRating = (typeof REMOTE_ANALYSIS_SAFETY_RATINGS)[number];
+
+export type RemoteAnalysisCategoryCandidate = {
+  /** Stable taxonomy id when the model matched a supplied catalog entry. */
+  categoryId?: string;
+  label: string;
+  /** Model confidence in [0, 1]. */
+  confidence: number;
+  /** Prompt fragments / observable evidence backing the candidate. */
+  evidence: string[];
+  /** Exactly one candidate should be primary. */
+  primary: boolean;
+};
+
+export type RemoteAnalysisTagCandidate = {
+  label: string;
+  /** Canonical spelling when the model normalized an alias. */
+  normalizedLabel?: string;
+  dimension: RemoteAnalysisTagDimension;
+  /** Model confidence in [0, 1]. */
+  confidence: number;
+  evidence: string[];
+};
+
+export type RemoteAnalysisSafety = {
+  rating: RemoteAnalysisSafetyRating;
+  confidence: number;
+  evidence: string[];
+};
+
+/**
+ * Structured, verifiable analysis result (protocol V2).
+ *
+ * Unlike the flat {@link RemotePromptAnalysis}, V2 carries per-candidate
+ * confidence, evidence and a tag dimension so the local adjudication pipeline
+ * can score, cap and protect labels instead of relying on model return order.
+ * A V2 result can be collapsed back to {@link RemotePromptAnalysis} for the
+ * existing pipeline, and a legacy V1 result can be lifted to V2 at low
+ * confidence — see utils/remoteAnalysisV2.ts.
+ */
+export type RemotePromptAnalysisV2 = {
+  schemaVersion: 2;
+  title: string;
+  summary: string;
+  categories: RemoteAnalysisCategoryCandidate[];
+  tags: RemoteAnalysisTagCandidate[];
+  safety: RemoteAnalysisSafety;
+  warnings: string[];
+};
+
 export type AiAnalyzePromptData = {
-  analysis: RemotePromptAnalysis;
+  analysis: RemotePromptAnalysisV2;
 };
 
 export type AiSettingsTestData = {
@@ -2348,4 +2215,54 @@ export type AiSettingsTestData = {
 
 export type AiListProviderModelsData = {
   models: AiProviderModelSettings[];
+};
+
+export type AiImageGenerationSize = "auto" | `${number}x${number}`;
+export type AiImageGenerationQuality = "auto" | "low" | "medium" | "high";
+export type AiImageGenerationFormat = "png" | "jpeg" | "webp";
+export type AiImageGenerationBackground = "auto" | "opaque" | "transparent";
+
+export type AiImageGenerationPayload = {
+  /** Standard configured API or the embedded Doubao free web canvas. */
+  generationProvider?: "api" | "doubao-web";
+  apiProfileId?: string;
+  apiModelId?: string;
+  customInstructions?: string;
+  referenceImageFileName?: string;
+  /** Reference image as a data URL (image-to-image). Empty string means none. */
+  referenceImageDataUrl?: string;
+  prompt: string;
+  negativePrompt?: string;
+  size?: AiImageGenerationSize;
+  quality?: AiImageGenerationQuality;
+  outputFormat?: AiImageGenerationFormat;
+  background?: AiImageGenerationBackground;
+  n?: number;
+  /** 是否在生成完成或失败后向 TapRelay (localhost:1122) 发送提醒通知 */
+  notificationEnabled?: boolean;
+  /** 豆包网页画布：用户选中的模型标签；空串表示跟随网页默认，不做自动切换。 */
+  doubaoModel?: string;
+  /** 豆包网页画布：用户选中的风格标签；空串表示跟随网页默认，不做自动切换。 */
+  doubaoStyle?: string;
+};
+
+export type AiGeneratedImage = {
+  dataUrl: string;
+  revisedPrompt?: string | null;
+};
+
+export type AiImageGenerationData = {
+  images: AiGeneratedImage[];
+  model: string;
+};
+
+export type AiSummarizePromptTitlePayload = {
+  apiProfileId?: string;
+  apiModelId?: string;
+  customInstructions?: string;
+  prompt: string;
+};
+
+export type AiSummarizePromptTitleData = {
+  title: string;
 };

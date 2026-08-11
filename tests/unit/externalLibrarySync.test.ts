@@ -31,11 +31,13 @@ describe("external library watcher reconciliation", () => {
     const source = Buffer.from("user-owned-source");
     await fs.writeFile(sourcePath, source);
 
+    const statSpy = vi.spyOn(fs, "stat");
     const result = await reconcileExternalLibraryEvents(makeLibrary(), root, {
       addedOrChangedPaths: [sourcePath],
       removedPaths: [],
     });
 
+    expect(statSpy).not.toHaveBeenCalled();
     expect(result.importedCount).toBe(1);
     expect(result.library.items[0].mediaStorage).toMatchObject({
       kind: "external",

@@ -12,7 +12,6 @@ import {
 } from "../utils/thumbnailImageCache";
 import type { PromptCardData } from "../utils/promptFilters";
 
-const thumbnailSessionVersion = Date.now();
 
 type NsfwImageProps = {
   image: Pick<PromptCardData, "imageFileName" | "nsfwRating" | "title"> & {
@@ -64,10 +63,7 @@ export function NsfwImage({
   const directThumbnailSrc = useMemo(
     () =>
       source === "thumbnail" && image.imageFileName
-        ? getImageThumbnailSrc(
-            image.imageFileName,
-            mediaVersion ? `${thumbnailSessionVersion}-${mediaVersion}` : thumbnailSessionVersion,
-          )
+        ? getImageThumbnailSrc(image.imageFileName, mediaVersion || undefined)
         : "",
     [image.imageFileName, isVideoMedia, mediaVersion, source],
   );
@@ -77,6 +73,7 @@ export function NsfwImage({
       : "",
   );
   const [thumbnailRetryIndex, setThumbnailRetryIndex] = useState(0);
+  const [thumbnailFallbackToOriginal, setThumbnailFallbackToOriginal] = useState(false);
   const thumbnailSrcWithRetry = useMemo(() => {
     if (source !== "thumbnail" || !resolvedThumbnailSrc || thumbnailRetryIndex === 0) {
       return resolvedThumbnailSrc;
@@ -84,7 +81,7 @@ export function NsfwImage({
 
     return `${resolvedThumbnailSrc}${resolvedThumbnailSrc.includes("?") ? "&" : "?"}retry=${thumbnailRetryIndex}`;
   }, [resolvedThumbnailSrc, source, thumbnailRetryIndex]);
-  const imageSrc = renderAsVideo
+  const imageSrc = renderAsVideo || thumbnailFallbackToOriginal
     ? originalImageSrc
     : source === "thumbnail"
       ? thumbnailSrcWithRetry
@@ -111,6 +108,7 @@ export function NsfwImage({
     if (!hasImage || isMissing) {
       setResolvedThumbnailSrc("");
       setThumbnailRetryIndex(0);
+      setThumbnailFallbackToOriginal(false);
       setIsImageLoaded(false);
       setBaseSrc("");
       return;
@@ -119,6 +117,7 @@ export function NsfwImage({
     if (renderAsVideo) {
       setResolvedThumbnailSrc("");
       setThumbnailRetryIndex(0);
+      setThumbnailFallbackToOriginal(false);
       setIsImageLoaded(false);
       return;
     }
@@ -126,6 +125,7 @@ export function NsfwImage({
     if (source !== "thumbnail") {
       setResolvedThumbnailSrc("");
       setThumbnailRetryIndex(0);
+      setThumbnailFallbackToOriginal(false);
       setIsImageLoaded(Boolean(originalImageSrc && isImageSrcLoaded(originalImageSrc)));
       return;
     }
@@ -133,6 +133,7 @@ export function NsfwImage({
     const nextThumbnailSrc = directThumbnailSrc || getResolvedThumbnailSrc(image.imageFileName);
     setResolvedThumbnailSrc(nextThumbnailSrc);
     setThumbnailRetryIndex(0);
+    setThumbnailFallbackToOriginal(false);
     setIsImageLoaded(Boolean(nextThumbnailSrc && isImageSrcLoaded(nextThumbnailSrc)));
   }, [directThumbnailSrc, hasImage, image.imageFileName, isMissing, renderAsVideo, originalImageSrc, source]);
 
@@ -173,7 +174,7 @@ export function NsfwImage({
     if (imageSrc) {
       rememberLoadedImageSrc(imageSrc);
     }
-    if (source === "thumbnail" && image.imageFileName && imageSrc) {
+    if (source === "thumbnail" && image.imageFileName && imageSrc && !thumbnailFallbackToOriginal) {
       rememberResolvedThumbnailSrc(image.imageFileName, directThumbnailSrc || imageSrc);
     }
     setHasImageFailed(false);
@@ -184,7 +185,7 @@ export function NsfwImage({
   }
 
   function handleImageError() {
-    if (source === "thumbnail" && image.imageFileName) {
+    if (source === "thumbnail" && image.imageFileName && !thumbnailFallbackToOriginal) {
       if (retryTimerRef.current !== null) {
         window.clearTimeout(retryTimerRef.current);
       }
@@ -201,7 +202,10 @@ export function NsfwImage({
         return;
       }
 
-      setHasImageFailed(true);
+      setThumbnailFallbackToOriginal(true);
+      setThumbnailRetryIndex(0);
+      setHasImageFailed(false);
+      setIsImageLoaded(Boolean(originalImageSrc && isImageSrcLoaded(originalImageSrc)));
       return;
     }
 
@@ -260,9 +264,9 @@ export function NsfwImage({
           <img
             ref={imageRef}
             alt={alt}
-            className={`${imageClassName} transition-opacity duration-500 ease-in-out ${
-              shouldDisplayImage ? "opacity-100" : "opacity-0"
-            } ${shouldBlur ? "scale-[1.03] blur-2xl" : ""}`}
+            className={`${imageClassName} ${
+              source === "thumbnail" ? "" : "transition-opacity duration-500 ease-in-out"
+            } ${shouldDisplayImage ? "opacity-100" : "opacity-0"} ${shouldBlur ? "scale-[1.03] blur-2xl" : ""}`}
             decoding="async"
             fetchPriority={fetchPriority}
             key={imageSrc}

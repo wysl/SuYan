@@ -6,6 +6,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -31,7 +32,7 @@ import {
   ExternalLink,
   FileText,
   FolderTree,
-  Gauge,
+  GripVertical,
   Globe2,
   Grid2X2,
   Heart,
@@ -42,6 +43,7 @@ import {
   LayoutGrid,
   Minus,
   Moon,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -59,13 +61,29 @@ import {
   Tags,
   Trash2,
   Upload,
-  Wifi,
   X,
 } from "lucide-react";
 import { AppDialog, DialogCloseButton } from "@/components/ui/AppDialog";
 import { AppLogoMark } from "@/components/ui/AppLogoMark";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { CAPSULE_TONES } from "@/components/ui/capsuleTones";
 import { CardScrollTopButton } from "./CardScrollTopButton";
+import { appVersion, suyanGithubReleasesUrl } from "../appVersion";
+import { ImageDropOverlay } from "./shell/ImageDropOverlay";
+import { StatusToast } from "./shell/StatusToast";
+import { AiErrorDialog } from "./shell/AiErrorDialog";
+import { DeferredViewFallback, PromptDetailFallback } from "./shell/DeferredFallbacks";
+import { AppTitleBar } from "./shell/AppTitleBar";
+import { AboutDialog } from "./shell/AboutDialog";
+import { LogExportDialog, type LogExportSelection } from "./shell/LogExportDialog";
+import {
+  PromptSiteRecommendationsView,
+  promptSiteRecommendations,
+  promptSiteCardToneClassNames,
+  type PromptSiteCardToneClassNames,
+} from "./recommendations/PromptSiteRecommendations";
+import { StartupLoadingScreen } from "./startup/StartupLoadingScreen";
 import startupArt1 from "../assets/startup-art-1.png?url";
 import startupArt2 from "../assets/startup-art-2.png?url";
 import startupArt3 from "../assets/startup-art-3.png?url";
@@ -79,10 +97,10 @@ import type {
   PromptLexiconEntry,
   PromptLexiconKind,
   PromptLexiconSettings,
-  PromptParameterLexiconEntry,
   ThemeMode,
 } from "../types/library";
-import type { AiAnalyzePromptPayload } from "../types/ai";
+import type { AiAnalyzePromptPayload, AiImageGenerationPayload } from "../types/ai";
+import type { CanvasPromptOrigin, DoubaoWebCanvasStatus } from "../types/canvas";
 import { NsfwImage } from "./NsfwImage";
 import { MediaFullscreenOverlay } from "./MediaFullscreenOverlay";
 import { VideoPromptTile } from "./video/VideoPromptTile";
@@ -91,7 +109,6 @@ import {
   allCategoriesValue,
   filterFavoritePromptCards,
   filterPromptCards,
-  getPromptCategories,
   getPopularTags,
   toPromptCardData,
   type PromptCardData,
@@ -104,9 +121,31 @@ import {
   spreadPromptGroupImages,
   type PromptImageGroup,
 } from "../utils/promptImageGroups";
+import {
+  getPromptGroupCategoryLabels,
+  getPromptGroupCategoryMembershipKeys,
+} from "../utils/promptGroupCategories";
 import { distributeItemsByTopEdge } from "../utils/masonryLayout";
+import { maxAnalysisResultCount, mergeAnalysisLabelsWithFitCap } from "../utils/analysisMergeCap";
 import { normalizePromptText } from "../utils/normalizePromptText";
-import { photographyCategoryDefinitions, photographyCategoryLabels } from "../utils/photographyCategories";
+import {
+  photographyCategoryDefinitions,
+  photographyCategoryLabels,
+  dedupeExclusiveGenreLabels,
+  resolvePhotographyCategory,
+} from "../utils/photographyCategories";
+import { normalizeImageTag } from "../utils/tagNormalization";
+import { sanitizePromptTags } from "../utils/promptAnalysis";
+import { isVideoMediaFile } from "../utils/mediaFileTypes";
+import {
+  createEmptyCategoryTaxonomy,
+  compareCategoryGroupPriority,
+  resolveCategoryIdFromLegacyName,
+  resolveCategoryName,
+  taxonomyToLexiconCategories,
+} from "../utils/categoryTaxonomy";
+import type { CategoryTaxonomy } from "../types/category";
+import { buildCustomCategoryId, normalizeCategoryLabelKey } from "../utils/categoryId";
 import { getImageSrc, getStartupGalleryImageSrc } from "../utils/getImageSrc";
 import {
   selectRandomStartupGalleryImages,
@@ -114,12 +153,7 @@ import {
 } from "../utils/startupGallerySelection";
 import {
   createDefaultPromptLexiconSettings,
-  getPromptParameterGroup,
   getPromptTagGroup,
-  migratePromptParameterLexiconGroups,
-  normalizePromptParameterGroupPath,
-  validatePromptParameterMenuEntries,
-  type PromptParameterMenuValidationResult,
 } from "../utils/promptLexicons";
 import { getPromptSectionKeyByVariable, promptSectionMeta, resolvePromptTemplateText } from "../utils/promptSplit";
 import {
@@ -143,6 +177,10 @@ import {
   type TagConfigurationDraft,
 } from "../utils/tagSettings";
 import { hasBuiltinModuleCapability } from "../utils/moduleRegistry";
+import {
+  defaultSystemPreferenceSection,
+  type SystemPreferenceSection,
+} from "../utils/systemPreferences";
 
 const AiSettingsDialog = lazy(() =>
   import("./AiSettingsDialog").then((module) => ({ default: module.AiSettingsDialog })),
@@ -150,41 +188,30 @@ const AiSettingsDialog = lazy(() =>
 const NsfwSettingsDialog = lazy(() =>
   import("./NsfwSettingsDialog").then((module) => ({ default: module.NsfwSettingsDialog })),
 );
-const ProxySettingsDialog = lazy(() =>
-  import("./ProxySettingsDialog").then((module) => ({ default: module.ProxySettingsDialog })),
-);
-const StartupGallerySettingsDialog = lazy(() =>
-  import("./StartupGallerySettingsDialog").then((module) => ({ default: module.StartupGallerySettingsDialog })),
-);
-const PerformanceSettingsDialog = lazy(() =>
-  import("./PerformanceSettingsDialog").then((module) => ({ default: module.PerformanceSettingsDialog })),
+const SystemPreferencesDialog = lazy(() =>
+  import("./SystemPreferencesDialog").then((module) => ({ default: module.SystemPreferencesDialog })),
 );
 const loadPromptDetailDialog = () => import("./PromptDetailDialog");
 const PromptDetailDialog = lazy(() => loadPromptDetailDialog().then((module) => ({ default: module.PromptDetailDialog })));
 const PromptLibraryManagerView = lazy(() =>
   import("./PromptLibraryManagerDialog").then((module) => ({ default: module.PromptLibraryManagerView })),
 );
+const CanvasView = lazy(() =>
+  import("./CanvasView").then((module) => ({ default: module.CanvasView })),
+);
 
-const pageSize = 36;
+const pageSize = 16;
 const gridVisibleTagCount = 5;
-const contentShellClassName = "mx-auto w-full max-w-[1280px]";
-const lexiconShellClassName = "mx-auto w-full max-w-[1400px]";
+const contentShellClassName = "mx-auto w-full max-w-[min(100%,1280px)]";
+const lexiconShellClassName = "mx-auto w-full max-w-[min(100%,1400px)]";
 const contentShellMaxWidth = 1280;
 const lexiconShellMaxWidth = 1400;
-const pageGutterClassName = "px-4 min-[640px]:px-6 min-[1024px]:px-8 min-[1440px]:px-10";
+const pageGutterClassName = "px-3 min-[640px]:px-5 min-[900px]:px-6 min-[1024px]:px-8 min-[1440px]:px-10";
+/** Waterfall column count: smooth 2–10 steps (matches persisted store range). */
 const minMasonryColumnCount = 2;
 const maxMasonryColumnCount = 10;
 const defaultMasonryColumnCount = 4;
 const masonryColumnGap = 16;
-const appVersion = "0.2.0";
-const suyanGithubRepoUrl = "https://github.com/guliacer/SuYan";
-const suyanGithubReleasesUrl = `${suyanGithubRepoUrl}/releases`;
-const allParameterSourcesValue = "__all__";
-const globalParameterSourceValue = "__global__";
-const allParameterGroupsValue = "__all_parameter_groups__";
-const parameterItemMenuPrefix = "__parameter_item__:";
-const defaultParameterGroupLabel = "自定义参数";
-const ungroupedParameterGroupLabel = "未分组";
 const allCategoryGroupsValue = "__all_category_groups__";
 const allTagGroupsValue = "__all_tag_groups__";
 const imageGroupMenuPrefix = "image-group:";
@@ -193,274 +220,23 @@ const imageItemMenuPrefix = "image-item:";
 const defaultCategoryGroupLabel = "自定义分类";
 const defaultTagGroupLabel = "自定义标签";
 const ungroupedImageGroupLabel = "未分组";
-const validParameterMenuValidation: PromptParameterMenuValidationResult = { isValid: true, issues: [] };
 
-type PromptSiteRecommendation = {
-  description: string;
-  domain: string;
-  tags: string[];
-  title: string;
-  url: string;
-};
-
-const promptSiteRecommendations: PromptSiteRecommendation[] = [
-  {
-    title: "即梦AI",
-    domain: "jimeng.jianying.com",
-    url: "https://jimeng.jianying.com/ai-tool/home",
-    description: "剪映 AI 创作工具，参考中文图像、视频玩法和提示词。",
-    tags: ["中文工具", "图像视频", "创作灵感"],
-  },
-  {
-    title: "civitai（C站）",
-    domain: "civitai.red",
-    url: "https://civitai.red/images",
-    description: "C站图片灵感页，参考 SD 作品、模型效果和提示词。",
-    tags: ["模型社区", "SD 生态", "图片案例"],
-  },
-  {
-    title: "LibLibAI",
-    domain: "liblib.art",
-    url: "https://www.liblib.art/inspiration",
-    description: "中文 AI 灵感库，查找图片案例、模型风格和提示词。",
-    tags: ["中文灵感", "图像案例", "模型参考"],
-  },
-  {
-    title: "YouMind",
-    domain: "youmind.com",
-    url: "https://youmind.com/zh-CN/gpt-image-2-prompts",
-    description: "GPT Image 2 案例，参考封面、产品图和创意图提示词。",
-    tags: ["GPT Image 2", "案例合集", "中文页面"],
-  },
-  {
-    title: "awesome-gpt-image-2",
-    domain: "gpt-image2.canghe.ai",
-    url: "https://gpt-image2.canghe.ai",
-    description: "GPT Image 2 案例导航，浏览多题材提示词和效果。",
-    tags: ["GPT Image 2", "案例导航", "图像生成"],
-  },
-  {
-    title: "aiart.pics",
-    domain: "aiart.pics",
-    url: "https://aiart.pics",
-    description: "AI 艺术案例站，查找摄影、人物、产品和视觉参考。",
-    tags: ["AI 艺术", "提示词案例", "视觉参考"],
-  },
-  {
-    title: "提示词填空器",
-    domain: "promptfill.tanshilong.com",
-    url: "https://promptfill.tanshilong.com/explore",
-    description: "提示词填空工具，拆分可替换参数并查看主题案例。",
-    tags: ["参数填空", "提示词拆解", "案例探索"],
-  },
-  {
-    title: "AI 图片 Prompt 案例库",
-    domain: "webtomind.com",
-    url: "https://webtomind.com/zh-CN/prompts",
-    description: "中文图片 Prompt 案例库，收集题材和复用结构。",
-    tags: ["中文案例库", "图像 Prompt", "题材分类"],
-  },
-  {
-    title: "LeaderAI 立得AI",
-    domain: "www.leaderai.top",
-    url: "https://www.leaderai.top/#/preset-prompt-page",
-    description: "设计师提示词预设页，查找图像创作和设计灵感。",
-    tags: ["提示词预设", "设计灵感", "中文页面"],
-  },
-  {
-    title: "哗啦哗啦广场",
-    domain: "img.xmiaom.com",
-    url: "https://img.xmiaom.com",
-    description: "中文 AI 图片广场，浏览热门作品和提示词灵感。",
-    tags: ["中文图片广场", "热门作品", "提示词灵感"],
-  },
-  {
-    title: "上码 UPMA 图片提示词",
-    domain: "upma.cn",
-    url: "https://www.upma.cn/image-prompts",
-    description: "GPT Image 2 生图案例库，参考中文案例和提示词结构。",
-    tags: ["GPT Image 2", "中文案例", "图片 Prompt"],
-  },
-  {
-    title: "SeaArt AI",
-    domain: "seaart.ai",
-    url: "https://www.seaart.ai/explore",
-    description: "AI 创作社区，查看模型效果、角色和场景案例。",
-    tags: ["创作社区", "图片探索", "模型案例"],
-  },
-];
-
-type PersonalRecommendationSection = {
-  id: string;
-  title: string;
-  description: string;
-  items: PromptSiteRecommendation[];
-};
-
-const personalProjectRecommendations: PromptSiteRecommendation[] = [
-  {
-    title: "ComfyUI-GuliNodes",
-    domain: "github.com",
-    url: "https://github.com/guliacer/ComfyUI-GuliNodes",
-    description: "ComfyUI 工具合集，囊括多种有用节点与工具。",
-    tags: ["个人项目", "ComfyUI", "节点扩展"],
-  },
-  {
-    title: "GetPhoto 图像提取",
-    domain: "github.com",
-    url: "https://github.com/guliacer/GetPhoto",
-    description: "油猴插件，适配多站点，支持小红书 AI 爬图。",
-    tags: ["个人项目", "油猴插件", "图像提取"],
-  },
-  {
-    title: "PagePurifier 网页优化",
-    domain: "github.com",
-    url: "https://github.com/guliacer/PagePurifier",
-    description: "油猴插件，拉黑 B 站广告 UP，精简网页广告。",
-    tags: ["个人项目", "油猴插件", "网页净化"],
-  },
-  {
-    title: "Preview 网页图像悬浮工具",
-    domain: "github.com",
-    url: "https://github.com/guliacer/preview",
-    description: "油猴插件，鼠标悬停即可查看图像大图。",
-    tags: ["个人项目", "油猴插件", "图像预览"],
-  },
-  {
-    title: "VeilReader 网页摸鱼小说工具",
-    domain: "github.com",
-    url: "https://github.com/guliacer/VeilReader",
-    description: "油猴插件，摸鱼的钱才是你赚到的钱。",
-    tags: ["个人项目", "油猴插件", "摸鱼阅读"],
-  },
-  {
-    title: "CookClick 网页美化",
-    domain: "github.com",
-    url: "https://github.com/guliacer/cookclick",
-    description: "油猴插件，点击网页随机生成符号。",
-    tags: ["个人项目", "油猴插件", "网页美化"],
-  },
-  {
-    title: "PixGo",
-    domain: "github.com",
-    url: "https://github.com/guliacer/PixGo",
-    description: "改善索尼相机无线传图。",
-    tags: ["个人项目", "软件", "无线传图"],
-  },
-  {
-    title: "新闻 HTML 日报",
-    domain: "github.com",
-    url: "https://github.com/guliacer/news-html-digest",
-    description: "Skill 脚本，抓取新闻，消除信息差。",
-    tags: ["个人项目", "Skill", "新闻抓取"],
-  },
-];
-
-const friendProjectRecommendations: PromptSiteRecommendation[] = [
-  {
-    title: "ComfyNexus",
-    domain: "github.com",
-    url: "https://github.com/Allen-xxa/ComfyNexus",
-    description: "最好用的 ComfyUI 启动器。",
-    tags: ["友情项目", "ComfyUI", "启动器"],
-  },
-  {
-    title: "提示词小助手",
-    domain: "github.com",
-    url: "https://github.com/yawiii/ComfyUI-Prompt-Assistant",
-    description: "最好用的提示词优化工具。",
-    tags: ["友情项目", "ComfyUI", "提示词优化"],
-  },
-  {
-    title: "花佬",
-    domain: "pan.quark.cn",
-    url: "https://pan.quark.cn/s/3b60f26d43a8",
-    description: "花佬整理的提示词知识库，学习写法、案例和结构。",
-    tags: ["友情项目", "提示词推荐", "资源分享"],
-  },
-];
-
-const apiSiteRecommendations: PromptSiteRecommendation[] = [
-  {
-    title: "商汤 token-plan",
-    domain: "platform.sensenova.cn",
-    url: "https://platform.sensenova.cn/console",
-    description: "免费模型，手机号登陆，不可签到。",
-    tags: ["API 网站", "商汤", "免费模型"],
-  },
-  {
-    title: "斑马 API",
-    domain: "bmapi.020212.xyz",
-    url: "https://bmapi.020212.xyz/register?aff=VFNVKJJYLQQR",
-    description: "QQ 邮箱登录，签到送 100 积分。",
-    tags: ["API 网站", "免费额度", "签到积分"],
-  },
-  {
-    title: "哈基米",
-    domain: "api.gemai.cc",
-    url: "https://api.gemai.cc/sign-up?aff=AM58",
-    description: "QQ 邮箱登录，签到送少量额度。",
-    tags: ["API 网站", "免费额度", "签到额度"],
-  },
-  {
-    title: "Guyscode",
-    domain: "www.guyscode.com",
-    url: "https://www.guyscode.com/register?aff=5TEUB7CZEJCS",
-    description: "QQ 邮箱登录，签到送少量额度。",
-    tags: ["API 网站", "免费额度", "签到额度"],
-  },
-  {
-    title: "RouterTeam",
-    domain: "ai.router.team",
-    url: "https://ai.router.team/register?invite=4Q2MQZFC",
-    description: "QQ 邮箱登录，签到送少量额度。",
-    tags: ["API 网站", "免费额度", "签到额度"],
-  },
-  {
-    title: "rua.chat",
-    domain: "api.rua.chat",
-    url: "https://api.rua.chat/sign-up?aff=DQM1",
-    description: "QQ 邮箱登录，签到送少量额度。",
-    tags: ["API 网站", "免费额度", "签到额度"],
-  },
-  {
-    title: "咕嘎咕嘎",
-    domain: "ai.xmiaom.com",
-    url: "https://ai.xmiaom.com/sign-up?aff=bibi",
-    description: "微信或 GitHub 注册，签到送少量额度。",
-    tags: ["API 网站", "微信注册", "签到额度"],
-  },
-  {
-    title: "小旋风",
-    domain: "console.xiaoxuanfeng.cc",
-    url: "https://console.xiaoxuanfeng.cc/register?aff=5T38TJVNM4X6",
-    description: "QQ 邮箱注册，不可签到，但价格较低。",
-    tags: ["API 网站", "QQ 邮箱", "低价中转"],
-  },
-  {
-    title: "FastAI 模型",
-    domain: "www.fastaitoken.com",
-    url: "https://www.fastaitoken.com/register?aff=S8F8YJY426VA",
-    description: "QQ 邮箱注册，不可签到，但价格较低。",
-    tags: ["API 网站", "QQ 邮箱", "低价模型"],
-  },
-];
-
-const startupLoadingSteps = ["正在唤醒素材库", "翻阅素材星图", "点亮提示词库", "整理你的画廊"];
-
-const startupArtImages = [startupArt1, startupArt2, startupArt3, startupArt4, startupArt5, startupArt6];
-const STARTUP_CAROUSEL_INTERVAL_MS = 2400;
+/**
+ * Fixed startup gallery duration. Always reserve this wall-clock window so the
+ * intro is not auto-dismissed early; users may click to skip manually.
+ * Also keeps category/tag workspaces warming in the background.
+ */
+const STARTUP_OVERLAY_FIXED_MS = 6000;
+const STARTUP_PREWARM_VIEWS: LibraryMainView[] = ["categoryLexicon", "tagLexicon"];
 
 type CollectionMode = "all" | "featured";
 type GalleryMode = "masonry" | "grid";
-type LibraryMainView = "home" | "promptLibrary" | "parameterLexicon" | "categoryLexicon" | "tagLexicon" | "promptSites";
+type LibraryMainView = "home" | "canvas" | "promptLibrary" | "categoryLexicon" | "tagLexicon" | "promptSites";
 type LibrarySidebarActiveView =
   | LibraryMainView
   | "aiSettings"
   | "nsfwSettings"
-  | "proxySettings"
-  | "performanceSettings"
-  | "startupGallerySettings";
+  | "systemPreferences";
 type CategoryAnalysisStatus = "running" | "completed" | "canceled";
 type CategoryAnalysisProgress = {
   analyzed: number;
@@ -472,27 +248,68 @@ type CategoryAnalysisProgress = {
   status: CategoryAnalysisStatus;
   total: number;
 };
-const maxBatchAiTagCount = 15;
+/** 分类 / 标签 / 参数三类分析结果的统一上限，见 utils/analysisMergeCap。 */
+const maxBatchAiTagCount = maxAnalysisResultCount;
+const maxAiCategoryCount = maxAnalysisResultCount;
 type MasonryPromptItem = {
   imageCount: number;
   item: PromptCardData;
 };
 
-function ImageDropOverlay() {
-  return (
-    <div
-      aria-hidden="true"
-      className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-overlay/60 p-6 backdrop-blur-sm"
-    >
-      <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-primary bg-panel/95 px-10 py-8 text-center shadow-elevated">
-        <span className="flex size-14 items-center justify-center rounded-full bg-primary-soft text-primary">
-          <Upload size={26} />
-        </span>
-        <p className="text-base font-semibold text-foreground">松开鼠标即可导入图片</p>
-        <p className="text-sm text-muted">单张成卡，多张归组</p>
-      </div>
-    </div>
-  );
+const themeModeOptions: Array<{ value: ThemeMode; label: string; icon: React.ReactNode }> = [
+  { value: "light", label: getThemeModeLabel("light"), icon: <Sun size={15} /> },
+  { value: "dark", label: getThemeModeLabel("dark"), icon: <Moon size={15} /> },
+];
+
+let libraryViewRenderCount = 0;
+let libraryViewFirstRenderMs = 0;
+let libraryViewLastReportMs = 0;
+
+function recordLibraryViewRender(): void {
+  const now = Date.now();
+
+  if (libraryViewFirstRenderMs === 0) {
+    libraryViewFirstRenderMs = now;
+  }
+
+  libraryViewRenderCount += 1;
+  const sinceFirstMs = now - libraryViewFirstRenderMs;
+
+  if (sinceFirstMs > 30000) {
+    return;
+  }
+
+  if (now - libraryViewLastReportMs >= 500 || libraryViewRenderCount % 50 === 0) {
+    libraryViewLastReportMs = now;
+    try {
+      window.suyanApi.logStartupEvent("render:count", {
+        renderCount: libraryViewRenderCount,
+        sinceFirstMs,
+      });
+    } catch {
+      // Telemetry must never block rendering.
+    }
+  }
+}
+
+function measureDerivation<T>(label: string, inputSize: number, compute: () => T): T {
+  const startedAt = performance.now();
+  const result = compute();
+  const durationMs = performance.now() - startedAt;
+
+  if (durationMs >= 30) {
+    try {
+      window.suyanApi.logStartupEvent("derivation:slow", {
+        label,
+        inputSize,
+        durationMs: Math.round(durationMs * 100) / 100,
+      });
+    } catch {
+      // Telemetry must never block derivations.
+    }
+  }
+
+  return result;
 }
 
 export function LibraryView() {
@@ -502,32 +319,46 @@ export function LibraryView() {
   const searchQuery = useLibraryStore((state) => state.searchQuery);
   const tagOrder = useLibraryStore((state) => state.tagOrder);
   const likedImageIds = useLibraryStore((state) => state.likedImageIds);
+  const starredRecommendations = useLibraryStore((state) => state.starredRecommendations);
+  const toggleRecommendationStar = useLibraryStore((state) => state.toggleRecommendationStar);
   const generationModelOrder = useLibraryStore((state) => state.generationModelOrder);
   const hiddenGenerationModels = useLibraryStore((state) => state.hiddenGenerationModels);
   const autoNsfwGrading = useLibraryStore((state) => state.autoNsfwGrading);
   const blurNsfwImages = useLibraryStore((state) => state.blurNsfwImages);
   const nsfwGradingSpeed = useLibraryStore((state) => state.nsfwGradingSpeed);
   const promptLexicons = useLibraryStore((state) => state.promptLexicons);
+  const categoryTaxonomy = useLibraryStore((state) => state.categoryTaxonomy);
   const savedMasonryTileWidth = useLibraryStore((state) => state.masonryTileWidth);
   const savedMaterialBrowserCollectionMode = useLibraryStore((state) => state.materialBrowserCollectionMode);
   const savedMaterialBrowserGalleryMode = useLibraryStore((state) => state.materialBrowserGalleryMode);
   const savedMaterialBrowserSortMode = useLibraryStore((state) => state.materialBrowserSortMode);
   const savedMaterialBrowserSortDirection = useLibraryStore((state) => state.materialBrowserSortDirection);
   const savedMaterialBrowserRandomSeed = useLibraryStore((state) => state.materialBrowserRandomSeed);
+  const savedMaterialBrowserScrollTop = useLibraryStore((state) => state.materialBrowserScrollTop);
   const recentImportPinIds = useLibraryStore((state) => state.recentImportPinIds);
   const clearRecentImportPins = useLibraryStore((state) => state.clearRecentImportPins);
   const aiSettings = useLibraryStore((state) => state.aiSettings);
+  const canvasDraft = useLibraryStore((state) => state.canvasDraft);
+  const canvasGenerationResults = useLibraryStore((state) => state.canvasGenerationResults);
+  const canvasLastModel = useLibraryStore((state) => state.canvasLastModel);
   const proxySettings = useLibraryStore((state) => state.proxySettings);
   const moduleState = useLibraryStore((state) => state.moduleState);
   const isLoading = useLibraryStore((state) => state.isLoading);
   const isBusy = useLibraryStore((state) => state.isBusy);
   const statusMessage = useLibraryStore((state) => state.statusMessage);
+  const aiErrorDialog = useLibraryStore((state) => state.aiErrorDialog);
+  const clearAiErrorDialog = useLibraryStore((state) => state.clearAiErrorDialog);
+  const aiAnalysisCircuitOpen = useLibraryStore((state) => state.aiAnalysisCircuitOpen);
   const load = useLibraryStore((state) => state.load);
   const showStatusMessage = useLibraryStore((state) => state.showStatusMessage);
   const setSearchQuery = useLibraryStore((state) => state.setSearchQuery);
+  const updateCanvasDraft = useLibraryStore((state) => state.updateCanvasDraft);
+  const setCanvasGenerationResults = useLibraryStore((state) => state.setCanvasGenerationResults);
+  const setCanvasLastModel = useLibraryStore((state) => state.setCanvasLastModel);
   const saveNsfwSettings = useLibraryStore((state) => state.saveNsfwSettings);
   const gradeAllImagesForNsfw = useLibraryStore((state) => state.gradeAllImagesForNsfw);
   const saveAiSettings = useLibraryStore((state) => state.saveAiSettings);
+  const saveAiActionModelPreference = useLibraryStore((state) => state.saveAiActionModelPreference);
   const testAiSettings = useLibraryStore((state) => state.testAiSettings);
   const saveProxySettings = useLibraryStore((state) => state.saveProxySettings);
   const testProxySettings = useLibraryStore((state) => state.testProxySettings);
@@ -544,6 +375,7 @@ export function LibraryView() {
   const addAndScanLibraryRoot = useLibraryStore((state) => state.addAndScanLibraryRoot);
   const scanLibraryRoot = useLibraryStore((state) => state.scanLibraryRoot);
   const setLibraryRootWatch = useLibraryStore((state) => state.setLibraryRootWatch);
+  const reorderLibraryRoots = useLibraryStore((state) => state.reorderLibraryRoots);
   const remapLibraryRoot = useLibraryStore((state) => state.remapLibraryRoot);
   const removeLibraryRoot = useLibraryStore((state) => state.removeLibraryRoot);
   const purgeMissingLibraryRootItems = useLibraryStore((state) => state.purgeMissingLibraryRootItems);
@@ -557,6 +389,7 @@ export function LibraryView() {
   const importWordDocument = useLibraryStore((state) => state.importWordDocument);
   const importClipboardImage = useLibraryStore((state) => state.importClipboardImage);
   const importImageBuffers = useLibraryStore((state) => state.importImageBuffers);
+  const importGeneratedImages = useLibraryStore((state) => state.importGeneratedImages);
   const importClipboardImageForItem = useLibraryStore((state) => state.importClipboardImageForItem);
   const downloadRemoteMaterial = useLibraryStore((state) => state.downloadRemoteMaterial);
   const importZip = useLibraryStore((state) => state.importZip);
@@ -564,10 +397,17 @@ export function LibraryView() {
   const copyImage = useLibraryStore((state) => state.copyImage);
   const exportImage = useLibraryStore((state) => state.exportImage);
   const saveItem = useLibraryStore((state) => state.saveItem);
+  const saveItemsBatch = useLibraryStore((state) => state.saveItemsBatch);
+  const clearLexiconDomain = useLibraryStore((state) => state.clearLexiconDomain);
   const saveGenerationModelPreferences = useLibraryStore((state) => state.saveGenerationModelPreferences);
+  const saveAiRecognitionSourcePreferences = useLibraryStore((state) => state.saveAiRecognitionSourcePreferences);
   const savePromptLexicons = useLibraryStore((state) => state.savePromptLexicons);
+  const movePromptGroupsToCategory = useLibraryStore((state) => state.movePromptGroupsToCategory);
+  const upsertCustomCategory = useLibraryStore((state) => state.upsertCustomCategory);
+  const deleteCustomCategory = useLibraryStore((state) => state.deleteCustomCategory);
   const saveMasonryTileWidth = useLibraryStore((state) => state.saveMasonryTileWidth);
   const saveMaterialBrowserSettings = useLibraryStore((state) => state.saveMaterialBrowserSettings);
+  const saveMaterialBrowserScrollTop = useLibraryStore((state) => state.saveMaterialBrowserScrollTop);
   const importPromptLexicon = useLibraryStore((state) => state.importPromptLexicon);
   const exportPromptLexicon = useLibraryStore((state) => state.exportPromptLexicon);
   const importPromptLexiconImage = useLibraryStore((state) => state.importPromptLexiconImage);
@@ -580,13 +420,18 @@ export function LibraryView() {
   const [randomSeed, setRandomSeed] = useState(savedMaterialBrowserRandomSeed);
   const [collectionMode, setCollectionMode] = useState<CollectionMode>(savedMaterialBrowserCollectionMode);
   const [galleryMode, setGalleryMode] = useState<GalleryMode>(savedMaterialBrowserGalleryMode);
-  const [selectedCategory, setSelectedCategory] = useState(allCategoriesValue);
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [mainView, setMainView] = useState<LibraryMainView>("home");
   const [sidebarActiveView, setSidebarActiveView] = useState<LibrarySidebarActiveView>("home");
   const [imageSizeById, setImageSizeById] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [masonryColumnCount, setMasonryColumnCount] = useState(() => migrateTileWidthToColumnCount(savedMasonryTileWidth));
+  // Layout columns may lag one frame behind the slider so dragging stays smooth.
+  const [masonryLayoutColumnCount, setMasonryLayoutColumnCount] = useState(() =>
+    migrateTileWidthToColumnCount(savedMasonryTileWidth),
+  );
   const [isMasonrySizeControlOpen, setIsMasonrySizeControlOpen] = useState(false);
+  const isMasonryAdjustingRef = useRef(false);
+  const masonryLayoutRafRef = useRef(0);
   const [visibleCount, setVisibleCount] = useState(pageSize);
   const [detailItemId, setDetailItemId] = useState<string | null>(null);
   const [fullscreenMedia, setFullscreenMedia] = useState<PromptCardData | null>(null);
@@ -598,9 +443,10 @@ export function LibraryView() {
 
   const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
   const [isNsfwSettingsOpen, setIsNsfwSettingsOpen] = useState(false);
-  const [isProxySettingsOpen, setIsProxySettingsOpen] = useState(false);
-  const [isPerformanceSettingsOpen, setIsPerformanceSettingsOpen] = useState(false);
-  const [isStartupGallerySettingsOpen, setIsStartupGallerySettingsOpen] = useState(false);
+  const [isSystemPreferencesOpen, setIsSystemPreferencesOpen] = useState(false);
+  const [systemPreferencesSection, setSystemPreferencesSection] = useState<SystemPreferenceSection>(
+    defaultSystemPreferenceSection,
+  );
   const [isLibraryRootsOpen, setIsLibraryRootsOpen] = useState(false);
   const [isDirectoryImportModeOpen, setIsDirectoryImportModeOpen] = useState(false);
   const [isImportMenuOpen, setIsImportMenuOpen] = useState(false);
@@ -616,8 +462,14 @@ export function LibraryView() {
   const [hasInitialLoadFinished, setHasInitialLoadFinished] = useState(false);
   const [mountedLexiconViews, setMountedLexiconViews] = useState<Set<LibraryMainView>>(() => new Set());
   const [hasPremountedLexicons, setHasPremountedLexicons] = useState(false);
+  /** Tracks when the startup sequence began so we can enforce a fixed intro length. */
+  const startupSequenceStartedAtRef = useRef<number>(performance.now());
+  const [hasStartupHoldElapsed, setHasStartupHoldElapsed] = useState(false);
   const cardsStartRef = useRef<HTMLDivElement | null>(null);
+  const homeScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const pendingHomeScrollRestoreRef = useRef<number | null>(null);
+  const hasRestoredHomeScrollRef = useRef(false);
   const sidebarElementRef = useRef<HTMLElement | null>(null);
   const sidebarWidthRef = useRef(sidebarWidth);
   const isSidebarResizingRef = useRef(false);
@@ -626,6 +478,19 @@ export function LibraryView() {
   const importMenuContentRef = useRef<HTMLDivElement | null>(null);
   const hasNotifiedRendererReadyRef = useRef(false);
   const viewSwitchStartedAtRef = useRef<{ startedAt: number; view: LibraryMainView } | null>(null);
+  const viewSwitchRenderStartedAtRef = useRef<number | null>(null);
+  const pendingViewSwitch = viewSwitchStartedAtRef.current;
+
+  if (
+    pendingViewSwitch?.view === mainView &&
+    viewSwitchRenderStartedAtRef.current === null
+  ) {
+    viewSwitchRenderStartedAtRef.current = performance.now();
+    logRendererStartupEvent("view-switch:render-start", {
+      durationMs: Math.round(performance.now() - pendingViewSwitch.startedAt),
+      to: mainView,
+    });
+  }
 
   useEffect(() => {
     // Skip while dragging so a late state write cannot overwrite the live width.
@@ -635,6 +500,32 @@ export function LibraryView() {
 
     sidebarWidthRef.current = sidebarWidth;
   }, [sidebarWidth]);
+
+  // Keep the app usable on narrow / short displays: auto-collapse wide sidebars
+  // when the window cannot fit main content + expanded nav comfortably.
+  useEffect(() => {
+    const NARROW_CONTENT_BREAKPOINT = 1100;
+    const COMPACT_WIDTH = minSidebarWidth;
+
+    function adaptSidebarToViewport() {
+      if (isSidebarResizingRef.current) {
+        return;
+      }
+
+      const viewportWidth = window.innerWidth;
+      if (viewportWidth < NARROW_CONTENT_BREAKPOINT && isSidebarOpen) {
+        if (sidebarWidthRef.current > compactSidebarBreakpoint) {
+          commitSidebarWidth(COMPACT_WIDTH);
+        }
+      }
+    }
+
+    adaptSidebarToViewport();
+    window.addEventListener("resize", adaptSidebarToViewport);
+    return () => window.removeEventListener("resize", adaptSidebarToViewport);
+    // commitSidebarWidth is stable enough for this session; width state is read via ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSidebarOpen]);
 
   useEffect(() => {
     let isCanceled = false;
@@ -666,12 +557,23 @@ export function LibraryView() {
   ]);
 
   useEffect(() => {
-    setMasonryColumnCount(migrateTileWidthToColumnCount(savedMasonryTileWidth));
+    // Avoid snapping the slider while the user is still dragging (save/settings
+    // sync used to rewrite the value mid-gesture and skip intermediate steps).
+    if (isMasonryAdjustingRef.current) {
+      return;
+    }
+    const nextCount = migrateTileWidthToColumnCount(savedMasonryTileWidth);
+    setMasonryColumnCount((current) => (current === nextCount ? current : nextCount));
+    setMasonryLayoutColumnCount((current) => (current === nextCount ? current : nextCount));
   }, [savedMasonryTileWidth]);
 
   useEffect(() => {
-    setMasonryColumnCount(migrateTileWidthToColumnCount(savedMasonryTileWidth));
-  }, [savedMasonryTileWidth]);
+    return () => {
+      if (masonryLayoutRafRef.current !== 0) {
+        window.cancelAnimationFrame(masonryLayoutRafRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!statusMessage || statusMessage.autoDismissMs === null) {
@@ -698,18 +600,8 @@ export function LibraryView() {
       return;
     }
 
-    if (isProxySettingsOpen) {
-      setSidebarActiveView("proxySettings");
-      return;
-    }
-
-    if (isPerformanceSettingsOpen) {
-      setSidebarActiveView("performanceSettings");
-      return;
-    }
-
-    if (isStartupGallerySettingsOpen) {
-      setSidebarActiveView("startupGallerySettings");
+    if (isSystemPreferencesOpen) {
+      setSidebarActiveView("systemPreferences");
       return;
     }
 
@@ -717,25 +609,40 @@ export function LibraryView() {
   }, [
     isAiSettingsOpen,
     isNsfwSettingsOpen,
-    isProxySettingsOpen,
-    isPerformanceSettingsOpen,
-    isStartupGallerySettingsOpen,
+    isSystemPreferencesOpen,
     mainView,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const switchInfo = viewSwitchStartedAtRef.current;
 
     if (!switchInfo || switchInfo.view !== mainView) {
       return;
     }
 
+    const layoutEffectAt = performance.now();
+    logRendererStartupEvent("view-switch:layout-effect", {
+      durationMs: Math.round(layoutEffectAt - switchInfo.startedAt),
+      renderDurationMs:
+        viewSwitchRenderStartedAtRef.current === null
+          ? null
+          : Math.round(layoutEffectAt - viewSwitchRenderStartedAtRef.current),
+      to: mainView,
+    });
+
     const frame = window.requestAnimationFrame(() => {
+      const firstFrameAt = performance.now();
+      logRendererStartupEvent("view-switch:first-raf", {
+        afterLayoutMs: Math.round(firstFrameAt - layoutEffectAt),
+        durationMs: Math.round(firstFrameAt - switchInfo.startedAt),
+        to: mainView,
+      });
       logRendererStartupEvent("view-switch:ready", {
-        durationMs: Math.round(performance.now() - switchInfo.startedAt),
+        durationMs: Math.round(firstFrameAt - switchInfo.startedAt),
         to: mainView,
       });
       viewSwitchStartedAtRef.current = null;
+      viewSwitchRenderStartedAtRef.current = null;
     });
 
     return () => {
@@ -743,61 +650,97 @@ export function LibraryView() {
     };
   }, [mainView]);
 
-  useEffect(() => {
-    if (mainView !== "parameterLexicon" && mainView !== "categoryLexicon" && mainView !== "tagLexicon") {
+  const skipStartupIntro = useCallback(() => {
+    if (hasStartupHoldElapsed) {
       return;
     }
 
-    setMountedLexiconViews((current) => (current.has(mainView) ? current : new Set([...current, mainView])));
+    setHasStartupHoldElapsed(true);
+    logRendererStartupEvent("startup-overlay:skip", {
+      elapsedMs: Math.round(performance.now() - startupSequenceStartedAtRef.current),
+      libraryReady: hasInitialLoadFinished,
+    });
+  }, [hasInitialLoadFinished, hasStartupHoldElapsed]);
+
+  useEffect(() => {
+    // Fixed wall-clock hold from first mount (covers the early full-screen phase too).
+    // Do not auto-dismiss earlier than STARTUP_OVERLAY_FIXED_MS unless the user skips.
+    const elapsed = performance.now() - startupSequenceStartedAtRef.current;
+    const remaining = Math.max(0, STARTUP_OVERLAY_FIXED_MS - elapsed);
+    const timer = window.setTimeout(() => {
+      setHasStartupHoldElapsed(true);
+    }, remaining);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    // Mount only the active lexicon workspace while navigating.
+    // Startup prewarm may mount others once under the overlay (see below).
+    if (mainView !== "categoryLexicon" && mainView !== "tagLexicon") {
+      return;
+    }
+
+    setMountedLexiconViews((current) => {
+      if (current.has(mainView)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(mainView);
+      return next;
+    });
   }, [mainView]);
+
+  useEffect(() => {
+    if (!hasInitialLoadFinished || !hasStartupHoldElapsed) {
+      return;
+    }
+
+    // Dismiss only after BOTH library ready and fixed hold elapsed.
+    setHasPremountedLexicons(true);
+    logRendererStartupEvent("startup-overlay:dismissed", {
+      holdMs: STARTUP_OVERLAY_FIXED_MS,
+      elapsedMs: Math.round(performance.now() - startupSequenceStartedAtRef.current),
+      libraryReady: true,
+    });
+  }, [hasInitialLoadFinished, hasStartupHoldElapsed]);
 
   useEffect(() => {
     if (!hasInitialLoadFinished) {
       return;
     }
 
-    const lexiconViews: LibraryMainView[] = ["categoryLexicon", "tagLexicon", "parameterLexicon"];
-    const timers: number[] = [];
-    let idleHandle: number | null = null;
+    // While the fixed startup page is up, stagger-prewarm heavy workspaces so
+    // opening 分类/标签/参数 later is smoother (they stay hidden until selected).
     let cancelled = false;
+    const timers: number[] = [];
 
-    const requestIdle: (callback: () => void) => number =
-      typeof window.requestIdleCallback === "function"
-        ? (callback) => window.requestIdleCallback(() => callback(), { timeout: 2000 })
-        : (callback) => window.setTimeout(callback, 200);
-    const cancelIdle: (handle: number) => void =
-      typeof window.cancelIdleCallback === "function" ? (handle) => window.cancelIdleCallback(handle) : (handle) => window.clearTimeout(handle);
+    logRendererStartupEvent("startup-overlay:hold-start", {
+      holdMs: STARTUP_OVERLAY_FIXED_MS,
+      prewarm: STARTUP_PREWARM_VIEWS,
+    });
 
-    function premountNext(index: number) {
-      if (cancelled) {
-        return;
-      }
-
-      if (index >= lexiconViews.length) {
-        setHasPremountedLexicons(true);
-        return;
-      }
-
-      idleHandle = requestIdle(() => {
-        idleHandle = null;
-        setMountedLexiconViews((current) => (current.has(lexiconViews[index]) ? current : new Set([...current, lexiconViews[index]])));
-        const timer = window.setTimeout(() => premountNext(index + 1), 120);
-        timers.push(timer);
-      });
-    }
-
-    premountNext(0);
-
-    const safetyTimer = window.setTimeout(() => {
-      setHasPremountedLexicons(true);
-    }, 2500);
-    timers.push(safetyTimer);
+    STARTUP_PREWARM_VIEWS.forEach((view, index) => {
+      const timer = window.setTimeout(() => {
+        if (cancelled) {
+          return;
+        }
+        setMountedLexiconViews((current) => {
+          if (current.has(view)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.add(view);
+          return next;
+        });
+        logRendererStartupEvent("startup-overlay:prewarm", { view, index });
+      }, 280 + index * 420);
+      timers.push(timer);
+    });
 
     return () => {
       cancelled = true;
-      if (idleHandle !== null) {
-        cancelIdle(idleHandle);
-      }
       for (const timer of timers) {
         window.clearTimeout(timer);
       }
@@ -805,7 +748,6 @@ export function LibraryView() {
   }, [hasInitialLoadFinished]);
 
   const promptCards = usePromptCards();
-  const promptCategories = useMemo(() => getPromptCategories(promptCards), [promptCards]);
   const popularTags = useMemo(() => getPopularTags(promptCards), [promptCards]);
   const orderedPopularTags = useMemo(
     () => orderTagsWithPreference(popularTags, tagOrder),
@@ -873,7 +815,7 @@ export function LibraryView() {
   useEffect(() => {
     // 筛选条件变化时重置可见窗口；删除导致的 displayCount 变化不走这里。
     setVisibleCount(pageSize);
-  }, [activeTag, collectionMode, galleryMode, randomSeed, recentImportPinIds, searchQuery, selectedCategory, sortDirection, sortMode]);
+  }, [activeTag, collectionMode, galleryMode, randomSeed, recentImportPinIds, searchQuery, sortDirection, sortMode]);
 
   const skipNextImportPinClearRef = useRef(true);
 
@@ -885,7 +827,7 @@ export function LibraryView() {
     }
 
     clearRecentImportPins();
-  }, [activeTag, clearRecentImportPins, collectionMode, randomSeed, searchQuery, selectedCategory, sortDirection, sortMode]);
+  }, [activeTag, clearRecentImportPins, collectionMode, randomSeed, searchQuery, sortDirection, sortMode]);
 
 
   useEffect(() => {
@@ -942,12 +884,6 @@ export function LibraryView() {
   }, [detailItemId, fullscreenMedia, isBusy, importClipboardImage]);
 
   useEffect(() => {
-    if (selectedCategory !== allCategoriesValue && !promptCategories.includes(selectedCategory)) {
-      setSelectedCategory(allCategoriesValue);
-    }
-  }, [promptCategories, selectedCategory]);
-
-  useEffect(() => {
     if (activeTag && !orderedPopularTags.includes(activeTag)) {
       setActiveTag(null);
     }
@@ -964,7 +900,7 @@ export function LibraryView() {
       measureDerivation("filterPromptCards", promptCards.length, () =>
         filterPromptCards(promptCards, {
           query: searchQuery,
-          category: selectedCategory,
+          category: allCategoriesValue,
           activeTag,
           sortMode,
           sortDirection,
@@ -973,7 +909,7 @@ export function LibraryView() {
           pinnedItemIds: recentImportPinIds,
         }),
       ),
-    [activeTag, imageSizeById, promptCards, randomSeed, recentImportPinIds, searchQuery, selectedCategory, sortDirection, sortMode],
+    [activeTag, imageSizeById, promptCards, randomSeed, recentImportPinIds, searchQuery, sortDirection, sortMode],
   );
 
   const displayItems = useMemo(
@@ -988,10 +924,10 @@ export function LibraryView() {
     () => measureDerivation("groupPromptImages:all", promptCards.length, () => groupPromptImages(promptCards, likedImageIds)),
     [likedImageIds, promptCards],
   );
-  const imageCountByItemId = useMemo(
-    () => (mainView === "home" ? buildImageCountByItemId(allPromptGroups) : new Map<string, number>()),
-    [allPromptGroups, mainView],
-  );
+  // Keep gallery derivations stable while another view is active. Rebuilding the
+  // image-count map on every return invalidates the masonry item array and forces
+  // the first material-browser frame to reconcile every visible card again.
+  const imageCountByItemId = useMemo(() => buildImageCountByItemId(allPromptGroups), [allPromptGroups]);
   const masonryDisplayItems = useMemo(
     () => measureDerivation("spreadPromptGroups", displayGroups.length, () => spreadPromptGroupImagesWithCount(displayGroups, imageCountByItemId)),
     [displayGroups, imageCountByItemId],
@@ -999,6 +935,18 @@ export function LibraryView() {
   const displayCount = galleryMode === "grid" ? displayGroups.length : masonryDisplayItems.length;
   const displayCountRef = useRef(displayCount);
   displayCountRef.current = displayCount;
+  const homeScrollPerformanceContextRef = useRef({
+    galleryMode,
+    masonryColumnCount: masonryLayoutColumnCount,
+    visibleCount,
+  });
+  homeScrollPerformanceContextRef.current = {
+    galleryMode,
+    masonryColumnCount: masonryLayoutColumnCount,
+    visibleCount,
+  };
+  const isInitialLibraryLoading =
+    !hasStartupHoldElapsed || !hasInitialLoadFinished || (isLoading && items.length === 0);
 
   useEffect(() => {
     // 删除后只收敛可见窗口，避免重新从 pageSize 灌入导致滚动卡顿。
@@ -1006,11 +954,13 @@ export function LibraryView() {
   }, [displayCount]);
 
   useEffect(() => {
-    if (!hasInitialLoadFinished) {
+    // Wait until the real home layout is mounted. The home gallery keeps its own
+    // scroll panel so switching views does not tear down and rebuild masonry layout.
+    if (!hasInitialLoadFinished || isInitialLibraryLoading || mainView !== "home") {
       return;
     }
 
-    const scrollContainer = scrollContainerRef.current;
+    const scrollContainer = homeScrollContainerRef.current;
 
     if (scrollContainer === null) {
       return;
@@ -1019,13 +969,16 @@ export function LibraryView() {
     const container = scrollContainer;
     let rafId: number | null = null;
 
-    function checkLoadMore() {
+    function checkLoadMore(fillViewportOnly = false) {
       rafId = null;
+      const total = displayCountRef.current;
       const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      const shouldLoadMore = fillViewportOnly
+        ? container.scrollHeight <= container.clientHeight + 2
+        : distanceToBottom < 800;
 
-      if (distanceToBottom < 800) {
+      if (shouldLoadMore) {
         setVisibleCount((current) => {
-          const total = displayCountRef.current;
           if (current >= total) {
             return current;
           }
@@ -1036,12 +989,16 @@ export function LibraryView() {
 
     function handleScroll() {
       if (rafId === null) {
-        rafId = window.requestAnimationFrame(checkLoadMore);
+        rafId = window.requestAnimationFrame(() => checkLoadMore(false));
       }
     }
 
     container.addEventListener("scroll", handleScroll, { passive: true });
-    checkLoadMore();
+    // The first layout may only add another page when the initial cards do not fill
+    // the viewport. Near-bottom prefetching starts after the user actually scrolls.
+    rafId = window.requestAnimationFrame(() => {
+      rafId = window.requestAnimationFrame(() => checkLoadMore(true));
+    });
 
     return () => {
       container.removeEventListener("scroll", handleScroll);
@@ -1049,46 +1006,216 @@ export function LibraryView() {
         window.cancelAnimationFrame(rafId);
       }
     };
-  }, [hasInitialLoadFinished]);
+  }, [displayCount, hasInitialLoadFinished, isInitialLibraryLoading, mainView, masonryLayoutColumnCount, visibleCount]);
 
   useEffect(() => {
-    if (!hasInitialLoadFinished || mainView !== "home") {
+    if (!hasInitialLoadFinished || isInitialLibraryLoading || hasRestoredHomeScrollRef.current) {
       return;
     }
 
-    const scrollContainer = scrollContainerRef.current;
+    hasRestoredHomeScrollRef.current = true;
+    pendingHomeScrollRestoreRef.current = Math.max(0, Math.trunc(savedMaterialBrowserScrollTop));
+    setVisibleCount((current) => Math.max(current, Math.min(pageSize, displayCount)));
+  }, [displayCount, hasInitialLoadFinished, isInitialLibraryLoading, savedMaterialBrowserScrollTop]);
 
-    if (scrollContainer === null) {
+  useLayoutEffect(() => {
+    const targetScrollTop = pendingHomeScrollRestoreRef.current;
+    const container = homeScrollContainerRef.current;
+    if (targetScrollTop === null || !container || isInitialLibraryLoading) {
       return;
     }
 
-    if (visibleCount >= displayCount) {
+    const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    if (maxScrollTop < targetScrollTop && visibleCount < displayCount) {
+      setVisibleCount((current) => Math.min(current + pageSize, displayCount));
       return;
     }
 
-    const rafId = window.requestAnimationFrame(() => {
-      const distanceToBottom =
-        scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+    // 所有卡片已渲染但 scrollHeight 仍不足时，图片可能还在加载中。
+    // 使用 ResizeObserver 等待 scrollHeight 增长后再恢复滚动位置。
+    if (maxScrollTop < targetScrollTop && visibleCount >= displayCount) {
+      let retryCount = 0;
+      const maxRetries = 10;
+      let resizeObserver: ResizeObserver | null = null;
+      let retryTimer: number | null = null;
 
-      if (distanceToBottom < 800) {
-        setVisibleCount((current) => {
-          if (current >= displayCountRef.current) {
-            return current;
+      const tryRestore = () => {
+        const currentMax = Math.max(0, container.scrollHeight - container.clientHeight);
+        if (currentMax >= targetScrollTop || retryCount >= maxRetries) {
+          if (resizeObserver) {
+            resizeObserver.disconnect();
+            resizeObserver = null;
           }
-          return Math.min(current + pageSize, displayCountRef.current);
+          if (retryTimer !== null) {
+            window.clearTimeout(retryTimer);
+            retryTimer = null;
+          }
+          const restoredScrollTop = Math.min(targetScrollTop, currentMax);
+          container.scrollTop = restoredScrollTop;
+          pendingHomeScrollRestoreRef.current = null;
+          logRendererStartupEvent("view-scroll:restore", {
+            requestedScrollTop: targetScrollTop,
+            restoredScrollTop,
+            view: "home",
+          });
+          return;
+        }
+
+        retryCount += 1;
+        retryTimer = window.setTimeout(tryRestore, 200);
+      };
+
+      resizeObserver = new ResizeObserver(() => {
+        if (retryTimer !== null) {
+          window.clearTimeout(retryTimer);
+        }
+        retryTimer = window.setTimeout(tryRestore, 50);
+      });
+      resizeObserver.observe(container);
+      retryTimer = window.setTimeout(tryRestore, 200);
+
+      return () => {
+        if (resizeObserver) {
+          resizeObserver.disconnect();
+        }
+        if (retryTimer !== null) {
+          window.clearTimeout(retryTimer);
+        }
+      };
+    }
+
+    const restoredScrollTop = Math.min(targetScrollTop, maxScrollTop);
+    container.scrollTop = restoredScrollTop;
+    pendingHomeScrollRestoreRef.current = null;
+    logRendererStartupEvent("view-scroll:restore", {
+      requestedScrollTop: targetScrollTop,
+      restoredScrollTop,
+      view: "home",
+    });
+  }, [displayCount, isInitialLibraryLoading, visibleCount]);
+
+  useEffect(() => {
+    if (!hasInitialLoadFinished || isInitialLibraryLoading) {
+      return;
+    }
+
+    const container = homeScrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    function handleScrollPositionChange() {
+      saveMaterialBrowserScrollTop(container?.scrollTop ?? 0);
+    }
+
+    container.addEventListener("scroll", handleScrollPositionChange, { passive: true });
+    return () => {
+      container.removeEventListener("scroll", handleScrollPositionChange);
+      saveMaterialBrowserScrollTop(container.scrollTop);
+    };
+  }, [hasInitialLoadFinished, isInitialLibraryLoading, saveMaterialBrowserScrollTop]);
+
+  useEffect(() => {
+    if (!hasInitialLoadFinished || isInitialLibraryLoading || mainView !== "home") {
+      return;
+    }
+
+    const container = homeScrollContainerRef.current;
+
+    if (!container) {
+      return;
+    }
+
+    const slowFrameThresholdMs = 40;
+    const scrollIdleMs = 180;
+    let animationFrameId: number | null = null;
+    let startedAt = 0;
+    let lastFrameAt = 0;
+    let lastScrollAt = 0;
+    let maxFrameGapMs = 0;
+    let slowFrameCount = 0;
+    let scrollEventCount = 0;
+
+    function resetSample() {
+      startedAt = 0;
+      lastFrameAt = 0;
+      lastScrollAt = 0;
+      maxFrameGapMs = 0;
+      slowFrameCount = 0;
+      scrollEventCount = 0;
+    }
+
+    function finishSample(finishedAt: number) {
+      const durationMs = finishedAt - startedAt;
+
+      if (maxFrameGapMs >= slowFrameThresholdMs) {
+        const context = homeScrollPerformanceContextRef.current;
+        logRendererStartupEvent("home-scroll:slow", {
+          displayCount: displayCountRef.current,
+          durationMs: Math.round(durationMs),
+          galleryMode: context.galleryMode,
+          masonryColumnCount: context.masonryColumnCount,
+          maxFrameGapMs: Math.round(maxFrameGapMs * 100) / 100,
+          scrollEventCount,
+          slowFrameCount,
+          visibleCount: context.visibleCount,
         });
       }
-    });
+
+      resetSample();
+    }
+
+    function sampleFrame(now: number) {
+      const frameGapMs = now - lastFrameAt;
+      lastFrameAt = now;
+      maxFrameGapMs = Math.max(maxFrameGapMs, frameGapMs);
+
+      if (frameGapMs >= slowFrameThresholdMs) {
+        slowFrameCount += 1;
+      }
+
+      if (now - lastScrollAt >= scrollIdleMs) {
+        animationFrameId = null;
+        finishSample(now);
+        return;
+      }
+
+      animationFrameId = window.requestAnimationFrame(sampleFrame);
+    }
+
+    function handlePerformanceScroll() {
+      const now = performance.now();
+      lastScrollAt = now;
+      scrollEventCount += 1;
+
+      if (animationFrameId !== null) {
+        return;
+      }
+
+      startedAt = now;
+      lastFrameAt = now;
+      animationFrameId = window.requestAnimationFrame(sampleFrame);
+    }
+
+    container.addEventListener("scroll", handlePerformanceScroll, { passive: true });
 
     return () => {
-      window.cancelAnimationFrame(rafId);
+      container.removeEventListener("scroll", handlePerformanceScroll);
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
     };
-  }, [displayCount, hasInitialLoadFinished, mainView, masonryColumnCount, visibleCount]);
+  }, [hasInitialLoadFinished, isInitialLibraryLoading, mainView]);
 
-  const visibleGridGroups = displayGroups.slice(0, visibleCount);
-  const visibleMasonryItems = masonryDisplayItems.slice(0, visibleCount);
+  const visibleGridGroups = useMemo(
+    () => displayGroups.slice(0, visibleCount),
+    [displayGroups, visibleCount],
+  );
+  const visibleMasonryItems = useMemo(
+    () => masonryDisplayItems.slice(0, visibleCount),
+    [masonryDisplayItems, visibleCount],
+  );
   const hasVisibleResults = displayCount > 0;
-  const isInitialLibraryLoading = !hasInitialLoadFinished || (isLoading && items.length === 0);
   const detailItem = promptCards.find((item) => item.id === detailItemId) ?? null;
   const detailGroupItems = useMemo(
     () => (detailItem ? getPromptImageGroupItems(detailItem, promptCards, likedImageIds) : []),
@@ -1147,12 +1274,15 @@ export function LibraryView() {
     };
   }, [hasInitialLoadFinished]);
 
-  function scrollToCards() {
+  const handleHomeSearchSubmit = useCallback(() => {
+    setVisibleCount(pageSize);
     cardsStartRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
+  }, []);
 
   function scrollToTop(behavior: ScrollBehavior = "auto") {
-    scrollContainerRef.current?.scrollTo({ top: 0, behavior });
+    const activeScrollContainer =
+      mainView === "home" ? homeScrollContainerRef.current : scrollContainerRef.current;
+    activeScrollContainer?.scrollTo({ top: 0, behavior });
   }
 
   function scrollHomeToTop() {
@@ -1166,6 +1296,30 @@ export function LibraryView() {
       void downloadRemoteMaterial(itemId);
     },
     [downloadRemoteMaterial],
+  );
+  const handleCopyPromptItem = useCallback(
+    (item: PromptCardData) => {
+      void copyText(buildPromptText(item), "已复制提示词。");
+    },
+    [copyText],
+  );
+  const handleSavePromptLexiconItem = useCallback(
+    (itemId: string, patch: Partial<LibraryItem>) =>
+      saveItem(itemId, patch, { background: true, silent: true }),
+    [saveItem],
+  );
+  const handleSavePromptLexiconItemsBatch = useCallback(
+    (patches: ReadonlyArray<{ itemId: string; patch: Partial<LibraryItem> }>) =>
+      saveItemsBatch(patches, { background: true, silent: true }),
+    [saveItemsBatch],
+  );
+  const handleMovePromptGroupsToCategory = useCallback(
+    (
+      itemIds: readonly string[],
+      categoryId: string | null,
+      source: "system" | "user" | "ai" = "user",
+    ) => movePromptGroupsToCategory(itemIds, categoryId, source),
+    [movePromptGroupsToCategory],
   );
 
   function openMainView(view: LibraryMainView) {
@@ -1181,27 +1335,175 @@ export function LibraryView() {
       return;
     }
 
+    if (mainView === "home") {
+      const scrollTop = homeScrollContainerRef.current?.scrollTop ?? 0;
+      saveMaterialBrowserScrollTop(scrollTop);
+      logRendererStartupEvent("view-scroll:save", { scrollTop: Math.round(scrollTop), view: "home" });
+    }
+
     viewSwitchStartedAtRef.current = { startedAt, view };
-    startTransition(() => {
-      setMainView(view);
-      logRendererStartupEvent("view-switch:committed", {
-        durationMs: Math.round(performance.now() - startedAt),
-        to: view,
-      });
+    // Navigation is an urgent interaction. Deferring it with startTransition makes
+    // the first material-browser reveal wait behind background renderer work.
+    setMainView(view);
+    logRendererStartupEvent("view-switch:committed", {
+      durationMs: Math.round(performance.now() - startedAt),
+      to: view,
     });
-    scrollToTop();
+  }
+
+  /**
+   * 记录「传送到画布」的来源提示词组身份。比对基准取库里已保存的 prompt/negativePrompt
+   * （而非详情页未保存的草稿），因为提示词组键是按库里的值算的：详情页改了没保存就传送，
+   * 血缘应当立即失效、另立新组。
+   */
+  function buildCanvasPromptOrigin(item: PromptCardData): CanvasPromptOrigin {
+    return {
+      itemId: item.id,
+      prompt: item.prompt,
+      negativePrompt: item.negativePrompt,
+      title: item.title,
+      tags: item.tags,
+      category: item.category === "未分类" ? null : item.category,
+      categoryId: item.categoryId,
+      genreIds: item.genreIds,
+      categoryConfidence: item.categoryConfidence,
+      categorySource: item.categorySource ?? null,
+    };
+  }
+
+  async function pushImageToCanvas(
+    item: PromptCardData,
+    prompt: string,
+    negativePrompt: string,
+  ) {
+    if (!item.imageFileName) {
+      showStatusMessage({ type: "error", text: "当前效果图不可用，无法传送到画布。" });
+      return;
+    }
+
+    const startedAt = performance.now();
+    logRendererStartupEvent("canvas-transfer:click", {
+      hasNegativePrompt: Boolean(negativePrompt.trim()),
+      hasPrompt: Boolean(prompt.trim()),
+    });
+
+    try {
+      const url = getImageSrc(item.imageFileName, item.updatedAt);
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`IMAGE_FETCH_${response.status}`);
+      }
+      const responseBlob = await response.blob();
+      if (responseBlob.size === 0) {
+        throw new Error("IMAGE_RESPONSE_INVALID");
+      }
+      const blob = await normalizeCanvasReferenceBlob(responseBlob);
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result ?? "");
+          if (!result.startsWith("data:image/")) {
+            reject(new Error("IMAGE_DATA_URL_INVALID"));
+            return;
+          }
+          resolve(result);
+        };
+        reader.onerror = () => reject(new Error("读取图片失败"));
+        reader.readAsDataURL(blob);
+      });
+
+      if (
+        canvasDraft.referenceImageFileName &&
+        canvasDraft.referenceImageFileName !== item.imageFileName
+      ) {
+        void window.suyanApi.removeCanvasReferenceImage(canvasDraft.referenceImageFileName);
+      }
+
+      updateCanvasDraft({
+        prompt,
+        negativePrompt,
+        negativePromptHidden: false,
+        referenceImageDataUrl: dataUrl,
+        referenceImageTitle: item.title || "参考图",
+        referenceImageFileName: item.imageFileName,
+        promptOrigin: buildCanvasPromptOrigin(item),
+      });
+      setDetailItemId(null);
+      openMainView("canvas");
+      logRendererStartupEvent("canvas-transfer:done", {
+        durationMs: Math.round(performance.now() - startedAt),
+        hasPrompt: Boolean(prompt.trim()),
+        imageBytes: blob.size,
+      });
+      showStatusMessage({
+        type: "success",
+        text: prompt.trim() ? "已把效果图及关联提示词传送到画布。" : "已把效果图传送到画布作为参考图。",
+      });
+    } catch (error) {
+      logRendererStartupEvent("canvas-transfer:failed", {
+        code: error instanceof Error ? error.message.slice(0, 80) : "CANVAS_TRANSFER_FAILED",
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      showStatusMessage({ type: "error", text: "读取参考图失败，请重试。" });
+    }
+  }
+
+  function pushPromptToCanvas(item: PromptCardData, prompt: string, negativePrompt: string) {
+    const patch: {
+      prompt: string;
+      negativePrompt?: string;
+      negativePromptHidden?: boolean;
+      promptOrigin: CanvasPromptOrigin;
+    } = { prompt, promptOrigin: buildCanvasPromptOrigin(item) };
+    if (negativePrompt.trim()) {
+      patch.negativePrompt = negativePrompt;
+      patch.negativePromptHidden = false;
+    }
+    updateCanvasDraft(patch);
+    setDetailItemId(null);
+    openMainView("canvas");
+    showStatusMessage({ type: "success", text: "已把提示词传送到画布。" });
   }
 
   function openHomeView() {
     openMainView("home");
   }
 
+  async function generateImagesWithAi(payload: AiImageGenerationPayload) {
+    const result = payload.generationProvider === "doubao-web"
+      ? await window.suyanApi.generateImagesWithDoubaoWeb(payload)
+      : await window.suyanApi.generateImagesWithAi(payload);
+    if (!result.ok) {
+      showStatusMessage({ type: "error", text: result.error.message });
+      return null;
+    }
+    return result.data;
+  }
+
+  const prepareDoubaoWebCanvas = useCallback(async (): Promise<DoubaoWebCanvasStatus | null> => {
+    const result = await window.suyanApi.prepareDoubaoWebCanvas();
+    if (!result.ok) {
+      showStatusMessage({ type: "error", text: result.error.message });
+      return null;
+    }
+    if (result.data.loginRequired) {
+      showStatusMessage({ type: "info", text: "请在画布内完成豆包登录，登录后会自动切回原生画布。" });
+    }
+    return result.data;
+  }, [showStatusMessage]);
+
+  const refreshDoubaoWebCanvasAuth = useCallback(async (): Promise<DoubaoWebCanvasStatus | null> => {
+    const result = await window.suyanApi.refreshDoubaoWebCanvasAuth();
+    if (!result.ok) {
+      return null;
+    }
+    return result.data;
+  }, []);
+
   function closeSettingsDialogs() {
     setIsAiSettingsOpen(false);
     setIsNsfwSettingsOpen(false);
-    setIsProxySettingsOpen(false);
-    setIsPerformanceSettingsOpen(false);
-    setIsStartupGallerySettingsOpen(false);
+    setIsSystemPreferencesOpen(false);
   }
 
   function openAiSettings() {
@@ -1218,21 +1520,14 @@ export function LibraryView() {
     setIsNsfwSettingsOpen(true);
   }
 
-  function openProxySettings() {
-    setSidebarActiveView("proxySettings");
+  function openSystemPreferences(section: SystemPreferenceSection = defaultSystemPreferenceSection) {
+    setSystemPreferencesSection(section);
+    setSidebarActiveView("systemPreferences");
     setIsImportMenuOpen(false);
     closeSettingsDialogs();
-    setIsProxySettingsOpen(true);
+    setIsSystemPreferencesOpen(true);
   }
 
-  function openPerformanceSettings() {
-    setSidebarActiveView("performanceSettings");
-    setIsImportMenuOpen(false);
-    closeSettingsDialogs();
-    setIsPerformanceSettingsOpen(true);
-  }
-
-  
   async function handleExportLogs(options: LogExportSelection, action: "save" | "feedback") {
     if (isExportingLogs) {
       return;
@@ -1291,40 +1586,59 @@ export function LibraryView() {
     }
   }
 
-  function openStartupGallerySettings() {
-    setSidebarActiveView("startupGallerySettings");
-    setIsImportMenuOpen(false);
-    closeSettingsDialogs();
-    setIsStartupGallerySettingsOpen(true);
-  }
+  
+  const handleMasonryColumnCountChange = useCallback((nextCount: number) => {
+    const normalizedCount = clampMasonryColumnCount(nextCount);
+    isMasonryAdjustingRef.current = true;
+    // Slider badge updates immediately; gallery layout is rAF + transition so
+    // the thumb does not stall on heavy card reflow (was skipping 5→7 etc.).
+    setMasonryColumnCount(normalizedCount);
 
-  function handleMasonryColumnCountChange(nextCount: number) {
-    setMasonryColumnCount(clampMasonryColumnCount(nextCount));
-  }
+    if (masonryLayoutRafRef.current !== 0) {
+      window.cancelAnimationFrame(masonryLayoutRafRef.current);
+    }
+    masonryLayoutRafRef.current = window.requestAnimationFrame(() => {
+      masonryLayoutRafRef.current = 0;
+      startTransition(() => {
+        setMasonryLayoutColumnCount(normalizedCount);
+      });
+    });
+    }, [saveMasonryTileWidth]);
 
-  function handleMasonryColumnCountCommit(nextCount: number) {
+  const handleMasonryColumnCountCommit = useCallback((nextCount: number) => {
     const normalizedCount = clampMasonryColumnCount(nextCount);
 
-    setMasonryColumnCount(normalizedCount);
-    void saveMasonryTileWidth(normalizedCount);
-  }
+    if (masonryLayoutRafRef.current !== 0) {
+      window.cancelAnimationFrame(masonryLayoutRafRef.current);
+      masonryLayoutRafRef.current = 0;
+    }
 
-  function handleCollectionModeChange(mode: CollectionMode) {
+    setMasonryColumnCount(normalizedCount);
+    setMasonryLayoutColumnCount(normalizedCount);
+    void saveMasonryTileWidth(normalizedCount).finally(() => {
+      // Allow store→UI sync again after persistence settles.
+      window.setTimeout(() => {
+        isMasonryAdjustingRef.current = false;
+      }, 120);
+    });
+    }, [saveMasonryTileWidth]);
+
+  const handleCollectionModeChange = useCallback((mode: CollectionMode) => {
     setCollectionMode(mode);
     void saveMaterialBrowserSettings({ materialBrowserCollectionMode: mode });
-  }
+    }, [saveMaterialBrowserSettings]);
 
-  function handleGalleryModeChange(mode: GalleryMode) {
+  const handleGalleryModeChange = useCallback((mode: GalleryMode) => {
     setGalleryMode(mode);
     void saveMaterialBrowserSettings({ materialBrowserGalleryMode: mode });
-  }
+    }, [saveMaterialBrowserSettings]);
 
-  function handleSortDirectionChange(direction: PromptSortDirection) {
+  const handleSortDirectionChange = useCallback((direction: PromptSortDirection) => {
     setSortDirection(direction);
     void saveMaterialBrowserSettings({ materialBrowserSortDirection: direction });
-  }
+    }, [saveMaterialBrowserSettings]);
 
-  function handleSortModeChange(mode: PromptSortMode) {
+  const handleSortModeChange = useCallback((mode: PromptSortMode) => {
     const nextRandomSeed = mode === "random" ? randomSeed + 1 : randomSeed;
 
     setSortMode(mode);
@@ -1337,7 +1651,7 @@ export function LibraryView() {
       materialBrowserSortMode: mode,
       materialBrowserRandomSeed: nextRandomSeed,
     });
-  }
+    }, [randomSeed, saveMaterialBrowserSettings]);
 
   async function importDroppedImageFiles(files: File[]) {
     const imageFiles = files.filter(isDroppableImageFile);
@@ -1413,9 +1727,8 @@ export function LibraryView() {
     }
   }
 
-function resetFilters() {
+  function resetFilters() {
     setSearchQuery("");
-    setSelectedCategory(allCategoriesValue);
     setActiveTag(null);
     setSortMode("importedAt");
     setSortDirection("desc");
@@ -1545,7 +1858,7 @@ function resetFilters() {
   }
 
   if (isInitialLibraryLoading) {
-    return <StartupLoadingScreen />;
+    return <StartupLoadingScreen onSkip={skipStartupIntro} />;
   }
 
   const isStartupOverlayVisible = !hasPremountedLexicons;
@@ -1559,7 +1872,7 @@ function resetFilters() {
 
   return (
     <main
-      className="relative flex h-screen min-h-0 flex-col overflow-hidden bg-background text-foreground"
+      className="relative flex h-[100dvh] max-h-[100dvh] min-h-0 flex-col overflow-hidden bg-background text-foreground"
       onDragEnter={handleWindowDragEnter}
       onDragOver={handleWindowDragOver}
       onDragLeave={handleWindowDragLeave}
@@ -1589,6 +1902,7 @@ function resetFilters() {
           onPurgeMissing={(rootId) => void purgeMissingLibraryRootItems(rootId)}
           onRemap={(rootId) => void remapLibraryRoot(rootId)}
           onRemove={(rootId) => void removeLibraryRoot(rootId)}
+          onReorder={(rootIds) => void reorderLibraryRoots(rootIds)}
           onScan={(rootId) => void scanLibraryRoot(rootId)}
           onWatchChange={(rootId, enabled) => void setLibraryRootWatch(rootId, enabled)}
           onValidate={() => void validateExternalLibrary()}
@@ -1628,15 +1942,13 @@ function resetFilters() {
             }}
             onOpenAbout={() => setIsAboutOpen(true)}
             onOpenAiSettings={openAiSettings}
+            onOpenCanvas={() => openMainView("canvas")}
             onOpenNsfwSettings={openNsfwSettings}
-            onOpenProxySettings={openProxySettings}
-            onOpenPerformanceSettings={openPerformanceSettings}
-            onOpenStartupGallerySettings={openStartupGallerySettings}
+            onOpenSystemPreferences={() => openSystemPreferences()}
             onOpenCategoryLexicon={() => openMainView("categoryLexicon")}
             onOpenHome={openHomeView}
             onOpenLibraryRoots={() => setIsLibraryRootsOpen(true)}
             onOpenManager={() => openMainView("promptLibrary")}
-            onOpenParameterLexicon={() => openMainView("parameterLexicon")}
             onOpenPromptSites={() => openMainView("promptSites")}
             onOpenTagLexicon={() => openMainView("tagLexicon")}
             onResizeBy={resizeSidebarBy}
@@ -1647,19 +1959,23 @@ function resetFilters() {
         ) : null}
         <div
           ref={scrollContainerRef}
-          className="min-h-0 flex-1 overflow-y-auto"
+          className="relative min-h-0 flex-1 overflow-y-auto"
           style={scrollContainerStyle}
         >
-          <div aria-hidden={mainView !== "home"} className={mainView === "home" ? "" : "hidden"}>
+          <div
+            ref={homeScrollContainerRef}
+            aria-hidden={mainView !== "home"}
+            className={`absolute inset-0 overflow-y-auto ${
+              mainView === "home" ? "z-10 opacity-100" : "z-0 opacity-0 pointer-events-none"
+            }`}
+            style={{ scrollbarGutter: "stable both-edges", willChange: "opacity" }}
+          >
               <section className={`py-4 min-[1024px]:py-5 ${pageGutterClassName}`}>
                 <div className={`${contentShellClassName} grid gap-4`}>
                   <SearchHeroPanel
                     searchQuery={searchQuery}
                     onSearchChange={setSearchQuery}
-                    onSubmit={() => {
-                      setVisibleCount(pageSize);
-                      scrollToCards();
-                    }}
+                    onSubmit={handleHomeSearchSubmit}
                   />
                 </div>
               </section>
@@ -1697,7 +2013,7 @@ function resetFilters() {
                     galleryMode === "masonry" ? (
                       <MasonryPromptGallery
                         blurNsfwImages={blurNsfwImages}
-                        columnCount={masonryColumnCount}
+                        columnCount={masonryLayoutColumnCount}
                         items={visibleMasonryItems}
                         likedImageIds={likedImageIds}
                         onViewDetail={openDetailItem}
@@ -1708,7 +2024,7 @@ function resetFilters() {
                         blurNsfwImages={blurNsfwImages}
                         groups={visibleGridGroups}
                         likedImageIds={likedImageIds}
-                        onCopyPrompt={(item) => void copyText(buildPromptText(item), "已复制提示词。")}
+                        onCopyPrompt={handleCopyPromptItem}
                         onViewDetail={openDetailItem}
                         onPreviewMedia={openFullscreenMedia}
                       />
@@ -1726,8 +2042,36 @@ function resetFilters() {
               ) : null}
           </div>
 
-          {mainView !== "home" || mountedLexiconViews.size > 0 ? (
-            <section className={`py-4 min-[1024px]:py-5 ${pageGutterClassName} ${mainView === "home" ? "hidden" : ""}`}>
+          {mainView === "canvas" ? (
+            <Suspense fallback={<DeferredViewFallback />}>
+              <CanvasView
+                aiSettings={aiSettings}
+                canvasDraft={canvasDraft}
+                generationResults={canvasGenerationResults}
+                lastGenerationModel={canvasLastModel}
+                isBusy={isBusy}
+                onDraftChange={updateCanvasDraft}
+                onGenerationResultsChange={setCanvasGenerationResults}
+                onLastGenerationModelChange={setCanvasLastModel}
+                onCopyImage={copyImage}
+                onGenerate={generateImagesWithAi}
+                onPrepareDoubaoWebCanvas={prepareDoubaoWebCanvas}
+                onRefreshDoubaoWebCanvasAuth={refreshDoubaoWebCanvasAuth}
+                onImportGeneratedImages={importGeneratedImages}
+                onOpenAiSettings={openAiSettings}
+                onOptimizePrompt={optimizePromptWithAi}
+                onSaveAiActionModelPreference={saveAiActionModelPreference}
+                  onNotify={showStatusMessage}
+              />
+            </Suspense>
+          ) : null}
+
+          {(mainView !== "home" && mainView !== "canvas") || mountedLexiconViews.size > 0 ? (
+            <section
+              className={`py-4 min-[1024px]:py-5 ${pageGutterClassName} ${
+                mainView === "home" || mainView === "canvas" ? "hidden" : ""
+              }`}
+            >
               <div className={`${lexiconShellClassName} grid gap-4`}>
                 {mainView === "promptLibrary" ? (
                   <Suspense fallback={<DeferredViewFallback />}>
@@ -1749,33 +2093,11 @@ function resetFilters() {
                 {mainView === "promptSites" ? (
                   <PromptSiteRecommendationsView
                     sites={promptSiteRecommendations}
+                    starredUrls={starredRecommendations}
+                    onToggleStar={(url) => void toggleRecommendationStar(url)}
                     onCopySiteUrl={(site) => void copyText(site.url, "已复制网址。")}
                     onOpenSite={(site) => void openExternalUrl(site.url, site.title)}
                   />
-                ) : null}
-
-                {mountedLexiconViews.has("parameterLexicon") ? (
-                  <div className={mainView === "parameterLexicon" ? "contents" : "hidden"}>
-                    <PromptLexiconWorkspace
-                      kind="parameters"
-                      blurNsfwImages={blurNsfwImages}
-                      isBusy={isBusy}
-                      hideScrollTopButton={isDetailOverlayOpen}
-                      likedImageIds={likedImageIds}
-                      popularTags={orderedPopularTags}
-                      promptGroups={allPromptGroups}
-                      promptLexicons={promptLexicons}
-                      onAnalyzePrompt={analyzePromptWithAi}
-                      onCopyPrompt={(item) => void copyText(buildPromptText(item), "已复制提示词。")}
-                      onExportLexicon={exportPromptLexicon}
-                      onImportLexicon={importPromptLexicon}
-                      onImportLexiconImage={importPromptLexiconImage}
-                      onOpenDetail={openDetailItem}
-                      onDeleteItems={deleteItems}
-                      onSaveItem={(itemId, patch) => saveItem(itemId, patch, { background: true, silent: true })}
-                      onSavePromptLexicons={savePromptLexicons}
-                    />
-                  </div>
                 ) : null}
 
                 {mountedLexiconViews.has("categoryLexicon") ? (
@@ -1789,15 +2111,21 @@ function resetFilters() {
                       popularTags={orderedPopularTags}
                       promptGroups={allPromptGroups}
                       promptLexicons={promptLexicons}
+                      categoryTaxonomy={categoryTaxonomy}
                       onAnalyzePrompt={analyzePromptWithAi}
-                      onCopyPrompt={(item) => void copyText(buildPromptText(item), "已复制提示词。")}
+                      onCopyPrompt={handleCopyPromptItem}
                       onExportLexicon={exportPromptLexicon}
                       onImportLexicon={importPromptLexicon}
                       onImportLexiconImage={importPromptLexiconImage}
                       onOpenDetail={openDetailItem}
                       onDeleteItems={deleteItems}
-                      onSaveItem={(itemId, patch) => saveItem(itemId, patch, { background: true, silent: true })}
+                      onSaveItem={handleSavePromptLexiconItem}
+                      onSaveItemsBatch={handleSavePromptLexiconItemsBatch}
+                      onClearLexiconDomain={clearLexiconDomain}
                       onSavePromptLexicons={savePromptLexicons}
+                      onMovePromptGroupsToCategory={handleMovePromptGroupsToCategory}
+                      onUpsertCustomCategory={upsertCustomCategory}
+                      onDeleteCustomCategory={deleteCustomCategory}
                     />
                   </div>
                 ) : null}
@@ -1813,15 +2141,21 @@ function resetFilters() {
                       popularTags={orderedPopularTags}
                       promptGroups={allPromptGroups}
                       promptLexicons={promptLexicons}
+                      categoryTaxonomy={categoryTaxonomy}
                       onAnalyzePrompt={analyzePromptWithAi}
-                      onCopyPrompt={(item) => void copyText(buildPromptText(item), "已复制提示词。")}
+                      onCopyPrompt={handleCopyPromptItem}
                       onExportLexicon={exportPromptLexicon}
                       onImportLexicon={importPromptLexicon}
                       onImportLexiconImage={importPromptLexiconImage}
                       onOpenDetail={openDetailItem}
                       onDeleteItems={deleteItems}
-                      onSaveItem={(itemId, patch) => saveItem(itemId, patch, { background: true, silent: true })}
+                      onSaveItem={handleSavePromptLexiconItem}
+                      onSaveItemsBatch={handleSavePromptLexiconItemsBatch}
+                      onClearLexiconDomain={clearLexiconDomain}
                       onSavePromptLexicons={savePromptLexicons}
+                      onMovePromptGroupsToCategory={handleMovePromptGroupsToCategory}
+                      onUpsertCustomCategory={upsertCustomCategory}
+                      onDeleteCustomCategory={deleteCustomCategory}
                     />
                   </div>
                 ) : null}
@@ -1838,10 +2172,21 @@ function resetFilters() {
           onClose={clearStatus}
         />
       ) : null}
+      {aiErrorDialog ? (
+        <AiErrorDialog
+          presentation={aiErrorDialog}
+          onClose={clearAiErrorDialog}
+          onOpenSettings={() => {
+            clearAiErrorDialog();
+            openAiSettings();
+          }}
+        />
+      ) : null}
 
       {detailItem ? (
         <Suspense fallback={<PromptDetailFallback />}>
           <PromptDetailDialog
+            key={detailItem.id}
             isBusy={isBusy}
             isImageLiked={likedImageIds.includes(detailItem.id)}
             item={detailItem}
@@ -1852,7 +2197,6 @@ function resetFilters() {
             aiSettings={aiSettings}
             blurNsfwImages={blurNsfwImages}
             knownCategories={photographyCategoryLabels}
-            promptLexicons={promptLexicons}
             onAnalyzePrompt={analyzePromptWithAi}
             onOptimizePrompt={optimizePromptWithAi}
             onTranslatePrompt={translatePromptWithAi}
@@ -1864,12 +2208,22 @@ function resetFilters() {
             onExportImage={() => void exportImage(detailItem.imageFileName)}
             onImportImages={() => void handleImportImageFilesForDetail()}
             onImportClipboardImage={() => void handleImportClipboardImageForDetail()}
+            onPushToCanvas={(prompt, negativePrompt) => void pushImageToCanvas(detailItem, prompt, negativePrompt)}
+            onPushPromptToCanvas={(prompt, negativePrompt) => pushPromptToCanvas(detailItem, prompt, negativePrompt)}
             onNavigateNext={() => navigateDetail(1)}
             onNavigatePrevious={() => navigateDetail(-1)}
-            onShareText={(text) => void copyText(text, "已复制分享内容。")}
+            onShareGroup={() => {
+              if (detailGroupItems.length === 0) {
+                return;
+              }
+
+              void exportZip(detailGroupItems.map((groupItem) => groupItem.id));
+            }}
+            onShareText={(text) => void copyText(text, "已复制分享文案。")}
             onSave={(patch) => saveItem(detailItem.id, patch, { background: true, silent: true })}
             onSaveGenerationModelPreferences={(patch) => void saveGenerationModelPreferences(patch)}
-            onSavePromptLexicons={savePromptLexicons}
+            onSaveAiActionModelPreference={saveAiActionModelPreference}
+            onSaveAiRecognitionSourcePreferences={saveAiRecognitionSourcePreferences}
             onToggleImageLike={() => void toggleFavoriteImage(detailItem.id)}
             onGenerateVideoFrames={generateVideoFrames}
             onImportVideoReferenceImages={importVideoReferenceImages}
@@ -1887,9 +2241,14 @@ function resetFilters() {
             settings={aiSettings}
             onClose={() => setIsAiSettingsOpen(false)}
             onSave={saveAiSettings}
+            onSaveAiRecognitionSourcePreferences={saveAiRecognitionSourcePreferences}
             onTest={testAiSettings}
             onListModels={listAiModels}
             onCopyApiKey={copyAiApiKey}
+            onReadApiKey={async (profileId) => {
+              const result = await window.suyanApi.readAiApiKey(profileId);
+              return result.ok ? result.data.apiKey : null;
+            }}
             onNotify={showStatusMessage}
           />
         </Suspense>
@@ -1912,36 +2271,18 @@ function resetFilters() {
         </Suspense>
       ) : null}
 
-      {isProxySettingsOpen ? (
+      {isSystemPreferencesOpen ? (
         <Suspense fallback={null}>
-          <ProxySettingsDialog
+          <SystemPreferencesDialog
             isBusy={isBusy}
-            settings={proxySettings}
-            onClose={() => setIsProxySettingsOpen(false)}
-            onDetect={detectProxySettings}
-            onSave={saveProxySettings}
-            onTest={testProxySettings}
+            proxySettings={proxySettings}
+            section={systemPreferencesSection}
+            onClose={() => setIsSystemPreferencesOpen(false)}
+            onDetectProxy={detectProxySettings}
             onNotify={showStatusMessage}
-          />
-        </Suspense>
-      ) : null}
-
-      {isPerformanceSettingsOpen ? (
-        <Suspense fallback={null}>
-          <PerformanceSettingsDialog
-            isBusy={isBusy}
-            onClose={() => setIsPerformanceSettingsOpen(false)}
-            onNotify={showStatusMessage}
-          />
-        </Suspense>
-      ) : null}
-
-      {isStartupGallerySettingsOpen ? (
-        <Suspense fallback={null}>
-          <StartupGallerySettingsDialog
-            isBusy={isBusy}
-            onClose={() => setIsStartupGallerySettingsOpen(false)}
-            onNotify={showStatusMessage}
+            onSaveProxy={saveProxySettings}
+            onSectionChange={setSystemPreferencesSection}
+            onTestProxy={testProxySettings}
           />
         </Suspense>
       ) : null}
@@ -1967,808 +2308,10 @@ function resetFilters() {
 
       {isStartupOverlayVisible ? (
         <div className="absolute inset-0 z-50">
-          <StartupLoadingScreen />
+          <StartupLoadingScreen onSkip={skipStartupIntro} />
         </div>
       ) : null}
     </main>
-  );
-}
-
-type TagEditorDraft = TagConfigurationDraft & {
-  id: string;
-};
-
-type ToastStatusMessage = {
-  autoDismissMs: number | null;
-  text: string;
-  type: "success" | "error" | "info";
-};
-
-const themeModeOptions: Array<{ value: ThemeMode; label: string; icon: React.ReactNode }> = [
-  { value: "light", label: getThemeModeLabel("light"), icon: <Sun size={15} /> },
-  { value: "dark", label: getThemeModeLabel("dark"), icon: <Moon size={15} /> },
-];
-
-type StatusToastProps = {
-  message: ToastStatusMessage;
-  onClose: () => void;
-};
-
-function StatusToast({ message, onClose }: StatusToastProps) {
-  const toneClassName = getStatusToastToneClassName(message.type);
-  const title = getStatusToastTitle(message);
-  const isPending = message.autoDismissMs === null;
-  const durationStyle = isPending
-    ? undefined
-    : ({
-        "--status-toast-duration": `${message.autoDismissMs}ms`,
-      } as CSSProperties);
-
-  return (
-    <div
-      aria-atomic="true"
-      aria-live={message.type === "error" ? "assertive" : "polite"}
-      className="pointer-events-none fixed left-1/2 top-5 z-[100] flex w-[calc(100vw-2rem)] -translate-x-1/2 justify-center"
-      role={message.type === "error" ? "alert" : "status"}
-    >
-      <button
-        aria-label="关闭消息提示"
-        className="status-toast pointer-events-auto relative flex min-h-[58px] w-fit min-w-64 max-w-[calc(100vw-2rem)] items-center justify-center gap-2.5 overflow-hidden rounded-[13px] border border-border bg-panel px-5 text-center shadow-image outline-none transition-transform hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-primary/25 sm:max-w-96"
-        style={durationStyle}
-        type="button"
-        onClick={onClose}
-      >
-        <span className={`flex size-[22px] shrink-0 items-center justify-center rounded-full ${toneClassName.icon}`}>
-          {message.type === "success" ? (
-            <Check size={13} strokeWidth={3} />
-          ) : message.type === "error" ? (
-            <X size={13} strokeWidth={3} />
-          ) : (
-            <Info size={13} strokeWidth={2.5} />
-          )}
-        </span>
-        <span className="grid min-w-0 max-w-[17rem] flex-none gap-0.5 text-center">
-          <span className="truncate text-[13px] font-bold leading-[18px] text-foreground">{title}</span>
-          <span className="truncate text-xs leading-[17px] text-muted">{message.text}</span>
-        </span>
-        <span
-          className={`absolute bottom-0 left-0 h-0.5 ${toneClassName.progress} ${
-            isPending ? "status-toast-progress-indeterminate" : "status-toast-progress w-full"
-          }`}
-        />
-      </button>
-    </div>
-  );
-}
-
-function getStatusToastToneClassName(type: ToastStatusMessage["type"]): { icon: string; progress: string } {
-  if (type === "success") {
-    return {
-      icon: "bg-capsule-sage text-capsule-sage-foreground",
-      progress: "bg-primary",
-    };
-  }
-
-  if (type === "error") {
-    return {
-      icon: "bg-danger-soft text-danger",
-      progress: "bg-danger",
-    };
-  }
-
-  return {
-    icon: "bg-capsule-mist text-capsule-mist-foreground",
-    progress: "bg-progress",
-  };
-}
-
-function getStatusToastTitle(message: ToastStatusMessage): string {
-  if (message.type === "error") {
-    return "操作失败";
-  }
-
-  if (message.type === "info") {
-    return message.autoDismissMs === null ? "正在处理" : "提示";
-  }
-
-  if (message.text.includes("导入")) {
-    return "导入成功";
-  }
-
-  if (message.text.includes("导出")) {
-    return "导出成功";
-  }
-
-  if (message.text.includes("复制")) {
-    return "复制成功";
-  }
-
-  if (message.text.includes("保存")) {
-    return "保存成功";
-  }
-
-  return "操作成功";
-}
-
-type PromptSiteRecommendationsViewProps = {
-  sites: PromptSiteRecommendation[];
-  onCopySiteUrl: (site: PromptSiteRecommendation) => void;
-  onOpenSite: (site: PromptSiteRecommendation) => void;
-};
-
-function PromptSiteRecommendationsView({ sites, onCopySiteUrl, onOpenSite }: PromptSiteRecommendationsViewProps) {
-  const sections: PersonalRecommendationSection[] = [
-    {
-      id: "personal-projects",
-      title: "个人项目",
-    description: "自研节点、脚本和小工具，覆盖图像抓取、网页效率、传图与信息聚合。",
-      items: personalProjectRecommendations,
-    },
-    {
-      id: "friend-projects",
-      title: "友情项目",
-      description: "推荐的 ComfyUI 启动器、提示词优化工具和知识库。",
-      items: friendProjectRecommendations,
-    },
-    {
-      id: "api-sites",
-      title: "API 网站推荐",
-      description: "提供免费额度或签到福利的 API 中转站。",
-      items: apiSiteRecommendations,
-    },
-    {
-      id: "prompt-sites",
-      title: "提示词网站推荐",
-      description: "常用提示词社区、图像灵感库和官方提示词资料。",
-      items: sites,
-    },
-  ];
-
-  const totalRecommendationCount = sections.reduce((sum, section) => sum + section.items.length, 0);
-
-  return (
-    <div className="grid gap-5">
-      <header className="grid gap-2">
-        <p className="text-xs font-semibold tracking-wide text-muted">资源推荐</p>
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold text-foreground">资源推荐</h1>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">
-              收集插件、脚本、软件、自动化技能和提示词网站，覆盖 AI 创作、网页效率与图像灵感。
-            </p>
-          </div>
-          <span className="rounded-full border border-border bg-panel px-3 py-1 text-xs font-medium text-muted">
-            {totalRecommendationCount} 个推荐
-          </span>
-        </div>
-      </header>
-
-      {sections.map((section) => (
-        <section key={section.id} className="grid gap-3">
-          <div className="flex flex-wrap items-end justify-between gap-2 border-b border-border/60 pb-2">
-            <div className="min-w-0">
-              <h2 className="text-lg font-semibold text-foreground">{section.title}</h2>
-              <p className="mt-1 max-w-3xl text-xs leading-5 text-muted">{section.description}</p>
-            </div>
-            <span className="rounded-full border border-border bg-panel px-3 py-1 text-xs font-medium text-muted">
-              {section.items.length} 个
-            </span>
-          </div>
-          <div className="grid gap-3 min-[760px]:grid-cols-2 min-[1180px]:grid-cols-3">
-            {section.items.map((site, index) => (
-              <PromptSiteRecommendationCard
-                key={site.url}
-                site={site}
-                tone={promptSiteCardToneClassNames[index % promptSiteCardToneClassNames.length]}
-                onCopyUrl={() => onCopySiteUrl(site)}
-                onOpen={() => onOpenSite(site)}
-              />
-            ))}
-          </div>
-        </section>
-      ))}
-    </div>
-  );
-}
-
-type PromptSiteCardToneClassNames = {
-  article: string;
-  button: string;
-  header: string;
-  icon: string;
-  tag: string;
-};
-
-const promptSiteCardToneClassNames: PromptSiteCardToneClassNames[] = [
-  {
-    article: "border-capsule-sage-border hover:border-capsule-sage-border",
-    button: "border-capsule-sage-border text-capsule-sage-foreground hover:bg-capsule-sage",
-    header: "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground",
-    icon: "border-capsule-sage-border bg-panel/80 text-capsule-sage-foreground",
-    tag: "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground",
-  },
-  {
-    article: "border-capsule-mist-border hover:border-capsule-mist-border",
-    button: "border-capsule-mist-border text-capsule-mist-foreground hover:bg-capsule-mist",
-    header: "border-capsule-mist-border bg-capsule-mist text-capsule-mist-foreground",
-    icon: "border-capsule-mist-border bg-panel/80 text-capsule-mist-foreground",
-    tag: "border-capsule-mist-border bg-capsule-mist text-capsule-mist-foreground",
-  },
-  {
-    article: "border-capsule-rose-border hover:border-capsule-rose-border",
-    button: "border-capsule-rose-border text-capsule-rose-foreground hover:bg-capsule-rose",
-    header: "border-capsule-rose-border bg-capsule-rose text-capsule-rose-foreground",
-    icon: "border-capsule-rose-border bg-panel/80 text-capsule-rose-foreground",
-    tag: "border-capsule-rose-border bg-capsule-rose text-capsule-rose-foreground",
-  },
-  {
-    article: "border-capsule-sand-border hover:border-capsule-sand-border",
-    button: "border-capsule-sand-border text-capsule-sand-foreground hover:bg-capsule-sand",
-    header: "border-capsule-sand-border bg-capsule-sand text-capsule-sand-foreground",
-    icon: "border-capsule-sand-border bg-panel/80 text-capsule-sand-foreground",
-    tag: "border-capsule-sand-border bg-capsule-sand text-capsule-sand-foreground",
-  },
-  {
-    article: "border-capsule-lavender-border hover:border-capsule-lavender-border",
-    button: "border-capsule-lavender-border text-capsule-lavender-foreground hover:bg-capsule-lavender",
-    header: "border-capsule-lavender-border bg-capsule-lavender text-capsule-lavender-foreground",
-    icon: "border-capsule-lavender-border bg-panel/80 text-capsule-lavender-foreground",
-    tag: "border-capsule-lavender-border bg-capsule-lavender text-capsule-lavender-foreground",
-  },
-  {
-    article: "border-capsule-clay-border hover:border-capsule-clay-border",
-    button: "border-capsule-clay-border text-capsule-clay-foreground hover:bg-capsule-clay",
-    header: "border-capsule-clay-border bg-capsule-clay text-capsule-clay-foreground",
-    icon: "border-capsule-clay-border bg-panel/80 text-capsule-clay-foreground",
-    tag: "border-capsule-clay-border bg-capsule-clay text-capsule-clay-foreground",
-  },
-  {
-    article: "border-primary/30 hover:border-primary/45",
-    button: "border-primary/35 text-primary hover:bg-primary-soft",
-    header: "border-primary/25 bg-primary-soft text-primary",
-    icon: "border-primary/30 bg-panel/80 text-primary",
-    tag: "border-primary/25 bg-primary-soft text-primary",
-  },
-  {
-    article: "border-capsule-stone-border hover:border-capsule-stone-border",
-    button: "border-capsule-stone-border text-capsule-stone-foreground hover:bg-capsule-stone",
-    header: "border-capsule-stone-border bg-capsule-stone text-capsule-stone-foreground",
-    icon: "border-capsule-stone-border bg-panel/80 text-capsule-stone-foreground",
-    tag: "border-capsule-stone-border bg-capsule-stone text-capsule-stone-foreground",
-  },
-];
-
-type PromptSiteRecommendationCardProps = {
-  site: PromptSiteRecommendation;
-  tone: PromptSiteCardToneClassNames;
-  onCopyUrl: () => void;
-  onOpen: () => void;
-};
-
-function PromptSiteRecommendationCard({ site, tone, onCopyUrl, onOpen }: PromptSiteRecommendationCardProps) {
-  return (
-    <article
-      className={`group/site grid overflow-hidden rounded-xl border bg-panel shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-image focus-within:-translate-y-1 focus-within:shadow-image ${tone.article}`}
-    >
-      <div className={`flex min-h-10 items-center border-b px-4 py-2 ${tone.header}`}>
-        <div className="min-w-0">
-          <h2 className="truncate text-base font-semibold text-foreground group-hover/site:text-current">{site.title}</h2>
-        </div>
-      </div>
-
-      <div className="grid gap-2 p-4">
-        <p className="line-clamp-2 text-sm leading-5 text-muted">{site.description}</p>
-
-        <div className="flex flex-wrap gap-1.5">
-          {site.tags.map((tag) => (
-            <span className={`rounded-full border px-2 py-0.5 text-[11px] ${tone.tag}`} key={tag}>
-              {tag}
-            </span>
-          ))}
-        </div>
-
-        <div className="flex items-center justify-between gap-3 pt-1">
-          <Button
-            className={`w-fit bg-panel shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-elevated ${tone.button}`}
-            icon={<ExternalLink size={14} />}
-            onClick={onOpen}
-          >
-            查看
-          </Button>
-          <button
-            aria-label={`复制网址：${site.title}`}
-            className={`icon-tooltip-button flex size-9 shrink-0 items-center justify-center rounded-lg border bg-panel/85 shadow-sm outline-none transition-all hover:-translate-y-0.5 hover:shadow-elevated focus-visible:ring-2 focus-visible:ring-primary/25 ${tone.icon}`}
-            data-tooltip-align="end"
-            data-tooltip-placement="above"
-            type="button"
-            onClick={onCopyUrl}
-          >
-            <Globe2 size={15} />
-            <span className="icon-tooltip-button__bubble" role="tooltip">
-              复制网址
-            </span>
-          </button>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-type SidebarToggleButtonProps = {
-  isOpen: boolean;
-  onClick: () => void;
-};
-
-type AppTitleBarProps = {
-  isSidebarOpen: boolean;
-  overlayActive: boolean;
-  onToggleSidebar: () => void;
-};
-
-type StartupGalleryDisplayImage = {
-  height: number;
-  source: string;
-  width: number;
-};
-
-type StartupImageProbeResult = {
-  height: number;
-  isReady: boolean;
-  width: number;
-};
-
-type StartupGallerySelection = {
-  images: StartupGalleryDisplayImage[];
-  sourceCount: number;
-  usedFallback: boolean;
-  failedImageCount: number;
-};
-
-let startupIntroPlayed = false;
-let startupGallerySelectionCache: StartupGallerySelection | null = null;
-let startupGallerySelectionPromise: Promise<StartupGallerySelection> | null = null;
-let startupScreenReadyPromise: Promise<void> | null = null;
-
-function StartupLoadingScreen() {
-  const replay = startupIntroPlayed;
-  const [galleryImages, setGalleryImages] = useState<StartupGalleryDisplayImage[]>(
-    () => startupGallerySelectionCache?.images ?? [],
-  );
-  const [activeIndex, setActiveIndex] = useState(0);
-
-  useEffect(() => {
-    startupIntroPlayed = true;
-  }, []);
-
-  useEffect(() => {
-    let isDisposed = false;
-
-    void loadStartupGallerySelection().then((selection) => {
-      if (isDisposed) {
-        return;
-      }
-
-      setGalleryImages(selection.images);
-      setActiveIndex(0);
-      void notifyStartupScreenReadyAfterPaint();
-    });
-
-    return () => {
-      isDisposed = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (galleryImages.length < 2) {
-      return;
-    }
-
-    const timerId = window.setInterval(() => {
-      setActiveIndex((index) => (index + 1) % galleryImages.length);
-    }, STARTUP_CAROUSEL_INTERVAL_MS);
-
-    return () => window.clearInterval(timerId);
-  }, [galleryImages.length]);
-
-  return (
-    <main
-      className={`startup-scene${replay ? " startup-scene--replay" : ""}`}
-      aria-label="正在加载素言"
-    >
-      <div className="startup-scene__backdrop" aria-hidden="true" />
-
-      <div className="startup-stage" aria-hidden="true">
-        <div className="startup-stage__deck">
-          {galleryImages.map((image, index) => {
-            const offset = getStartupCarouselOffset(index, activeIndex, galleryImages.length);
-            const absOffset = Math.abs(offset);
-            const isActive = offset === 0;
-            const shift = getStartupSlideShift(offset);
-            const scale = isActive ? 1.88 : Math.max(0.72, 1.38 - absOffset * 0.12);
-            const dimOpacity = isActive ? 0 : Math.min(0.58, 0.12 + absOffset * 0.14);
-
-            return (
-              <figure
-                className={`startup-slide${isActive ? " is-active" : ""}`}
-                key={`${image.source}-${index}`}
-                style={
-                  {
-                    "--startup-slide-shift": shift,
-                    "--startup-slide-scale": scale,
-                    "--startup-slide-dim-opacity": dimOpacity,
-                    zIndex: getStartupSlideZIndex(offset),
-                  } as CSSProperties
-                }
-              >
-                <img
-                  className="startup-slide__img"
-                  src={image.source}
-                  alt=""
-                  decoding="async"
-                  loading="eager"
-                />
-              </figure>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="startup-scene__overlay">
-        <div className="startup-scene__panel">
-          <h1 className="startup-scene__title">正在加载素材库</h1>
-          <p className="startup-scene__subtitle">正在为你准备提示词与作品</p>
-
-          <ol className="startup-scene__steps">
-            {startupLoadingSteps.map((step, index) => (
-              <li
-                className="startup-scene__step"
-                key={step}
-                style={{ animationDelay: `${0.3 + index * 0.55}s` }}
-              >
-                <span className="startup-scene__step-dot" aria-hidden="true" />
-                {step}
-              </li>
-            ))}
-          </ol>
-
-          <div className="startup-scene__progress" aria-hidden="true">
-            <span />
-          </div>
-        </div>
-      </div>
-    </main>
-  );
-}
-
-let libraryViewRenderCount = 0;
-let libraryViewFirstRenderMs = 0;
-let libraryViewLastReportMs = 0;
-
-function recordLibraryViewRender(): void {
-  const now = Date.now();
-
-  if (libraryViewFirstRenderMs === 0) {
-    libraryViewFirstRenderMs = now;
-  }
-
-  libraryViewRenderCount += 1;
-  const sinceFirstMs = now - libraryViewFirstRenderMs;
-
-  if (sinceFirstMs > 30000) {
-    return;
-  }
-
-  if (now - libraryViewLastReportMs >= 500 || libraryViewRenderCount % 50 === 0) {
-    libraryViewLastReportMs = now;
-    try {
-      window.suyanApi.logStartupEvent("render:count", {
-        renderCount: libraryViewRenderCount,
-        sinceFirstMs,
-      });
-    } catch {
-    }
-  }
-}
-
-function measureDerivation<T>(label: string, inputSize: number, compute: () => T): T {
-  const startedAt = performance.now();
-  const result = compute();
-  const durationMs = performance.now() - startedAt;
-
-  if (durationMs >= 30) {
-    try {
-      window.suyanApi.logStartupEvent("derivation:slow", {
-        label,
-        inputSize,
-        durationMs: Math.round(durationMs * 100) / 100,
-      });
-    } catch {
-    }
-  }
-
-  return result;
-}
-
-function getStartupCarouselOffset(index: number, activeIndex: number, total: number): number {
-  if (total <= 0) {
-    return 0;
-  }
-
-  let offset = index - activeIndex;
-  if (offset > total / 2) {
-    offset -= total;
-  }
-  if (offset < -total / 2) {
-    offset += total;
-  }
-
-  return offset;
-}
-
-function getStartupSlideZIndex(offset: number): number {
-  return 100 - Math.abs(offset) * 10;
-}
-
-function getStartupSlideShift(offset: number): number {
-  const direction = Math.sign(offset);
-  const steps = Math.abs(offset);
-  const stepIncrements = [0, 30, 20, 15, 13];
-  let shift = 0;
-
-  for (let step = 1; step <= steps; step += 1) {
-    shift += stepIncrements[Math.min(step, stepIncrements.length - 1)];
-  }
-
-  return direction * shift;
-}
-
-function loadStartupGallerySelection(): Promise<StartupGallerySelection> {
-  if (startupGallerySelectionCache) {
-    return Promise.resolve(startupGallerySelectionCache);
-  }
-
-  if (startupGallerySelectionPromise) {
-    return startupGallerySelectionPromise;
-  }
-
-  startupGallerySelectionPromise = window.suyanApi
-    .listStartupGalleryImages()
-    .then(async (result) => {
-      const gallerySources = result.ok
-        ? [...result.data]
-            .sort((left, right) => left.order - right.order)
-            .map((image) => getStartupGalleryImageSrc(image.fileName))
-        : [];
-      const sourceImages = gallerySources.length > 0 ? gallerySources : startupArtImages;
-      const selectedSources = selectRandomStartupGalleryImages(
-        sourceImages,
-        startupGalleryDisplayCount,
-      );
-      const probes = await Promise.all(selectedSources.map(preloadStartupImage));
-      const failedImageCount = probes.filter((probe) => !probe.isReady).length;
-      const displayImages = await Promise.all(
-        selectedSources.map((source, index) => {
-          const probe = probes[index];
-          if (probe?.isReady) {
-            return Promise.resolve(createStartupDisplayImage(source, probe));
-          }
-
-          return preloadStartupDisplayImage(startupArtImages[index % startupArtImages.length]);
-        }),
-      );
-
-      const selection: StartupGallerySelection = {
-        images: displayImages,
-        sourceCount: gallerySources.length,
-        usedFallback: gallerySources.length === 0 || failedImageCount > 0,
-        failedImageCount,
-      };
-
-      startupGallerySelectionCache = selection;
-      logRendererStartupEvent("startup-gallery:selection-ready", {
-        sourceCount: selection.sourceCount,
-        displayCount: selection.images.length,
-        usedFallback: selection.usedFallback,
-        failedImageCount: selection.failedImageCount,
-      });
-      return selection;
-    })
-    .catch(async () => {
-      const sources = selectRandomStartupGalleryImages(
-        startupArtImages,
-        startupGalleryDisplayCount,
-      );
-      const images = await Promise.all(sources.map(preloadStartupDisplayImage));
-      const selection: StartupGallerySelection = {
-        images,
-        sourceCount: 0,
-        usedFallback: true,
-        failedImageCount: 0,
-      };
-
-      startupGallerySelectionCache = selection;
-      logRendererStartupEvent("startup-gallery:selection-ready", {
-        sourceCount: 0,
-        displayCount: selection.images.length,
-        usedFallback: true,
-        failedImageCount: 0,
-      });
-      return selection;
-    });
-
-  return startupGallerySelectionPromise;
-}
-
-function createStartupDisplayImage(
-  source: string,
-  probe: StartupImageProbeResult,
-): StartupGalleryDisplayImage {
-  return {
-    height: probe.height,
-    source,
-    width: probe.width,
-  };
-}
-
-function preloadStartupDisplayImage(source: string): Promise<StartupGalleryDisplayImage> {
-  return preloadStartupImage(source).then((probe) => createStartupDisplayImage(source, probe));
-}
-
-function preloadStartupImage(source: string): Promise<StartupImageProbeResult> {
-  return new Promise((resolve) => {
-    const image = new Image();
-    image.decoding = "async";
-    const resolveReady = () => {
-      const width = image.naturalWidth;
-      const height = image.naturalHeight;
-      resolve({
-        height,
-        isReady: true,
-        width,
-      });
-    };
-
-    image.onload = () => {
-      if (typeof image.decode !== "function") {
-        resolveReady();
-        return;
-      }
-
-      void image.decode().then(
-        () => resolveReady(),
-        () => resolveReady(),
-      );
-    };
-    image.onerror = () =>
-      resolve({
-        height: 0,
-        isReady: false,
-        width: 0,
-      });
-    image.src = source;
-  });
-}
-
-function notifyStartupScreenReadyAfterPaint(): Promise<void> {
-  if (startupScreenReadyPromise) {
-    return startupScreenReadyPromise;
-  }
-
-  startupScreenReadyPromise = new Promise((resolve) => {
-    let isComplete = false;
-    let firstFrame = 0;
-    let secondFrame = 0;
-    const fallbackTimer = window.setTimeout(finish, 80);
-
-    function finish() {
-      if (isComplete) {
-        return;
-      }
-
-      isComplete = true;
-      window.clearTimeout(fallbackTimer);
-      window.cancelAnimationFrame(firstFrame);
-      window.cancelAnimationFrame(secondFrame);
-      window.suyanApi.notifyStartupScreenReady();
-      resolve();
-    }
-
-    firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(finish);
-    });
-  });
-
-  return startupScreenReadyPromise;
-}
-
-function DeferredViewFallback() {
-  return (
-    <div className="rounded-lg border border-border bg-panel px-5 py-6 text-sm text-muted shadow-elevated">
-      正在加载视图...
-    </div>
-  );
-}
-
-function PromptDetailFallback() {
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-foreground/45 p-4 min-[920px]:p-8">
-      <div className="w-full max-w-[1500px] rounded-lg border border-border bg-panel px-5 py-6 text-sm text-muted shadow-elevated">
-        正在打开提示词详情...
-      </div>
-    </div>
-  );
-}
-
-function AppTitleBar({ isSidebarOpen, overlayActive, onToggleSidebar }: AppTitleBarProps) {
-  const [isMaximized, setIsMaximized] = useState(true);
-
-  useEffect(() => {
-    let unsubscribe = () => {};
-    window.suyanApi.isWindowMaximized().then((result) => {
-      if (result.ok && result.data) {
-        setIsMaximized(result.data.maximized);
-      }
-    });
-    unsubscribe = window.suyanApi.onWindowMaximizeChange((maximized) => {
-      setIsMaximized(maximized);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  return (
-    <header className="flex h-11 shrink-0 items-center justify-between border-b border-border bg-panel/95 pl-3 pr-2 shadow-sm backdrop-blur [-webkit-app-region:drag]">
-      <div className="flex min-w-0 items-center gap-2.5">
-        <SidebarToggleButton isOpen={isSidebarOpen} onClick={onToggleSidebar} />
-        <AppLogoMark />
-        <span className="truncate text-sm font-semibold text-foreground">素言</span>
-      </div>
-      <div className={`flex items-center gap-1 [-webkit-app-region:no-drag] ${overlayActive ? "hidden" : ""}`}>
-        <button
-          aria-label="最小化"
-          className="flex size-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-border/60 hover:text-foreground"
-          type="button"
-          onClick={() => void window.suyanApi.minimizeWindow()}
-        >
-          <Minus size={15} />
-        </button>
-        <button
-          aria-label={isMaximized ? "向下还原" : "最大化"}
-          className="flex size-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-border/60 hover:text-foreground"
-          type="button"
-          onClick={() => void window.suyanApi.toggleMaximizeWindow()}
-        >
-          {isMaximized ? <Copy size={13} /> : <Square size={12} />}
-        </button>
-        <button
-          aria-label="关闭"
-          className="flex size-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-danger hover:text-primary-foreground"
-          type="button"
-          onClick={() => void window.suyanApi.closeWindow()}
-        >
-          <X size={15} />
-        </button>
-      </div>
-    </header>
-  );
-}
-
-function SidebarToggleButton({ isOpen, onClick }: SidebarToggleButtonProps) {
-  const label = isOpen ? "隐藏边栏" : "显示边栏";
-
-  return (
-    <button
-      aria-label={label}
-      className="icon-tooltip-button flex size-9 shrink-0 items-center justify-center rounded-xl border border-border bg-background text-muted shadow-none [-webkit-app-region:no-drag] transition-colors hover:bg-primary-soft hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
-      data-tooltip-align="start"
-      data-tooltip-placement="below"
-      type="button"
-      onClick={onClick}
-    >
-      {isOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
-      <span className="icon-tooltip-button__bubble" role="tooltip">
-        {label}
-      </span>
-    </button>
   );
 }
 
@@ -2788,15 +2331,13 @@ type LibrarySidebarProps = {
   onImportWordDocument: () => void;
   onOpenAbout: () => void;
   onOpenAiSettings: () => void;
+  onOpenCanvas: () => void;
   onOpenNsfwSettings: () => void;
-  onOpenPerformanceSettings: () => void;
-  onOpenProxySettings: () => void;
-  onOpenStartupGallerySettings: () => void;
+  onOpenSystemPreferences: () => void;
   onOpenCategoryLexicon: () => void;
   onOpenHome: () => void;
   onOpenLibraryRoots: () => void;
   onOpenManager: () => void;
-  onOpenParameterLexicon: () => void;
   onOpenPromptSites: () => void;
   onOpenTagLexicon: () => void;
   onResizeBy: (delta: number) => void;
@@ -2821,15 +2362,13 @@ function LibrarySidebar({
   onImportWordDocument,
   onOpenAbout,
   onOpenAiSettings,
+  onOpenCanvas,
   onOpenNsfwSettings,
-  onOpenPerformanceSettings,
-  onOpenProxySettings,
-  onOpenStartupGallerySettings,
+  onOpenSystemPreferences,
   onOpenCategoryLexicon,
   onOpenHome,
   onOpenLibraryRoots,
   onOpenManager,
-  onOpenParameterLexicon,
   onOpenPromptSites,
   onOpenTagLexicon,
   onResizeBy,
@@ -2888,10 +2427,19 @@ function LibrarySidebar({
   return (
     <aside
       ref={sidebarRef}
-      className="relative z-20 flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-panel/95"
+      className="relative z-20 flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-border bg-panel/95"
       style={{ width }}
     >
-      <nav className={`flex min-h-0 flex-1 flex-col gap-5 overflow-hidden pb-4 pt-5 ${isCompact ? "px-2" : "px-3"}`}>
+      {/*
+        Scroll the menu list so short/low-resolution viewports can still reach
+        every item (e.g. 启动图库 / 日志导出). Keep 外观/关于 pinned below.
+      */}
+      <nav
+        aria-label="主导航"
+        className={`library-sidebar-nav flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden overscroll-contain pb-3 pt-4 [scrollbar-gutter:stable] ${
+          isCompact ? "px-2" : "px-3"
+        }`}
+      >
         <div className="grid min-w-0 gap-1">
           <SidebarSectionLabel isCompact={isCompact}>素材</SidebarSectionLabel>
           <SidebarActionButton
@@ -2900,6 +2448,13 @@ function LibrarySidebar({
             isCompact={isCompact}
             label="素材浏览"
             onClick={onOpenHome}
+          />
+          <SidebarActionButton
+            active={activeView === "canvas"}
+            icon={<Sparkles size={17} />}
+            isCompact={isCompact}
+            label={"\u521b\u4f5c\u753b\u5e03"}
+            onClick={onOpenCanvas}
           />
           <div className="relative min-w-0" ref={importMenuRef}>
             <SidebarActionButton
@@ -2944,7 +2499,7 @@ function LibrarySidebar({
           />
         </div>
 
-        <div className="grid min-w-0 gap-1 border-t border-border/80 pt-4">
+        <div className="grid min-w-0 gap-1 border-t border-border/80 pt-3">
           <SidebarSectionLabel isCompact={isCompact}>组织</SidebarSectionLabel>
           <SidebarActionButton
             active={activeView === "categoryLexicon"}
@@ -2960,16 +2515,9 @@ function LibrarySidebar({
             label="标签浏览"
             onClick={onOpenTagLexicon}
           />
-          <SidebarActionButton
-            active={activeView === "parameterLexicon"}
-            icon={<SlidersHorizontal size={17} />}
-            isCompact={isCompact}
-            label="参数词库"
-            onClick={onOpenParameterLexicon}
-          />
         </div>
 
-        <div className="grid min-w-0 gap-1 border-t border-border/80 pt-4">
+        <div className="grid min-w-0 gap-1 border-t border-border/80 pt-3">
           <SidebarSectionLabel isCompact={isCompact}>资源</SidebarSectionLabel>
           <SidebarActionButton
             active={activeView === "promptSites"}
@@ -2980,7 +2528,7 @@ function LibrarySidebar({
           />
         </div>
 
-        <div className="grid min-w-0 gap-1 border-t border-border/80 pt-4">
+        <div className="grid min-w-0 gap-1 border-t border-border/80 pt-3">
           <SidebarSectionLabel isCompact={isCompact}>系统</SidebarSectionLabel>
           <SidebarActionButton
             active={activeView === "aiSettings"}
@@ -2997,25 +2545,11 @@ function LibrarySidebar({
             onClick={onOpenNsfwSettings}
           />
           <SidebarActionButton
-            active={activeView === "proxySettings"}
-            icon={<Wifi size={17} />}
+            active={activeView === "systemPreferences"}
+            icon={<SlidersHorizontal size={17} />}
             isCompact={isCompact}
-            label="网络代理"
-            onClick={onOpenProxySettings}
-          />
-          <SidebarActionButton
-            active={activeView === "performanceSettings"}
-            icon={<Gauge size={17} />}
-            isCompact={isCompact}
-            label="启动加速"
-            onClick={onOpenPerformanceSettings}
-          />
-          <SidebarActionButton
-            active={activeView === "startupGallerySettings"}
-            icon={<ImageIcon size={17} />}
-            isCompact={isCompact}
-            label="启动图库"
-            onClick={onOpenStartupGallerySettings}
+            label="系统设置"
+            onClick={onOpenSystemPreferences}
           />
           <SidebarActionButton
             icon={<ScrollText size={17} />}
@@ -3024,22 +2558,21 @@ function LibrarySidebar({
             onClick={onOpenLogExport}
           />
         </div>
-
-        <div className="mt-auto grid gap-2 border-t border-border/80 pt-4">
-          <div className={`grid gap-2 ${isCompact ? "grid-cols-1" : "grid-cols-2"}`}>
-            <SidebarThemeButton
-              isBusy={isBusy}
-              isCompact={isCompact}
-            />
-            <SidebarActionButton
-              icon={<Info size={17} />}
-              isCompact={isCompact}
-              label="关于"
-              onClick={onOpenAbout}
-            />
-          </div>
-        </div>
       </nav>
+
+      <div
+        className={`shrink-0 border-t border-border/80 bg-panel/95 pb-3 pt-3 ${isCompact ? "px-2" : "px-3"}`}
+      >
+        <div className={`grid gap-2 ${isCompact ? "grid-cols-1" : "grid-cols-2"}`}>
+          <SidebarThemeButton isBusy={isBusy} isCompact={isCompact} />
+          <SidebarActionButton
+            icon={<Info size={17} />}
+            isCompact={isCompact}
+            label="关于"
+            onClick={onOpenAbout}
+          />
+        </div>
+      </div>
 
       <div
         aria-label="调整边栏宽度"
@@ -3165,7 +2698,7 @@ type SearchHeroPanelProps = {
   onSubmit: () => void;
 };
 
-function SearchHeroPanel({
+const SearchHeroPanel = memo(function SearchHeroPanel({
   searchQuery,
   onSearchChange,
   onSubmit,
@@ -3205,7 +2738,7 @@ function SearchHeroPanel({
       </div>
     </form>
   );
-}
+});
 
 function getNextThemeMode(value: ThemeMode): ThemeMode {
   const currentIndex = themeModeOptions.findIndex((option) => option.value === value);
@@ -3215,19 +2748,27 @@ function getNextThemeMode(value: ThemeMode): ThemeMode {
 }
 
 function clampMasonryColumnCount(count: number): number {
+  if (!Number.isFinite(count)) {
+    return defaultMasonryColumnCount;
+  }
   return Math.min(maxMasonryColumnCount, Math.max(minMasonryColumnCount, Math.round(count)));
 }
 
 function migrateTileWidthToColumnCount(tileWidth: number): number {
+  // Current schema stores column count directly (2–10).
   if (tileWidth >= minMasonryColumnCount && tileWidth <= maxMasonryColumnCount) {
     return clampMasonryColumnCount(tileWidth);
   }
 
+  // Legacy pixel tile widths → nearest column density (continuous 2–10).
   if (tileWidth <= 150) return 10;
-  if (tileWidth <= 220) return 8;
+  if (tileWidth <= 180) return 9;
+  if (tileWidth <= 210) return 8;
+  if (tileWidth <= 250) return 7;
   if (tileWidth <= 300) return 6;
-  if (tileWidth <= 400) return 4;
-  if (tileWidth <= 600) return 3;
+  if (tileWidth <= 350) return 5;
+  if (tileWidth <= 420) return 4;
+  if (tileWidth <= 520) return 3;
   return 2;
 }
 
@@ -3275,707 +2816,6 @@ function loadPromptCardImageSize(card: PromptCardData): Promise<{ id: string; si
   });
 }
 
-type AboutDialogProps = {
-  onClose: () => void;
-};
-
-function AboutDialog({ onClose }: AboutDialogProps) {
-  const [isReleaseNotesVisible, setIsReleaseNotesVisible] = useState(true);
-  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
-  const [updateCheckResult, setUpdateCheckResult] = useState<AppUpdateCheckData | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
-  const displayedVersion = updateCheckResult?.currentVersion ?? appVersion;
-  const updateStatusClassName =
-    updateCheckResult?.status === "update_available"
-      ? "text-primary"
-      : updateCheckResult?.status === "network_error"
-        ? "text-danger"
-        : "text-muted";
-  const updatePageLabel = updateCheckResult?.status === "update_available" ? "前往下载" : "打开发布页";
-
-  const handleCheckUpdates = async () => {
-    if (isCheckingUpdates) {
-      return;
-    }
-
-    setIsCheckingUpdates(true);
-    setUpdateStatus("正在连接 GitHub Releases...");
-
-    try {
-      const result = await window.suyanApi.checkForUpdates();
-      if (result.ok) {
-        setUpdateCheckResult(result.data);
-        setUpdateStatus(result.data.message);
-      } else {
-        setUpdateCheckResult(null);
-        setUpdateStatus(result.error.message);
-      }
-    } catch {
-      setUpdateCheckResult(null);
-      setUpdateStatus("检查更新失败，请稍后重试。");
-    } finally {
-      setIsCheckingUpdates(false);
-    }
-  };
-
-  const handleOpenUpdatePage = async () => {
-    const result = await window.suyanApi.openExternalUrl(updateCheckResult?.releaseUrl ?? suyanGithubReleasesUrl);
-    if (!result.ok) {
-      setUpdateStatus(result.error.message);
-    }
-  };
-
-  return (
-    <AppDialog
-      overlayClassName="z-40 px-6 py-8"
-      panelClassName="flex max-h-full w-full max-w-lg flex-col"
-      titleId="about-dialog-title"
-      onClose={onClose}
-    >
-      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
-        <div className="min-w-0">
-          <h2 className="text-lg font-semibold" id="about-dialog-title">
-            关于素言
-          </h2>
-          <p className="mt-1 text-sm text-muted">本地提示词与图像素材管理工具</p>
-        </div>
-        <DialogCloseButton onClick={onClose} />
-      </header>
-
-      <div className="grid gap-4 overflow-y-auto px-5 py-4">
-        <section className="grid gap-2 rounded-xl border border-border bg-background p-4">
-          <div className="grid gap-2 text-sm">
-            <InfoRow label="软件名称" value="素言" />
-            <InfoRow label="版本" value={displayedVersion} />
-            <InfoRow label="软件描述" value="本地 AI 提示词与图像素材管理工具" />
-          </div>
-        </section>
-
-        <section className="grid gap-3 rounded-xl border border-border bg-background p-4">
-          <div className="flex items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold">软件功能</h3>
-            <button
-              className="rounded-lg px-2 py-1 text-xs font-medium text-muted transition-colors hover:bg-primary-soft hover:text-foreground"
-              type="button"
-              onClick={() => setIsReleaseNotesVisible((current) => !current)}
-            >
-              {isReleaseNotesVisible ? "收起" : "查看"}
-            </button>
-          </div>
-          {isReleaseNotesVisible ? (
-            <ul className="grid gap-2 text-sm leading-6 text-muted">
-              <li>本地管理提示词、图片与视频效果图。</li>
-              <li>支持文件、剪贴板、Word 文档与网页导入。</li>
-              <li>分类、标签、参数词库和 NSFW 分级整理。</li>
-              <li>AI 分析、优化、翻译与图片反推提示词。</li>
-              <li>批量压缩、重复扫描、启动图库和日志反馈。</li>
-            </ul>
-          ) : null}
-        </section>
-
-        <section className="grid gap-3 rounded-xl border border-border bg-background p-4">
-          <h3 className="text-sm font-semibold">检查更新</h3>
-          <p className="text-sm leading-6 text-muted">
-            从 GitHub Releases 获取最新版本：guliacer/SuYan。
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              className="w-fit"
-              disabled={isCheckingUpdates}
-              icon={<RefreshCw className={isCheckingUpdates ? "animate-spin" : ""} size={16} />}
-              onClick={() => {
-                void handleCheckUpdates();
-              }}
-            >
-              {isCheckingUpdates ? "检查中..." : "检查更新"}
-            </Button>
-            <Button
-              className="w-fit"
-              icon={<ExternalLink size={16} />}
-              onClick={() => {
-                void handleOpenUpdatePage();
-              }}
-              variant={updateCheckResult?.status === "update_available" ? "primary" : "secondary"}
-            >
-              {updatePageLabel}
-            </Button>
-          </div>
-          {updateStatus ? <p className={`text-sm leading-6 ${updateStatusClassName}`}>{updateStatus}</p> : null}
-        </section>
-      </div>
-    </AppDialog>
-  );
-}
-
-type InfoRowProps = {
-  label: string;
-  value: string;
-};
-
-function InfoRow({ label, value }: InfoRowProps) {
-  return (
-    <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-3">
-      <span className="text-muted">{label}</span>
-      <span className="min-w-0 truncate text-foreground">{value}</span>
-    </div>
-  );
-}
-
-type TagEditorDialogProps = {
-  drafts: TagEditorDraft[];
-  isBusy: boolean;
-  promptLexicons: PromptLexiconSettings | null;
-  onClose: () => void;
-  onExportLexicon: (kind: PromptLexiconKind, items: PromptLexiconEntry[]) => Promise<void>;
-  onImportLexicon: (kind: PromptLexiconKind) => Promise<PromptLexiconEntry[] | null>;
-  onImportLexiconImage: () => Promise<string | null>;
-  onLabelChange: (draftId: string, label: string) => void;
-  onMove: (draftId: string, direction: -1 | 1) => void;
-  onRemove: (draftId: string) => void;
-  onSave: (promptLexicons: PromptLexiconSettings) => void;
-};
-
-function TagEditorDialog({
-  drafts,
-  isBusy,
-  promptLexicons,
-  onClose,
-  onExportLexicon,
-  onImportLexicon,
-  onImportLexiconImage,
-  onLabelChange,
-  onMove,
-  onRemove,
-  onSave,
-}: TagEditorDialogProps) {
-  const [initialPromptLexicons] = useState(() => createPromptLexiconDrafts(promptLexicons, drafts));
-  const [parameterDrafts, setParameterDrafts] = useState(initialPromptLexicons.parameters);
-  const [categoryDrafts, setCategoryDrafts] = useState(initialPromptLexicons.categories);
-  const [tagImageDrafts, setTagImageDrafts] = useState(initialPromptLexicons.tags);
-  const [parameterQuery, setParameterQuery] = useState("");
-  const [selectedParameterSource, setSelectedParameterSource] = useState(allParameterSourcesValue);
-  const [selectedParameterGroupPath, setSelectedParameterGroupPath] = useState(allParameterGroupsValue);
-  const [selectedCategoryMenuPath, setSelectedCategoryMenuPath] = useState(allCategoryGroupsValue);
-  const [selectedTagMenuPath, setSelectedTagMenuPath] = useState(allTagGroupsValue);
-  const [categoryQuery, setCategoryQuery] = useState("");
-  const [tagImageQuery, setTagImageQuery] = useState("");
-  const [selectedParameters, setSelectedParameters] = useState<Set<string>>(() => new Set());
-  const [selectedCategories, setSelectedCategories] = useState<Set<string>>(() => new Set());
-  const [selectedTagImages, setSelectedTagImages] = useState<Set<string>>(() => new Set());
-
-  const parameterSourceOptions = useMemo(
-    () => buildParameterSourceOptions(parameterDrafts),
-    [parameterDrafts],
-  );
-  const sourceFilteredParameters = useMemo(
-    () => parameterDrafts.filter((entry) => matchesParameterSource(entry, selectedParameterSource)),
-    [parameterDrafts, selectedParameterSource],
-  );
-  const filteredParameters = useMemo(
-    () =>
-      sourceFilteredParameters.filter(
-        (entry) => matchesParameterGroup(entry, selectedParameterGroupPath) && matchesLexiconQuery(entry, parameterQuery),
-      ),
-    [parameterQuery, selectedParameterGroupPath, sourceFilteredParameters],
-  );
-  const filteredCategories = useMemo(
-    () =>
-      categoryDrafts.filter(
-        (entry) =>
-          matchesImageLexiconMenu(entry, selectedCategoryMenuPath, categoryDrafts, "category") &&
-          matchesLexiconQuery(entry, categoryQuery),
-      ),
-    [categoryDrafts, categoryQuery, selectedCategoryMenuPath],
-  );
-  const filteredTagImages = useMemo(
-    () =>
-      tagImageDrafts.filter(
-        (entry) =>
-          matchesImageLexiconMenu(entry, selectedTagMenuPath, tagImageDrafts, "tag") &&
-          matchesLexiconQuery(entry, tagImageQuery),
-      ),
-    [tagImageDrafts, selectedTagMenuPath, tagImageQuery],
-  );
-  const parameterMenuValidation = useMemo(
-    () => validatePromptParameterMenuEntries(parameterDrafts),
-    [parameterDrafts],
-  );
-
-  useEffect(() => {
-    if (!parameterSourceOptions.some((option) => option.value === selectedParameterSource)) {
-      setSelectedParameterSource(allParameterSourcesValue);
-    }
-  }, [parameterSourceOptions, selectedParameterSource]);
-
-  useEffect(() => {
-    if (
-      selectedParameterGroupPath !== allParameterGroupsValue &&
-      !sourceFilteredParameters.some(
-        (entry) => isDisplayableParameterEntry(entry) && matchesParameterGroup(entry, selectedParameterGroupPath),
-      )
-    ) {
-      setSelectedParameterGroupPath(allParameterGroupsValue);
-    }
-  }, [selectedParameterGroupPath, sourceFilteredParameters]);
-
-  useEffect(() => {
-    if (
-      selectedCategoryMenuPath !== allCategoryGroupsValue &&
-      !categoryDrafts.some((entry) => matchesImageLexiconMenu(entry, selectedCategoryMenuPath, categoryDrafts, "category"))
-    ) {
-      setSelectedCategoryMenuPath(allCategoryGroupsValue);
-    }
-  }, [categoryDrafts, selectedCategoryMenuPath]);
-
-  useEffect(() => {
-    if (
-      selectedTagMenuPath !== allTagGroupsValue &&
-      !tagImageDrafts.some((entry) => matchesImageLexiconMenu(entry, selectedTagMenuPath, tagImageDrafts, "tag"))
-    ) {
-      setSelectedTagMenuPath(allTagGroupsValue);
-    }
-  }, [selectedTagMenuPath, tagImageDrafts]);
-
-  async function handleImportParameters() {
-    const importedItems = await onImportLexicon("parameters");
-
-    if (!importedItems) {
-      return;
-    }
-
-    setParameterDrafts(
-      normalizeParameterLexiconEntries(migratePromptParameterLexiconGroups(importedItems.filter(isPromptParameterLexiconEntry))),
-    );
-    setSelectedParameters(new Set());
-    setSelectedParameterGroupPath(allParameterGroupsValue);
-  }
-
-  function handleMigrateParameterMenus() {
-    setParameterDrafts((currentDrafts) =>
-      normalizeParameterLexiconEntries(migratePromptParameterLexiconGroups(currentDrafts)),
-    );
-    setSelectedParameters(new Set());
-    setSelectedParameterGroupPath(allParameterGroupsValue);
-  }
-
-  async function handleImportCategories() {
-    const importedItems = await onImportLexicon("categories");
-
-    if (!importedItems) {
-      return;
-    }
-
-    setCategoryDrafts(importedItems.filter(isPromptImageLexiconEntry));
-    setSelectedCategories(new Set());
-    setSelectedCategoryMenuPath(allCategoryGroupsValue);
-  }
-
-  async function handleImportTagImages() {
-    const importedItems = await onImportLexicon("tags");
-
-    if (!importedItems) {
-      return;
-    }
-
-    setTagImageDrafts(normalizeTagImageLexiconEntries(importedItems.filter(isPromptImageLexiconEntry)));
-    setSelectedTagImages(new Set());
-    setSelectedTagMenuPath(allTagGroupsValue);
-  }
-
-  async function handleUploadImage(kind: "categories" | "tags", entryId: string) {
-    const imageFileName = await onImportLexiconImage();
-
-    if (!imageFileName) {
-      return;
-    }
-
-    if (kind === "categories") {
-      setCategoryDrafts((currentDrafts) =>
-        currentDrafts.map((entry) => (entry.id === entryId ? { ...entry, imageFileName } : entry)),
-      );
-      return;
-    }
-
-    setTagImageDrafts((currentDrafts) =>
-      currentDrafts.map((entry) => (entry.id === entryId ? { ...entry, imageFileName } : entry)),
-    );
-  }
-
-  function handleSaveAll() {
-    if (!parameterMenuValidation.isValid) {
-      return;
-    }
-
-    onSave({
-      parameters: normalizeParameterLexiconEntries(parameterDrafts),
-      categories: normalizeImageLexiconEntries(categoryDrafts),
-      tags: normalizeTagImageLexiconEntries(tagImageDrafts),
-    });
-  }
-
-  return (
-    <AppDialog
-      overlayClassName="z-40 px-6 py-8"
-      panelClassName="flex max-h-full w-full max-w-6xl flex-col"
-      titleId="tag-editor-title"
-      onClose={onClose}
-    >
-      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
-        <div>
-          <h2 className="text-lg font-semibold" id="tag-editor-title">
-            编辑词库管理
-          </h2>
-          <p className="mt-1 text-sm text-muted">维护热门标签、AI 参数、分类图像和标签图像。</p>
-        </div>
-        <DialogCloseButton onClick={onClose} />
-      </header>
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        <div className="grid gap-5">
-          <section className="rounded-lg border border-border bg-background">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
-              <div className="flex items-center gap-3">
-                <span className="flex size-9 items-center justify-center rounded-md border border-border bg-panel text-primary">
-                  <Tags size={17} />
-                </span>
-                <div>
-                  <h3 className="text-sm font-semibold text-foreground">热门标签</h3>
-                  <p className="text-xs text-muted">{drafts.length} 个标签，可调整排序和名称</p>
-                </div>
-              </div>
-            </div>
-
-            <div className="max-h-[360px] overflow-y-auto p-3">
-              {drafts.length > 0 ? (
-                <div className="grid gap-2">
-                  {drafts.map((draft, index) => (
-                    <div
-                      className="grid min-h-11 grid-cols-[76px_minmax(0,1fr)_40px] items-center gap-2 rounded-md border border-border bg-panel px-2 py-2"
-                      key={draft.id}
-                    >
-                      <div className="flex items-center gap-1">
-                        <IconButton
-                          ariaLabel="上移标签"
-                          disabled={index === 0 || isBusy}
-                          icon={<ArrowUp size={15} />}
-                          onClick={() => onMove(draft.id, -1)}
-                        />
-                        <IconButton
-                          ariaLabel="下移标签"
-                          disabled={index === drafts.length - 1 || isBusy}
-                          icon={<ArrowDown size={15} />}
-                          onClick={() => onMove(draft.id, 1)}
-                        />
-                      </div>
-                      <input
-                        aria-label="标签名称"
-                        className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/20"
-                        value={draft.label}
-                        onChange={(event) => onLabelChange(draft.id, event.target.value)}
-                      />
-                      <IconButton
-                        ariaLabel="删除标签"
-                        disabled={isBusy}
-                        icon={<Trash2 size={15} />}
-                        onClick={() => onRemove(draft.id)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <LexiconEmptyState text="没有可编辑的标签" />
-              )}
-            </div>
-          </section>
-
-          <LexiconSection
-            count={countDisplayableParameterEntries(parameterDrafts)}
-            description="管理 AI 分析使用的参数、变量和值。"
-            icon={<BookOpen size={17} />}
-            isBusy={isBusy}
-            query={parameterQuery}
-            searchPlaceholder="搜索参数名称、变量或分组"
-            selectedCount={countSelectedEntries(selectedParameters, parameterDrafts.filter(isDisplayableParameterEntry))}
-            toolbarLeadingAction={
-              <Button
-                icon={<RefreshCw size={15} />}
-                disabled={isBusy}
-                onClick={handleMigrateParameterMenus}
-              >
-                整理分组
-              </Button>
-            }
-            title="AI 分析参数词库"
-            onAdd={() =>
-              setParameterDrafts((currentDrafts) => [
-                createBlankParameterEntry(
-                  getParameterSourceDraft(parameterSourceOptions, selectedParameterSource),
-                  getParameterGroupDraft(selectedParameterGroupPath),
-                  getParameterItemDraft(selectedParameterGroupPath, currentDrafts),
-                ),
-                ...currentDrafts,
-              ])
-            }
-            onDeleteSelected={() => {
-              setParameterDrafts((currentDrafts) => currentDrafts.filter((entry) => !selectedParameters.has(entry.id)));
-              setSelectedParameters(new Set());
-            }}
-            onExport={() => void onExportLexicon("parameters", parameterDrafts)}
-            onImport={() => void handleImportParameters()}
-            onQueryChange={setParameterQuery}
-          >
-            <ParameterMenuValidationNotice validation={parameterMenuValidation} />
-            <ParameterLexiconExplorer
-              entries={sourceFilteredParameters}
-              filteredEntries={filteredParameters}
-              isBusy={isBusy}
-              selectedEntries={selectedParameters}
-              selectedGroupPath={selectedParameterGroupPath}
-              onAddEntry={(group, draft, value) =>
-                setParameterDrafts((currentDrafts) => [
-                  createBlankParameterEntry(
-                    getParameterSourceDraft(parameterSourceOptions, selectedParameterSource),
-                    group,
-                    draft,
-                    value,
-                  ),
-                  ...currentDrafts,
-                ])
-              }
-              onChangeEntry={(entryId, patch) =>
-                setParameterDrafts((currentDrafts) =>
-                  currentDrafts.map((draft) => (draft.id === entryId ? { ...draft, ...patch } : draft)),
-                )
-              }
-              onChangeSection={(entryIds, patch) =>
-                setParameterDrafts((currentDrafts) => {
-                  const entryIdSet = new Set(entryIds);
-
-                  return currentDrafts.map((draft) =>
-                    entryIdSet.has(draft.id) ? { ...draft, ...patch } : draft,
-                  );
-                })
-              }
-              onRemoveEntry={(entryId) =>
-                setParameterDrafts((currentDrafts) => currentDrafts.filter((draft) => draft.id !== entryId))
-              }
-              onRenameGroup={(oldPath, newLabel) =>
-                setParameterDrafts((currentDrafts) => renameParameterGroupInDrafts(currentDrafts, oldPath, newLabel))
-              }
-              onSelectEntry={(entryId) => setSelectedParameters((current) => toggleEntrySelection(current, entryId))}
-              onSelectGroup={setSelectedParameterGroupPath}
-              onSelectAll={() => setSelectedParameters(new Set(filteredParameters.map((entry) => entry.id)))}
-              onSelectInvert={() =>
-                setSelectedParameters((current) => {
-                  const next = new Set<string>();
-                  for (const entry of filteredParameters) {
-                    if (!current.has(entry.id)) {
-                      next.add(entry.id);
-                    }
-                  }
-                  return next;
-                })
-              }
-              onSelectNone={() => setSelectedParameters(new Set())}
-              onRemoveSelected={() => {
-                setParameterDrafts((current) => current.filter((entry) => !selectedParameters.has(entry.id)));
-                setSelectedParameters(new Set());
-              }}
-            />
-          </LexiconSection>
-
-          <LexiconSection
-            count={categoryDrafts.length}
-            description="维护分类图像、说明、分组和父级关系。"
-            icon={<FolderTree size={17} />}
-            isBusy={isBusy}
-            query={categoryQuery}
-            searchPlaceholder="搜索分类、描述、分组"
-            selectedCount={countSelectedEntries(selectedCategories, categoryDrafts)}
-            title="分类词库"
-            onAdd={() =>
-              setCategoryDrafts((currentDrafts) => [
-                createBlankImageEntry("category", getImageEntryDraft("category", selectedCategoryMenuPath, currentDrafts)),
-                ...currentDrafts,
-              ])
-            }
-            onClearSelectedImages={() =>
-              setCategoryDrafts((currentDrafts) =>
-                currentDrafts.map((entry) =>
-                  selectedCategories.has(entry.id) ? { ...entry, imageFileName: null } : entry,
-                ),
-              )
-            }
-            onDeleteSelected={() => {
-              setCategoryDrafts((currentDrafts) =>
-                currentDrafts
-                  .filter((entry) => !selectedCategories.has(entry.id))
-                  .map((entry) => (entry.parentId && selectedCategories.has(entry.parentId) ? { ...entry, parentId: null } : entry)),
-              );
-              setSelectedCategories(new Set());
-            }}
-            onExport={() => void onExportLexicon("categories", categoryDrafts)}
-            onImport={() => void handleImportCategories()}
-            onQueryChange={setCategoryQuery}
-          >
-            <ImageLexiconExplorer
-              entries={categoryDrafts}
-              filteredEntries={filteredCategories}
-              isBusy={isBusy}
-              kind="category"
-              selectedEntries={selectedCategories}
-              selectedMenuPath={selectedCategoryMenuPath}
-              showParentSelect
-              onChangeEntry={(entryId, patch) =>
-                setCategoryDrafts((currentDrafts) =>
-                  currentDrafts.map((draft) => (draft.id === entryId ? { ...draft, ...patch } : draft)),
-                )
-              }
-              onClearImage={(entryId) =>
-                setCategoryDrafts((currentDrafts) =>
-                  currentDrafts.map((draft) => (draft.id === entryId ? { ...draft, imageFileName: null } : draft)),
-                )
-              }
-              onRemoveEntry={(entryId) =>
-                setCategoryDrafts((currentDrafts) =>
-                  currentDrafts
-                    .filter((draft) => draft.id !== entryId)
-                    .map((draft) => (draft.parentId === entryId ? { ...draft, parentId: null } : draft)),
-                )
-              }
-              onRenameGroup={(oldPath, newLabel) =>
-                setCategoryDrafts((currentDrafts) => renameImageGroupInDrafts(currentDrafts, oldPath, newLabel))
-              }
-              onRenameItem={(groupPath, itemKey, newLabel) =>
-                setCategoryDrafts((currentDrafts) => renameImageItemInDrafts(currentDrafts, groupPath, itemKey, newLabel))
-              }
-              onSelectEntry={(entryId) => setSelectedCategories((current) => toggleEntrySelection(current, entryId))}
-              onSelectMenu={setSelectedCategoryMenuPath}
-              onUploadImage={(entryId) => void handleUploadImage("categories", entryId)}
-              onSelectAll={() => setSelectedCategories(new Set(filteredCategories.map((entry) => entry.id)))}
-              onSelectInvert={() =>
-                setSelectedCategories((current) => {
-                  const next = new Set<string>();
-                  for (const entry of filteredCategories) {
-                    if (!current.has(entry.id)) {
-                      next.add(entry.id);
-                    }
-                  }
-                  return next;
-                })
-              }
-              onSelectNone={() => setSelectedCategories(new Set())}
-              onRemoveSelected={() => {
-                setCategoryDrafts((current) =>
-                  current
-                    .filter((entry) => !selectedCategories.has(entry.id))
-                    .map((entry) =>
-                      entry.parentId && selectedCategories.has(entry.parentId) ? { ...entry, parentId: null } : entry,
-                    ),
-                );
-                setSelectedCategories(new Set());
-              }}
-            />
-          </LexiconSection>
-
-          <LexiconSection
-            count={tagImageDrafts.length}
-            description="维护标签图像、说明和分组。"
-            icon={<ImageIcon size={17} />}
-            isBusy={isBusy}
-            query={tagImageQuery}
-            searchPlaceholder="搜索标签、描述、分组"
-            selectedCount={countSelectedEntries(selectedTagImages, tagImageDrafts)}
-            title="标签词库"
-            onAdd={() =>
-              setTagImageDrafts((currentDrafts) => [
-                createBlankImageEntry("tag", getImageEntryDraft("tag", selectedTagMenuPath, currentDrafts)),
-                ...currentDrafts,
-              ])
-            }
-            onClearSelectedImages={() =>
-              setTagImageDrafts((currentDrafts) =>
-                currentDrafts.map((entry) =>
-                  selectedTagImages.has(entry.id) ? { ...entry, imageFileName: null } : entry,
-                ),
-              )
-            }
-            onDeleteSelected={() => {
-              setTagImageDrafts((currentDrafts) => currentDrafts.filter((entry) => !selectedTagImages.has(entry.id)));
-              setSelectedTagImages(new Set());
-            }}
-            onExport={() => void onExportLexicon("tags", tagImageDrafts)}
-            onImport={() => void handleImportTagImages()}
-            onQueryChange={setTagImageQuery}
-          >
-            <ImageLexiconExplorer
-              entries={tagImageDrafts}
-              filteredEntries={filteredTagImages}
-              isBusy={isBusy}
-              kind="tag"
-              selectedEntries={selectedTagImages}
-              selectedMenuPath={selectedTagMenuPath}
-              onChangeEntry={(entryId, patch) =>
-                setTagImageDrafts((currentDrafts) =>
-                  currentDrafts.map((draft) => (draft.id === entryId ? { ...draft, ...patch } : draft)),
-                )
-              }
-              onClearImage={(entryId) =>
-                setTagImageDrafts((currentDrafts) =>
-                  currentDrafts.map((draft) => (draft.id === entryId ? { ...draft, imageFileName: null } : draft)),
-                )
-              }
-              onRemoveEntry={(entryId) =>
-                setTagImageDrafts((currentDrafts) => currentDrafts.filter((draft) => draft.id !== entryId))
-              }
-              onRenameGroup={(oldPath, newLabel) =>
-                setTagImageDrafts((currentDrafts) => renameImageGroupInDrafts(currentDrafts, oldPath, newLabel))
-              }
-              onRenameItem={(groupPath, itemKey, newLabel) =>
-                setTagImageDrafts((currentDrafts) => renameImageItemInDrafts(currentDrafts, groupPath, itemKey, newLabel))
-              }
-              onSelectEntry={(entryId) => setSelectedTagImages((current) => toggleEntrySelection(current, entryId))}
-              onSelectMenu={setSelectedTagMenuPath}
-              onUploadImage={(entryId) => void handleUploadImage("tags", entryId)}
-              onSelectAll={() => setSelectedTagImages(new Set(filteredTagImages.map((entry) => entry.id)))}
-              onSelectInvert={() =>
-                setSelectedTagImages((current) => {
-                  const next = new Set<string>();
-                  for (const entry of filteredTagImages) {
-                    if (!current.has(entry.id)) {
-                      next.add(entry.id);
-                    }
-                  }
-                  return next;
-                })
-              }
-              onSelectNone={() => setSelectedTagImages(new Set())}
-              onRemoveSelected={() => {
-                setTagImageDrafts((current) => current.filter((entry) => !selectedTagImages.has(entry.id)));
-                setSelectedTagImages(new Set());
-              }}
-            />
-          </LexiconSection>
-        </div>
-      </div>
-
-      <footer className="flex flex-wrap justify-end gap-2 border-t border-border px-5 py-4">
-        <Button icon={<X size={16} />} variant="ghost" onClick={onClose}>
-          取消
-        </Button>
-        <Button
-          icon={<Check size={16} />}
-          variant="primary"
-          disabled={isBusy || !parameterMenuValidation.isValid}
-          onClick={handleSaveAll}
-        >
-          保存标签与词库
-        </Button>
-      </footer>
-    </AppDialog>
-  );
-}
-
 type PromptLexiconWorkspaceProps = {
   kind: PromptLexiconKind;
   blurNsfwImages: boolean;
@@ -3985,11 +2825,15 @@ type PromptLexiconWorkspaceProps = {
   popularTags: string[];
   promptGroups: PromptImageGroup[];
   promptLexicons: PromptLexiconSettings | null;
+  categoryTaxonomy?: CategoryTaxonomy | null;
   onAnalyzePrompt: (payload: AiAnalyzePromptPayload) => Promise<{
     analysis: {
       primaryCategory: string;
       suggestedCategories: string[];
       suggestedTags: string[];
+      taxonomyPrimaryCategoryId?: string | null;
+      taxonomyBand?: "high" | "mid" | "low" | "none";
+      taxonomyCreatedCategoryIds?: string[];
     };
   }>;
   onCopyPrompt: (item: PromptCardData) => void;
@@ -3999,10 +2843,86 @@ type PromptLexiconWorkspaceProps = {
   onOpenDetail: (itemId: string) => void;
   onDeleteItems: (itemIds: string[], deleteImages: boolean) => Promise<void>;
   onSaveItem: (itemId: string, patch: Partial<LibraryItem>) => Promise<void>;
-  onSavePromptLexicons: (promptLexicons: PromptLexiconSettings) => Promise<boolean>;
+  onSaveItemsBatch?: (
+    patches: ReadonlyArray<{ itemId: string; patch: Partial<LibraryItem> }>,
+  ) => Promise<boolean>;
+  onClearLexiconDomain?: (domain: "categories" | "tags") => Promise<boolean>;
+  onSavePromptLexicons: (
+    promptLexicons: PromptLexiconSettings,
+    options?: { silent?: boolean },
+  ) => Promise<boolean>;
+  onMovePromptGroupsToCategory: (
+    itemIds: readonly string[],
+    categoryId: string | null,
+    source?: "system" | "user" | "ai",
+  ) => Promise<boolean>;
+  onUpsertCustomCategory: (input: {
+    id?: string | null;
+    name: string;
+    group?: string | null;
+    description?: string | null;
+    parentId?: string | null;
+  }) => Promise<string | null>;
+  onDeleteCustomCategory: (categoryId: string) => Promise<boolean>;
 };
 
-function PromptLexiconWorkspace({
+type PromptGroupAnalysisOutcome<TPatch> = {
+  item: PromptCardData;
+  patch: TPatch | null;
+  skipped: boolean;
+  failed: boolean;
+  canceled: boolean;
+};
+
+async function analyzePromptGroupBatch<TPatch>(
+  groups: readonly PromptImageGroup[],
+  shouldSkip: (group: PromptImageGroup) => boolean,
+  isCanceled: () => boolean,
+  analyze: (item: PromptCardData) => Promise<TPatch | null>,
+): Promise<PromptGroupAnalysisOutcome<TPatch>[]> {
+  return Promise.all(
+    groups.map(async (group) => {
+      const item = group.primaryItem;
+      if (isCanceled()) {
+        return { item, patch: null, skipped: false, failed: false, canceled: true };
+      }
+      if (shouldSkip(group)) {
+        return { item, patch: null, skipped: true, failed: false, canceled: false };
+      }
+
+      try {
+        const patch = await analyze(item);
+        if (isCanceled()) {
+          return { item, patch: null, skipped: false, failed: false, canceled: true };
+        }
+        return { item, patch, skipped: false, failed: !patch, canceled: false };
+      } catch {
+        return { item, patch: null, skipped: false, failed: true, canceled: false };
+      }
+    }),
+  );
+}
+
+async function persistPromptGroupPatches(
+  patches: ReadonlyArray<{ itemId: string; patch: Partial<LibraryItem> }>,
+  onSaveItem: (itemId: string, patch: Partial<LibraryItem>) => Promise<void>,
+  onSaveItemsBatch?: (
+    patches: ReadonlyArray<{ itemId: string; patch: Partial<LibraryItem> }>,
+  ) => Promise<boolean>,
+): Promise<boolean> {
+  if (patches.length === 0) {
+    return true;
+  }
+  if (onSaveItemsBatch) {
+    return onSaveItemsBatch(patches);
+  }
+  for (const entry of patches) {
+    await onSaveItem(entry.itemId, entry.patch);
+  }
+  return true;
+}
+
+const PromptLexiconWorkspace = memo(function PromptLexiconWorkspace({
   kind,
   blurNsfwImages,
   hideScrollTopButton = false,
@@ -4011,6 +2931,7 @@ function PromptLexiconWorkspace({
   popularTags,
   promptGroups,
   promptLexicons,
+  categoryTaxonomy = null,
   onAnalyzePrompt,
   onCopyPrompt,
   onExportLexicon,
@@ -4019,25 +2940,23 @@ function PromptLexiconWorkspace({
   onOpenDetail,
   onDeleteItems,
   onSaveItem,
+  onSaveItemsBatch,
+  onClearLexiconDomain,
   onSavePromptLexicons,
+  onMovePromptGroupsToCategory,
+  onUpsertCustomCategory,
+  onDeleteCustomCategory,
 }: PromptLexiconWorkspaceProps) {
-  const [parameterDrafts, setParameterDrafts] = useState(() =>
-    createPromptParameterDrafts(promptLexicons, popularTags, kind === "parameters"),
-  );
   const [categoryDrafts, setCategoryDrafts] = useState(() =>
-    createPromptCategoryDrafts(promptLexicons, popularTags, kind === "categories"),
+    createPromptCategoryDrafts(promptLexicons, popularTags, kind === "categories", categoryTaxonomy),
   );
   const [tagImageDrafts, setTagImageDrafts] = useState(() =>
     createPromptTagImageDrafts(promptLexicons, popularTags, kind === "tags"),
   );
-  const [parameterQuery, setParameterQuery] = useState("");
-  const [selectedParameterSource, setSelectedParameterSource] = useState(allParameterSourcesValue);
-  const [selectedParameterGroupPath, setSelectedParameterGroupPath] = useState(allParameterGroupsValue);
   const [selectedCategoryMenuPath, setSelectedCategoryMenuPath] = useState(allCategoryGroupsValue);
   const [selectedTagMenuPath, setSelectedTagMenuPath] = useState(allTagGroupsValue);
   const [categoryQuery, setCategoryQuery] = useState("");
   const [tagImageQuery, setTagImageQuery] = useState("");
-  const [selectedParameters, setSelectedParameters] = useState<Set<string>>(() => new Set());
   const [selectedCategoryPromptGroups, setSelectedCategoryPromptGroups] = useState<Set<string>>(() => new Set());
   const [selectedTagPromptGroups, setSelectedTagPromptGroups] = useState<Set<string>>(() => new Set());
   const [isDirty, setIsDirty] = useState(false);
@@ -4047,34 +2966,14 @@ function PromptLexiconWorkspace({
   const categoryAnalysisCancelRef = useRef(false);
   const tagAnalysisCancelRef = useRef(false);
   const autoSaveVersionRef = useRef(0);
+  const promptLexiconsRef = useRef(promptLexicons);
+  promptLexiconsRef.current = promptLexicons;
   const deferredCategoryQuery = useDeferredValue(categoryQuery);
   const deferredSelectedCategoryMenuPath = useDeferredValue(selectedCategoryMenuPath);
-  const isParameterWorkspace = kind === "parameters";
   const isCategoryWorkspace = kind === "categories";
   const isTagWorkspace = kind === "tags";
 
   const meta = getPromptLexiconWorkspaceMeta(kind);
-  const parameterSourceOptions = useMemo(
-    () => (isParameterWorkspace ? buildParameterSourceOptions(parameterDrafts) : []),
-    [isParameterWorkspace, parameterDrafts],
-  );
-  const sourceFilteredParameters = useMemo(
-    () =>
-      isParameterWorkspace
-        ? parameterDrafts.filter((entry) => matchesParameterSource(entry, selectedParameterSource))
-        : [],
-    [isParameterWorkspace, parameterDrafts, selectedParameterSource],
-  );
-  const filteredParameters = useMemo(
-    () =>
-      isParameterWorkspace
-        ? sourceFilteredParameters.filter(
-            (entry) =>
-              matchesParameterGroup(entry, selectedParameterGroupPath) && matchesLexiconQuery(entry, parameterQuery),
-          )
-        : [],
-    [isParameterWorkspace, parameterQuery, selectedParameterGroupPath, sourceFilteredParameters],
-  );
   const categoryPromptGroups = useMemo(
     () => (isCategoryWorkspace || isTagWorkspace ? promptGroups : []),
     [isCategoryWorkspace, isTagWorkspace, promptGroups],
@@ -4082,10 +2981,10 @@ function PromptLexiconWorkspace({
   const categoryLabelsCache = useMemo(() => {
     const cache = new Map<string, string[]>();
     for (const group of categoryPromptGroups) {
-      cache.set(group.id, getPromptGroupCategoryLabels(group));
+      cache.set(group.id, getPromptGroupCategoryLabels(group, categoryTaxonomy));
     }
     return cache;
-  }, [categoryPromptGroups]);
+  }, [categoryPromptGroups, categoryTaxonomy]);
   const tagLabelsCache = useMemo(() => {
     const cache = new Map<string, string[]>();
     for (const group of categoryPromptGroups) {
@@ -4097,10 +2996,52 @@ function PromptLexiconWorkspace({
     () => (isTagWorkspace ? categoryPromptGroups.filter((group) => (tagLabelsCache.get(group.id)?.length ?? 0) > 0) : []),
     [categoryPromptGroups, isTagWorkspace, tagLabelsCache],
   );
-  const categoryMenuEntries = useMemo(
-    () => (isCategoryWorkspace ? mergeCategoryLexiconEntriesWithPromptGroups(categoryDrafts, categoryPromptGroups, categoryLabelsCache) : []),
-    [categoryDrafts, categoryLabelsCache, categoryPromptGroups, isCategoryWorkspace],
-  );
+  const categoryMenuEntries = useMemo(() => {
+    if (!isCategoryWorkspace) {
+      return [];
+    }
+    // Always start from full system+custom taxonomy, then merge labels that appear on items.
+    const taxonomyEntries = taxonomyToLexiconFallback(categoryTaxonomy);
+    const baseEntries =
+      taxonomyEntries.length > 0
+        ? taxonomyEntries
+        : categoryDrafts.length > 0
+          ? categoryDrafts
+          : [];
+    return mergeCategoryLexiconEntriesWithPromptGroups(baseEntries, categoryPromptGroups, categoryLabelsCache);
+  }, [categoryDrafts, categoryLabelsCache, categoryPromptGroups, categoryTaxonomy, isCategoryWorkspace]);
+
+  // Keep editable drafts in sync when taxonomy changes (create / rename / delete).
+  // Taxonomy is the source of truth — never re-add custom entries that were removed
+  // from taxonomy (that used to resurrect deleted categories via autosave).
+  useEffect(() => {
+    if (!isCategoryWorkspace) {
+      return;
+    }
+    const taxonomyEntries = taxonomyToLexiconFallback(categoryTaxonomy);
+    if (taxonomyEntries.length === 0) {
+      return;
+    }
+    setCategoryDrafts((current) => {
+      const next = normalizeImageLexiconEntries(taxonomyEntries);
+      if (
+        current.length === next.length &&
+        current.every(
+          (entry, index) =>
+            entry.id === next[index]?.id &&
+            entry.label === next[index]?.label &&
+            entry.group === next[index]?.group &&
+            entry.parentId === next[index]?.parentId,
+        )
+      ) {
+        return current;
+      }
+      return next;
+    });
+    // Taxonomy-driven updates are already persisted by store actions — don't
+    // re-trigger "正在自动同步 / 已保存词库" loops.
+    setIsDirty(false);
+  }, [categoryTaxonomy, isCategoryWorkspace]);
   const visibleCategoryPromptGroups = useMemo(
     () =>
       isCategoryWorkspace
@@ -4147,13 +3088,9 @@ function PromptLexiconWorkspace({
     () => (isCategoryWorkspace ? visibleCategoryPromptGroups.filter(shouldAnalyzePromptGroupCategory).length : 0),
     [isCategoryWorkspace, visibleCategoryPromptGroups],
   );
-  const analyzableTagPromptGroupCount = useMemo(
-    () => (isTagWorkspace ? visibleTagPromptGroups.filter(shouldAnalyzePromptGroupTags).length : 0),
-    [isTagWorkspace, visibleTagPromptGroups],
-  );
-  const parameterMenuValidation = useMemo(
-    () => (isParameterWorkspace ? validatePromptParameterMenuEntries(parameterDrafts) : validParameterMenuValidation),
-    [isParameterWorkspace, parameterDrafts],
+  const tagAnalysisPromptGroupCount = useMemo(
+    () => (isTagWorkspace ? categoryPromptGroups.length : 0),
+    [categoryPromptGroups, isTagWorkspace],
   );
   const selectedCategoryPromptGroupCount = useMemo(
     () => (isCategoryWorkspace ? countSelectedPromptGroups(selectedCategoryPromptGroups, categoryPromptGroups) : 0),
@@ -4208,31 +3145,6 @@ function PromptLexiconWorkspace({
   }, [isTagWorkspace]);
 
   useEffect(() => {
-    if (!isParameterWorkspace) {
-      return;
-    }
-
-    if (!parameterSourceOptions.some((option) => option.value === selectedParameterSource)) {
-      setSelectedParameterSource(allParameterSourcesValue);
-    }
-  }, [isParameterWorkspace, parameterSourceOptions, selectedParameterSource]);
-
-  useEffect(() => {
-    if (!isParameterWorkspace) {
-      return;
-    }
-
-    if (
-      selectedParameterGroupPath !== allParameterGroupsValue &&
-      !sourceFilteredParameters.some(
-        (entry) => isDisplayableParameterEntry(entry) && matchesParameterGroup(entry, selectedParameterGroupPath),
-      )
-    ) {
-      setSelectedParameterGroupPath(allParameterGroupsValue);
-    }
-  }, [isParameterWorkspace, selectedParameterGroupPath, sourceFilteredParameters]);
-
-  useEffect(() => {
     if (!isCategoryWorkspace) {
       return;
     }
@@ -4258,11 +3170,6 @@ function PromptLexiconWorkspace({
     }
   }, [isTagWorkspace, selectedTagMenuPath, tagMenuEntries, tagPromptGroups]);
 
-  function updateParameterDrafts(updater: React.SetStateAction<PromptParameterLexiconEntry[]>) {
-    setIsDirty(true);
-    setParameterDrafts(updater);
-  }
-
   function updateCategoryDrafts(updater: React.SetStateAction<PromptImageLexiconEntry[]>) {
     setIsDirty(true);
     setCategoryDrafts(updater);
@@ -4273,19 +3180,61 @@ function PromptLexiconWorkspace({
     setTagImageDrafts(updater);
   }
 
+  // Keep local drafts aligned with the persisted store after clear/import/save
+  // from another workspace. Skip while this workspace has unsaved edits.
   useEffect(() => {
-    if (!isDirty || !parameterMenuValidation.isValid) {
+    if (isDirty) {
+      return;
+    }
+
+    if (isTagWorkspace) {
+      setTagImageDrafts(createPromptTagImageDrafts(promptLexicons, popularTags, true));
+    }
+  }, [isDirty, isTagWorkspace, popularTags, promptLexicons]);
+
+  // Repair legacy tag rows after opening the tag workspace. The current draft
+  // is normalized for display immediately; this flag lets the existing
+  // domain-scoped autosave persist corrected groups without touching the other
+  // lexicon domains.
+  useEffect(() => {
+    if (!isTagWorkspace || !promptLexicons) {
+      return;
+    }
+
+    const savedTags = promptLexicons.tags ?? [];
+    const normalizedTags = normalizeTagImageLexiconEntries(savedTags);
+    const savedByLabel = new Map(savedTags.map((entry) => [normalizeLexiconItemKey(entry.label), entry.group]));
+    const needsRepair =
+      normalizedTags.length !== savedTags.length ||
+      normalizedTags.some((entry) => savedByLabel.get(normalizeLexiconItemKey(entry.label)) !== entry.group);
+
+    if (needsRepair) {
+      setIsDirty(true);
+    }
+  }, [isTagWorkspace, promptLexicons]);
+
+  useEffect(() => {
+    if (!isDirty) {
       return;
     }
 
     const saveVersion = autoSaveVersionRef.current + 1;
     autoSaveVersionRef.current = saveVersion;
     const timer = window.setTimeout(() => {
-      void onSavePromptLexicons({
-        parameters: normalizeParameterLexiconEntries(parameterDrafts),
-        categories: normalizeImageLexiconEntries(categoryDrafts),
-        tags: normalizeTagImageLexiconEntries(tagImageDrafts),
-      }).then((saved) => {
+      const currentPromptLexicons = promptLexiconsRef.current;
+      // Only persist the active domain. Each lexicon view mounts its own workspace
+      // and keeps sibling drafts frozen at mount-time; writing all three domains
+      // would resurrect tags/categories the user just cleared elsewhere.
+      const nextLexicons: PromptLexiconSettings = {
+        categories: isCategoryWorkspace
+          ? normalizeImageLexiconEntries(categoryDrafts)
+          : (currentPromptLexicons?.categories ?? []),
+        tags: isTagWorkspace
+          ? normalizeTagImageLexiconEntries(tagImageDrafts)
+          : (currentPromptLexicons?.tags ?? []),
+      };
+
+      void onSavePromptLexicons(nextLexicons, { silent: true }).then((saved) => {
         if (saved && autoSaveVersionRef.current === saveVersion) {
           setIsDirty(false);
         }
@@ -4297,34 +3246,12 @@ function PromptLexiconWorkspace({
     };
   }, [
     categoryDrafts,
+    isCategoryWorkspace,
     isDirty,
+    isTagWorkspace,
     onSavePromptLexicons,
-    parameterDrafts,
-    parameterMenuValidation.isValid,
     tagImageDrafts,
   ]);
-
-  async function handleImportParameters() {
-    const importedItems = await onImportLexicon("parameters");
-
-    if (!importedItems) {
-      return;
-    }
-
-    updateParameterDrafts(
-      normalizeParameterLexiconEntries(migratePromptParameterLexiconGroups(importedItems.filter(isPromptParameterLexiconEntry))),
-    );
-    setSelectedParameters(new Set());
-    setSelectedParameterGroupPath(allParameterGroupsValue);
-  }
-
-  function handleMigrateParameterMenus() {
-    updateParameterDrafts((currentDrafts) =>
-      normalizeParameterLexiconEntries(migratePromptParameterLexiconGroups(currentDrafts)),
-    );
-    setSelectedParameters(new Set());
-    setSelectedParameterGroupPath(allParameterGroupsValue);
-  }
 
   async function handleImportCategories() {
     const importedItems = await onImportLexicon("categories");
@@ -4367,8 +3294,113 @@ function PromptLexiconWorkspace({
     );
   }
 
-  async function handleAnalyzeVisibleCategoryPromptGroups() {
-    if (categoryAnalysisProgress?.status === "running" || visibleCategoryPromptGroups.length === 0) {
+  async function handleResetAndReanalyzeCategories() {
+    if (isBusy || categoryAnalysisProgress?.status === "running") {
+      return;
+    }
+    if (!onClearLexiconDomain) {
+      showLexiconStatus({ type: "error", text: "清空接口不可用，请重启应用。" });
+      return;
+    }
+
+    setCategoryAnalysisProgress({
+      analyzed: 0,
+      currentTitle: "",
+      failed: 0,
+      message: "正在清空素材分类并同步词库…",
+      processed: 0,
+      skipped: 0,
+      status: "running",
+      total: 1,
+    });
+
+    const ok = await onClearLexiconDomain("categories");
+    if (!ok) {
+      setCategoryAnalysisProgress((current) =>
+        current ? { ...current, status: "canceled", message: "清空失败，请重试。" } : current,
+      );
+      return;
+    }
+
+    // Local drafts: keep only system taxonomy leaves for navigation.
+    const systemOnly = taxonomyToLexiconFallback(categoryTaxonomy).filter(
+      (entry) => entry.id.startsWith("system:") || entry.id.startsWith("group:"),
+    );
+    setCategoryDrafts(systemOnly);
+    setIsDirty(false);
+    setSelectedCategoryMenuPath(allCategoryGroupsValue);
+    setSelectedCategoryPromptGroups(new Set());
+    setCategoryAnalysisProgress({
+      analyzed: 1,
+      currentTitle: "",
+      failed: 0,
+      message: "已清空素材分类。系统目录保留；需要时点「AI分类」。",
+      processed: 1,
+      skipped: 0,
+      status: "completed",
+      total: 1,
+    });
+    showLexiconStatus({
+      type: "success",
+      text: "已清空素材分类并写入磁盘（未自动分析）。",
+    });
+    logRendererStartupEvent("lexicon:clear-categories:done", { domain: "categories" });
+  }
+
+  async function handleResetAndReanalyzeTags() {
+    if (isBusy || tagAnalysisProgress?.status === "running") {
+      return;
+    }
+    if (!onClearLexiconDomain) {
+      showLexiconStatus({ type: "error", text: "清空接口不可用，请重启应用。" });
+      return;
+    }
+
+    setTagAnalysisProgress({
+      analyzed: 0,
+      currentTitle: "",
+      failed: 0,
+      message: "正在清空素材标签与标签词库…",
+      processed: 0,
+      skipped: 0,
+      status: "running",
+      total: 1,
+    });
+
+    const ok = await onClearLexiconDomain("tags");
+    if (!ok) {
+      setTagAnalysisProgress((current) =>
+        current ? { ...current, status: "canceled", message: "清空失败，请重试。" } : current,
+      );
+      return;
+    }
+
+    setTagImageDrafts([]);
+    setIsDirty(false);
+    setSelectedTagMenuPath(allTagGroupsValue);
+    setSelectedTagPromptGroups(new Set());
+    setTagAnalysisProgress({
+      analyzed: 1,
+      currentTitle: "",
+      failed: 0,
+      message: "已清空素材标签与标签词库。需要时点「AI标签」。",
+      processed: 1,
+      skipped: 0,
+      status: "completed",
+      total: 1,
+    });
+    showLexiconStatus({
+      type: "success",
+      text: "已清空标签（素材 + 词库目录）并写入磁盘（未自动分析）。",
+    });
+    logRendererStartupEvent("lexicon:clear-tags:done", { domain: "tags" });
+  }
+
+  async function handleAnalyzeVisibleCategoryPromptGroups(options: { force?: boolean } = {}) {
+    const force = options.force === true;
+    const groupsToAnalyze = force ? categoryPromptGroups : visibleCategoryPromptGroups;
+
+    if (categoryAnalysisProgress?.status === "running" || groupsToAnalyze.length === 0) {
       return;
     }
 
@@ -4377,11 +3409,11 @@ function PromptLexiconWorkspace({
       analyzed: 0,
       currentTitle: "",
       failed: 0,
-      message: `准备分析 ${visibleCategoryPromptGroups.length} 个提示词组。`,
+      message: `准备分析 ${groupsToAnalyze.length} 个提示词组。`,
       processed: 0,
       skipped: 0,
       status: "running",
-      total: visibleCategoryPromptGroups.length,
+      total: groupsToAnalyze.length,
     });
 
     let analyzed = 0;
@@ -4390,96 +3422,112 @@ function PromptLexiconWorkspace({
     let skipped = 0;
     let consecutiveFailures = 0;
 
-    for (const group of visibleCategoryPromptGroups) {
+    const analysisBatchSize = 2;
+    for (let batchStart = 0; batchStart < groupsToAnalyze.length; batchStart += analysisBatchSize) {
       if (categoryAnalysisCancelRef.current) {
         setCategoryAnalysisProgress({
           analyzed,
           currentTitle: "",
           failed,
-          message: `已取消，处理 ${processed}/${visibleCategoryPromptGroups.length} 个提示词组。`,
+          message: `已取消，处理 ${processed}/${groupsToAnalyze.length} 个提示词组。`,
           processed,
           skipped,
           status: "canceled",
-          total: visibleCategoryPromptGroups.length,
+          total: groupsToAnalyze.length,
         });
         return;
       }
 
-      const item = group.primaryItem;
-
-      if (!shouldAnalyzePromptGroupCategory(group)) {
-        skipped += 1;
-        processed += 1;
-        setCategoryAnalysisProgress({
-          analyzed,
-          currentTitle: item.title || "未命名提示词",
-          failed,
-          message: "已有足够分类，已跳过。",
-          processed,
-          skipped,
-          status: "running",
-          total: visibleCategoryPromptGroups.length,
-        });
-        await waitForInteractionFrame();
-        continue;
-      }
-
+      const batch = groupsToAnalyze.slice(batchStart, batchStart + analysisBatchSize);
       setCategoryAnalysisProgress({
         analyzed,
-        currentTitle: item.title || "未命名提示词",
+        currentTitle: batch[0]?.primaryItem.title || "未命名提示词",
         failed,
-        message: "正在进行 AI 分类分析...",
+        message: `正在并行分析 ${batch.length} 个提示词组...`,
         processed,
         skipped,
         status: "running",
-        total: visibleCategoryPromptGroups.length,
+        total: groupsToAnalyze.length,
       });
-      await waitForInteractionFrame();
 
-      try {
-        const result = await onAnalyzePrompt({
-          target: "image-category",
-          title: "",
-          imageFileName: item.imageFileName,
-          prompt: "",
-          negativePrompt: "",
-          tags: [],
-          category: item.category,
-          knownCategories: photographyCategoryLabels,
-          runInBackground: true,
-        });
-
-        if (categoryAnalysisCancelRef.current) {
-          setCategoryAnalysisProgress({
-            analyzed,
-            currentTitle: "",
-            failed,
-            message: `已取消，处理 ${processed}/${visibleCategoryPromptGroups.length} 个提示词组。`,
-            processed,
-            skipped,
-            status: "canceled",
-            total: visibleCategoryPromptGroups.length,
+      const outcomes = await analyzePromptGroupBatch(
+        batch,
+        (group) =>
+          (!force && !shouldAnalyzePromptGroupCategory(group)) ||
+          (isVideoMediaFile(group.primaryItem.imageFileName) && !group.primaryItem.prompt.trim()),
+        () => categoryAnalysisCancelRef.current,
+        async (item) => {
+          const usePromptAnalysis = isVideoMediaFile(item.imageFileName);
+          const result = await onAnalyzePrompt({
+            target: usePromptAnalysis ? "prompt-category" : "image-category",
+            title: usePromptAnalysis ? item.title : "",
+            imageFileName: usePromptAnalysis ? undefined : item.imageFileName,
+            prompt: usePromptAnalysis ? item.prompt : "",
+            negativePrompt: "",
+            tags: [],
+            category: item.category,
+            knownCategories: photographyCategoryLabels,
+            runInBackground: true,
           });
-          return;
+          return buildPromptGroupCategoryPatch(
+            item,
+            result.analysis,
+            useLibraryStore.getState().categoryTaxonomy ?? categoryTaxonomy,
+          );
+        },
+      );
+
+      const patches = outcomes.flatMap((outcome) =>
+        outcome.patch ? [{ itemId: outcome.item.id, patch: outcome.patch }] : [],
+      );
+      const saved = await persistPromptGroupPatches(patches, onSaveItem, onSaveItemsBatch);
+      const batchSuccessCount = saved ? patches.length : 0;
+      analyzed += batchSuccessCount;
+      skipped += outcomes.filter((outcome) => outcome.skipped).length;
+      failed += outcomes.filter((outcome) => outcome.failed).length + (saved ? 0 : patches.length);
+      processed += outcomes.length;
+
+      for (const outcome of outcomes) {
+        if (outcome.canceled) {
+          continue;
         }
-
-        const patch = buildPromptGroupCategoryPatch(item, result.analysis);
-
-        if (patch) {
-          await onSaveItem(item.id, patch);
-          await waitForInteractionFrame();
-          analyzed += 1;
+        if (outcome.skipped) {
+          continue;
+        }
+        if (outcome.patch && saved) {
           consecutiveFailures = 0;
         } else {
-          failed += 1;
           consecutiveFailures += 1;
         }
-      } catch {
-        failed += 1;
-        consecutiveFailures += 1;
       }
 
-      processed += 1;
+      if (useLibraryStore.getState().aiAnalysisCircuitOpen) {
+        setCategoryAnalysisProgress({
+          analyzed,
+          currentTitle: "",
+          failed,
+          message: "AI 连续请求失败，已停止本轮批量分析。",
+          processed,
+          skipped,
+          status: "completed",
+          total: groupsToAnalyze.length,
+        });
+        return;
+      }
+
+      if (categoryAnalysisCancelRef.current || outcomes.some((outcome) => outcome.canceled)) {
+        setCategoryAnalysisProgress({
+          analyzed,
+          currentTitle: "",
+          failed,
+          message: `已取消，处理 ${processed}/${groupsToAnalyze.length} 个提示词组。`,
+          processed,
+          skipped,
+          status: "canceled",
+          total: groupsToAnalyze.length,
+        });
+        return;
+      }
 
       if (consecutiveFailures >= 3) {
         setCategoryAnalysisProgress({
@@ -4490,20 +3538,20 @@ function PromptLexiconWorkspace({
           processed,
           skipped,
           status: "completed",
-          total: visibleCategoryPromptGroups.length,
+          total: groupsToAnalyze.length,
         });
         return;
       }
 
       setCategoryAnalysisProgress({
         analyzed,
-        currentTitle: item.title || "未命名提示词",
+        currentTitle: batch.at(-1)?.primaryItem.title || "未命名提示词",
         failed,
-        message: "已完成当前提示词组。",
+        message: `已完成 ${processed}/${groupsToAnalyze.length} 个提示词组。`,
         processed,
         skipped,
         status: "running",
-        total: visibleCategoryPromptGroups.length,
+        total: groupsToAnalyze.length,
       });
       await waitForInteractionFrame();
     }
@@ -4513,15 +3561,20 @@ function PromptLexiconWorkspace({
       currentTitle: "",
       failed,
       message: `分析完成：更新 ${analyzed} 个，跳过 ${skipped} 个，失败 ${failed} 个。`,
-      processed: visibleCategoryPromptGroups.length,
+      processed: groupsToAnalyze.length,
       skipped,
       status: "completed",
-      total: visibleCategoryPromptGroups.length,
+      total: groupsToAnalyze.length,
     });
   }
 
-  async function handleAnalyzeVisibleTagPromptGroups() {
-    if (tagAnalysisProgress?.status === "running" || visibleTagPromptGroups.length === 0) {
+  async function handleAnalyzeVisibleTagPromptGroups(options: { force?: boolean } = {}) {
+    const force = options.force === true;
+    // AI 标签必须能够从零建立标签库，因此强制分析范围使用全部提示词组，
+    // 不能只取已经存在标签的分组。
+    const groupsToAnalyze = force ? categoryPromptGroups : visibleTagPromptGroups;
+
+    if (tagAnalysisProgress?.status === "running" || groupsToAnalyze.length === 0) {
       return;
     }
 
@@ -4530,11 +3583,11 @@ function PromptLexiconWorkspace({
       analyzed: 0,
       currentTitle: "",
       failed: 0,
-      message: `准备分析 ${visibleTagPromptGroups.length} 个提示词组。`,
+      message: `准备分析 ${groupsToAnalyze.length} 个提示词组。`,
       processed: 0,
       skipped: 0,
       status: "running",
-      total: visibleTagPromptGroups.length,
+      total: groupsToAnalyze.length,
     });
 
     let analyzed = 0;
@@ -4543,95 +3596,90 @@ function PromptLexiconWorkspace({
     let skipped = 0;
     let consecutiveFailures = 0;
 
-    for (const group of visibleTagPromptGroups) {
+    const analysisBatchSize = 2;
+    for (let batchStart = 0; batchStart < groupsToAnalyze.length; batchStart += analysisBatchSize) {
       if (tagAnalysisCancelRef.current) {
         setTagAnalysisProgress({
           analyzed,
           currentTitle: "",
           failed,
-          message: `已取消，处理 ${processed}/${visibleTagPromptGroups.length} 个提示词组。`,
+          message: `已取消，处理 ${processed}/${groupsToAnalyze.length} 个提示词组。`,
           processed,
           skipped,
           status: "canceled",
-          total: visibleTagPromptGroups.length,
+          total: groupsToAnalyze.length,
         });
         return;
       }
 
-      const item = group.primaryItem;
-
-      if (!shouldAnalyzePromptGroupTags(group)) {
-        skipped += 1;
-        processed += 1;
-        setTagAnalysisProgress({
-          analyzed,
-          currentTitle: item.title || "未命名提示词",
-          failed,
-          message: "已有足够标签，已跳过。",
-          processed,
-          skipped,
-          status: "running",
-          total: visibleTagPromptGroups.length,
-        });
-        await waitForInteractionFrame();
-        continue;
-      }
-
+      const batch = groupsToAnalyze.slice(batchStart, batchStart + analysisBatchSize);
       setTagAnalysisProgress({
         analyzed,
-        currentTitle: item.title || "未命名提示词",
+        currentTitle: batch[0]?.primaryItem.title || "未命名提示词",
         failed,
-        message: "正在进行 AI 标签分析...",
+        message: `正在并行分析 ${batch.length} 个提示词组...`,
         processed,
         skipped,
         status: "running",
-        total: visibleTagPromptGroups.length,
+        total: groupsToAnalyze.length,
       });
-      await waitForInteractionFrame();
 
-      try {
-        const result = await onAnalyzePrompt({
-          target: "image-tags",
-          title: "",
-          imageFileName: item.imageFileName,
-          prompt: "",
-          negativePrompt: "",
-          tags: [],
-          category: item.category,
-          runInBackground: true,
-        });
-
-        if (tagAnalysisCancelRef.current) {
-          setTagAnalysisProgress({
-            analyzed,
-            currentTitle: "",
-            failed,
-            message: `已取消，处理 ${processed}/${visibleTagPromptGroups.length} 个提示词组。`,
-            processed,
-            skipped,
-            status: "canceled",
-            total: visibleTagPromptGroups.length,
+      const outcomes = await analyzePromptGroupBatch(
+        batch,
+        (group) =>
+          (!force && !shouldAnalyzePromptGroupTags(group)) ||
+          (isVideoMediaFile(group.primaryItem.imageFileName) && !group.primaryItem.prompt.trim()),
+        () => tagAnalysisCancelRef.current,
+        async (item) => {
+          const usePromptAnalysis = isVideoMediaFile(item.imageFileName);
+          const result = await onAnalyzePrompt({
+            target: usePromptAnalysis ? "prompt-tags" : "image-tags",
+            title: usePromptAnalysis ? item.title : "",
+            imageFileName: usePromptAnalysis ? undefined : item.imageFileName,
+            prompt: usePromptAnalysis ? item.prompt : "",
+            negativePrompt: "",
+            tags: [],
+            category: item.category,
+            runInBackground: true,
           });
-          return;
+          return buildPromptGroupTagPatch(item, result.analysis);
+        },
+      );
+
+      const patches = outcomes.flatMap((outcome) =>
+        outcome.patch ? [{ itemId: outcome.item.id, patch: outcome.patch }] : [],
+      );
+      const saved = await persistPromptGroupPatches(patches, onSaveItem, onSaveItemsBatch);
+      const batchSuccessCount = saved ? patches.length : 0;
+      analyzed += batchSuccessCount;
+      skipped += outcomes.filter((outcome) => outcome.skipped).length;
+      failed += outcomes.filter((outcome) => outcome.failed).length + (saved ? 0 : patches.length);
+      processed += outcomes.length;
+
+      for (const outcome of outcomes) {
+        if (outcome.canceled || outcome.skipped) {
+          continue;
         }
-
-        const patch = buildPromptGroupTagPatch(item, result.analysis);
-
-        if (patch) {
-          await onSaveItem(item.id, patch);
-          await waitForInteractionFrame();
-          analyzed += 1;
+        if (outcome.patch && saved) {
           consecutiveFailures = 0;
         } else {
-          failed += 1;
           consecutiveFailures += 1;
         }
-      } catch {
-        failed += 1;
-        consecutiveFailures += 1;
       }
 
-      processed += 1;
+      if (tagAnalysisCancelRef.current || outcomes.some((outcome) => outcome.canceled)) {
+        setTagAnalysisProgress({
+          analyzed,
+          currentTitle: "",
+          failed,
+          message: `已取消，处理 ${processed}/${groupsToAnalyze.length} 个提示词组。`,
+          processed,
+          skipped,
+          status: "canceled",
+          total: groupsToAnalyze.length,
+        });
+        return;
+      }
 
       if (consecutiveFailures >= 3) {
         setTagAnalysisProgress({
@@ -4642,20 +3690,20 @@ function PromptLexiconWorkspace({
           processed,
           skipped,
           status: "completed",
-          total: visibleTagPromptGroups.length,
+          total: groupsToAnalyze.length,
         });
         return;
       }
 
       setTagAnalysisProgress({
         analyzed,
-        currentTitle: item.title || "未命名提示词",
+        currentTitle: batch.at(-1)?.primaryItem.title || "未命名提示词",
         failed,
-        message: "已完成当前提示词组。",
+        message: `已完成 ${processed}/${groupsToAnalyze.length} 个提示词组。`,
         processed,
         skipped,
         status: "running",
-        total: visibleTagPromptGroups.length,
+        total: groupsToAnalyze.length,
       });
       await waitForInteractionFrame();
     }
@@ -4665,10 +3713,10 @@ function PromptLexiconWorkspace({
       currentTitle: "",
       failed,
       message: `分析完成：更新 ${analyzed} 个，跳过 ${skipped} 个，失败 ${failed} 个。`,
-      processed: visibleTagPromptGroups.length,
+      processed: groupsToAnalyze.length,
       skipped,
       status: "completed",
-      total: visibleTagPromptGroups.length,
+      total: groupsToAnalyze.length,
     });
   }
 
@@ -4697,159 +3745,255 @@ function PromptLexiconWorkspace({
   }
 
   async function handleDeleteSelectedCategoryPromptGroups() {
-    const labelKeys = getSelectedCategoryLabelKeys(categoryMenuEntries, selectedCategoryMenuPath);
-
-    if (labelKeys === null || labelKeys.size === 0) {
+    const items = collectSelectedPromptGroupItems(categoryPromptGroups, selectedCategoryPromptGroups);
+    if (items.length === 0) {
       setSelectedCategoryPromptGroups(new Set());
+      showLexiconStatus({ type: "info", text: "请先勾选要移出的提示词组。" });
+      logRendererStartupEvent("lexicon:remove-category:empty-selection");
       return;
     }
 
-    const items = collectSelectedPromptGroupItems(categoryPromptGroups, selectedCategoryPromptGroups);
-
-    for (const item of items) {
-      const patch = buildRemoveLabelsPatch(item, labelKeys);
-
-      if (patch) {
-        await onSaveItem(item.id, patch);
+    // Prefer taxonomy-aware move (clears categoryId without deleting prompts / materials).
+    if (selectedCategoryMenuPath !== allCategoryGroupsValue) {
+      const ok = await onMovePromptGroupsToCategory(
+        items.map((item) => item.id),
+        null,
+      );
+      setSelectedCategoryPromptGroups(new Set());
+      if (ok) {
+        // movePromptGroupsToCategory already shows success toast.
+        logRendererStartupEvent("lexicon:remove-category:done", {
+          mode: "taxonomy-clear",
+          count: items.length,
+        });
       }
+      return;
     }
 
-    setSelectedCategoryPromptGroups(new Set());
+    // 「全部分类」无法指定要移出的分类：只提示，绝不删除素材。
+    showLexiconStatus({
+      type: "info",
+      text: "请先在左侧选择具体分类，再点「移出分类」。此操作不会删除素材。",
+    });
+    logRendererStartupEvent("lexicon:remove-category:need-menu", {
+      selectedCount: items.length,
+    });
+  }
+
+  async function handleCreateCustomCategory(options: {
+    asChild: boolean;
+    group?: string | null;
+    parentId?: string | null;
+  }) {
+    if (isBusy) {
+      return;
+    }
+
+    const parentEntry = options.asChild
+      ? options.parentId
+        ? categoryMenuEntries.find((entry) => entry.id === options.parentId) ?? null
+        : resolveSelectedCategoryParentEntry(selectedCategoryMenuPath, categoryMenuEntries)
+      : null;
+
+    if (options.asChild && !parentEntry) {
+      showLexiconStatus({
+        type: "info",
+        text: "请先在左侧选择一个父分类，再新增子分类。",
+      });
+      return;
+    }
+
+    const groupLabel =
+      (options.asChild && parentEntry
+        ? parentEntry.group
+        : options.group?.trim() || defaultCategoryGroupLabel) || defaultCategoryGroupLabel;
+
+    const draft = createBlankImageEntry(
+      "category",
+      options.asChild && parentEntry
+        ? {
+            group: groupLabel,
+            label: "新子分类",
+            parentId: parentEntry.id,
+          }
+        : {
+            group: groupLabel,
+            label: "新分类",
+            parentId: null,
+          },
+    );
+
+    updateCategoryDrafts((currentDrafts) => [draft, ...currentDrafts]);
+    const createdId = await onUpsertCustomCategory({
+      id: draft.id,
+      name: draft.label,
+      group: draft.group || defaultCategoryGroupLabel,
+      parentId: draft.parentId ?? null,
+    });
+
+    if (createdId) {
+      setSelectedCategoryMenuPath(createImageCategoryMenuValue(createdId));
+      showLexiconStatus({
+        type: "success",
+        text: options.asChild
+          ? `已在「${parentEntry?.label || "父分类"}」下新增子分类，可直接改名。`
+          : "已新增自定义分类，可直接改名。",
+      });
+      logRendererStartupEvent("lexicon:create-category", {
+        asChild: options.asChild,
+        parentId: draft.parentId,
+        categoryId: createdId,
+        group: draft.group,
+      });
+    }
+  }
+
+  function canCreateChildCustomCategory(
+    menuPath: string,
+    entries: readonly PromptImageLexiconEntry[],
+  ): boolean {
+    return Boolean(resolveSelectedCategoryParentEntry(menuPath, entries));
+  }
+
+  function resolveSelectedCategoryParentEntry(
+    menuPath: string,
+    entries: readonly PromptImageLexiconEntry[],
+  ): PromptImageLexiconEntry | null {
+    if (!menuPath.startsWith(imageCategoryMenuPrefix)) {
+      return null;
+    }
+    const entryId = menuPath.slice(imageCategoryMenuPrefix.length);
+    if (!entryId || entryId.startsWith("group:")) {
+      return null;
+    }
+    return entries.find((entry) => entry.id === entryId) ?? null;
   }
 
   async function handleDeleteSelectedTagPromptGroups() {
     const labelKeys = getSelectedTagLabelKeys(tagMenuEntries, selectedTagMenuPath);
+    const items = collectSelectedPromptGroupItems(tagPromptGroups, selectedTagPromptGroups);
 
-    if (labelKeys === null || labelKeys.size === 0) {
+    if (items.length === 0) {
       setSelectedTagPromptGroups(new Set());
+      showLexiconStatus({ type: "info", text: "请先勾选要移出的提示词组。" });
+      logRendererStartupEvent("lexicon:remove-tag:empty-selection");
       return;
     }
 
-    const items = collectSelectedPromptGroupItems(tagPromptGroups, selectedTagPromptGroups);
+    // 「全部标签」没有可移出的具体标签：原先静默 return，表现为「删除选中没反应」。
+    if (labelKeys === null || labelKeys.size === 0) {
+      showLexiconStatus({
+        type: "info",
+        text: "请先在左侧选择具体标签，再点「移出标签」。此操作只去掉标签，不会删除素材。",
+      });
+      logRendererStartupEvent("lexicon:remove-tag:need-menu", {
+        selectedCount: items.length,
+        menuPath: selectedTagMenuPath,
+      });
+      return;
+    }
 
+    let updatedCount = 0;
+    const patches: Array<{ itemId: string; patch: Partial<LibraryItem> }> = [];
     for (const item of items) {
       const patch = buildRemoveLabelsPatch(item, labelKeys);
-
       if (patch) {
-        await onSaveItem(item.id, patch);
+        patches.push({ itemId: item.id, patch });
+        updatedCount += 1;
+      }
+    }
+
+    if (patches.length > 0) {
+      if (onSaveItemsBatch) {
+        await onSaveItemsBatch(patches);
+      } else {
+        for (const entry of patches) {
+          await onSaveItem(entry.itemId, entry.patch);
+        }
       }
     }
 
     setSelectedTagPromptGroups(new Set());
+    if (updatedCount > 0) {
+      showLexiconStatus({
+        type: "success",
+        text: `已从 ${updatedCount} 个提示词组移出标签（素材未删除）。`,
+      });
+      logRendererStartupEvent("lexicon:remove-tag:done", {
+        count: updatedCount,
+        menuPath: selectedTagMenuPath,
+      });
+    } else {
+      showLexiconStatus({
+        type: "info",
+        text: "选中的提示词组不包含当前标签，无需移出。",
+      });
+      logRendererStartupEvent("lexicon:remove-tag:noop", {
+        selectedCount: items.length,
+        menuPath: selectedTagMenuPath,
+      });
+    }
+  }
+
+  async function handleDeleteSelectedTag(): Promise<boolean> {
+    const labelKeys = getSelectedTagLabelKeys(tagMenuEntries, selectedTagMenuPath);
+    if (!labelKeys || labelKeys.size === 0) {
+      showLexiconStatus({ type: "info", text: "请先在左侧选择具体标签，再删除标签。" });
+      return false;
+    }
+
+    const patches: Array<{ itemId: string; patch: Partial<LibraryItem> }> = [];
+    const seenItemIds = new Set<string>();
+    for (const group of tagPromptGroups) {
+      for (const item of group.items) {
+        if (seenItemIds.has(item.id)) {
+          continue;
+        }
+        seenItemIds.add(item.id);
+        const patch = buildRemoveLabelsPatch(item, labelKeys);
+        if (patch) {
+          patches.push({ itemId: item.id, patch });
+        }
+      }
+    }
+
+    if (patches.length > 0) {
+      if (onSaveItemsBatch) {
+        const saved = await onSaveItemsBatch(patches);
+        if (!saved) {
+          return false;
+        }
+      } else {
+        for (const entry of patches) {
+          await onSaveItem(entry.itemId, entry.patch);
+        }
+      }
+    }
+
+    updateTagImageDrafts((currentDrafts) =>
+      currentDrafts.filter((entry) => !labelKeys.has(normalizeLexiconItemKey(entry.label))),
+    );
+    setSelectedTagMenuPath(allTagGroupsValue);
+    setSelectedTagPromptGroups(new Set());
+    showLexiconStatus({
+      type: "success",
+      text: `已删除标签「${getTagPromptMenuDisplayLabel(selectedTagMenuPath, tagMenuEntries)}」，素材未删除。`,
+    });
+    return true;
+  }
+
+  function showLexiconStatus(message: { type: "info" | "success" | "error"; text: string }) {
+    useLibraryStore.getState().showStatusMessage(message);
   }
 
   const syncStatusBadge = (
     <span className="rounded-md border border-capsule-fog-border bg-capsule-fog px-2 py-1 text-xs text-capsule-fog-foreground">
-      {isDirty ? (parameterMenuValidation.isValid ? "正在自动同步" : "校验后自动同步") : "当前已同步"}
+      {isDirty ? "正在自动同步" : "当前已同步"}
     </span>
   );
 
   return (
     <section className="grid gap-4">
-      {kind === "parameters" ? (
-        <LexiconSection
-          bodyClassName="min-h-0 overflow-visible"
-          count={countDisplayableParameterEntries(parameterDrafts)}
-          description={meta.description}
-          eyebrow={meta.eyebrow}
-          statusBadge={syncStatusBadge}
-          icon={meta.icon}
-          isBusy={isBusy}
-          hideScrollTopButton={hideScrollTopButton}
-          layout="page"
-          query={parameterQuery}
-          searchPlaceholder={meta.searchPlaceholder}
-          selectedCount={countSelectedEntries(selectedParameters, parameterDrafts.filter(isDisplayableParameterEntry))}
-          toolbarLeadingAction={
-            <Button
-              icon={<RefreshCw size={15} />}
-              disabled={isBusy}
-              onClick={handleMigrateParameterMenus}
-            >
-              整理分组
-            </Button>
-          }
-          title={meta.title}
-          onAdd={() =>
-            updateParameterDrafts((currentDrafts) => [
-              createBlankParameterEntry(
-                getParameterSourceDraft(parameterSourceOptions, selectedParameterSource),
-                getParameterGroupDraft(selectedParameterGroupPath),
-                getParameterItemDraft(selectedParameterGroupPath, currentDrafts),
-              ),
-              ...currentDrafts,
-            ])
-          }
-          onDeleteSelected={() => {
-            updateParameterDrafts((currentDrafts) => currentDrafts.filter((entry) => !selectedParameters.has(entry.id)));
-            setSelectedParameters(new Set());
-          }}
-          onExport={() => void onExportLexicon("parameters", parameterDrafts)}
-          onImport={() => void handleImportParameters()}
-          onQueryChange={setParameterQuery}
-        >
-          <ParameterMenuValidationNotice validation={parameterMenuValidation} />
-          <ParameterLexiconExplorer
-            entries={sourceFilteredParameters}
-            filteredEntries={filteredParameters}
-            isBusy={isBusy}
-            layout="page"
-            selectedEntries={selectedParameters}
-            selectedGroupPath={selectedParameterGroupPath}
-            onAddEntry={(group, draft, value) =>
-              updateParameterDrafts((currentDrafts) => [
-                createBlankParameterEntry(
-                  getParameterSourceDraft(parameterSourceOptions, selectedParameterSource),
-                  group,
-                  draft,
-                  value,
-                ),
-                ...currentDrafts,
-              ])
-            }
-            onChangeEntry={(entryId, patch) =>
-              updateParameterDrafts((currentDrafts) =>
-                currentDrafts.map((draft) => (draft.id === entryId ? { ...draft, ...patch } : draft)),
-              )
-            }
-            onChangeSection={(entryIds, patch) =>
-              updateParameterDrafts((currentDrafts) => {
-                const entryIdSet = new Set(entryIds);
-
-                return currentDrafts.map((draft) =>
-                  entryIdSet.has(draft.id) ? { ...draft, ...patch } : draft,
-                );
-              })
-            }
-            onRemoveEntry={(entryId) =>
-              updateParameterDrafts((currentDrafts) => currentDrafts.filter((draft) => draft.id !== entryId))
-            }
-            onRenameGroup={(oldPath, newLabel) =>
-              updateParameterDrafts((currentDrafts) => renameParameterGroupInDrafts(currentDrafts, oldPath, newLabel))
-            }
-            onSelectEntry={(entryId) => setSelectedParameters((current) => toggleEntrySelection(current, entryId))}
-            onSelectGroup={setSelectedParameterGroupPath}
-            onSelectAll={() => setSelectedParameters(new Set(filteredParameters.map((entry) => entry.id)))}
-            onSelectInvert={() =>
-              setSelectedParameters((current) => {
-                const next = new Set<string>();
-                for (const entry of filteredParameters) {
-                  if (!current.has(entry.id)) {
-                    next.add(entry.id);
-                  }
-                }
-                return next;
-              })
-            }
-            onSelectNone={() => setSelectedParameters(new Set())}
-            onRemoveSelected={() => {
-              updateParameterDrafts((current) => current.filter((entry) => !selectedParameters.has(entry.id)));
-              setSelectedParameters(new Set());
-            }}
-          />
-        </LexiconSection>
-      ) : null}
-
       {kind === "categories" ? (
         <LexiconSection
           bodyClassName="min-h-0 overflow-visible"
@@ -4879,12 +4023,21 @@ function PromptLexiconWorkspace({
             </Button>
           }
           title={meta.title}
-          onAdd={() =>
-            updateCategoryDrafts((currentDrafts) => [
-              createBlankImageEntry("category", getImageEntryDraft("category", selectedCategoryMenuPath, currentDrafts)),
-              ...currentDrafts,
-            ])
+          onAdd={() => {
+            void handleCreateCustomCategory({ asChild: false });
+          }}
+          toolbarExtra={
+            <Button
+              icon={<RefreshCw size={16} />}
+              disabled={isBusy || categoryAnalysisProgress?.status === "running" || categoryPromptGroups.length === 0}
+              title="清空全部分类（不会自动分析；需要时再点「AI分类」）"
+              onClick={() => void handleResetAndReanalyzeCategories()}
+            >
+              清空分类
+            </Button>
           }
+          deleteSelectedLabel="移出分类"
+          showToolbarDelete={false}
           onDeleteSelected={() => void handleDeleteSelectedCategoryPromptGroups()}
           onExport={() => void onExportLexicon("categories", categoryDrafts)}
           onImport={() => void handleImportCategories()}
@@ -4893,8 +4046,10 @@ function PromptLexiconWorkspace({
           <CategoryPromptGroupExplorer
             blurNsfwImages={blurNsfwImages}
             categoryLabelsCache={categoryLabelsCache}
+            categoryTaxonomy={categoryTaxonomy}
             entries={categoryMenuEntries}
             analysisProgress={categoryAnalysisProgress}
+            isBusy={isBusy}
             likedImageIds={likedImageIds}
             layout="page"
             promptGroups={categoryPromptGroups}
@@ -4908,6 +4063,8 @@ function PromptLexiconWorkspace({
                 currentDrafts.map((draft) => (draft.id === entryId ? { ...draft, ...patch } : draft)),
               )
             }
+            onDeleteCustomCategory={onDeleteCustomCategory}
+            onMovePromptGroupsToCategory={onMovePromptGroupsToCategory}
             onOpenDetail={onOpenDetail}
             onRemoveSelectedPromptGroups={() => void handleDeleteSelectedCategoryPromptGroups()}
             onSelectAllPromptGroups={(groupIds) => setSelectedCategoryPromptGroups(new Set(groupIds))}
@@ -4919,6 +4076,21 @@ function PromptLexiconWorkspace({
             onTogglePromptGroupSelection={(groupId) =>
               setSelectedCategoryPromptGroups((current) => toggleEntrySelection(current, groupId))
             }
+            onUpsertCustomCategory={onUpsertCustomCategory}
+            onAddCustomCategory={(options) => {
+              if (options?.parentCategoryId) {
+                void handleCreateCustomCategory({
+                  asChild: true,
+                  group: options.groupLabel ?? defaultCategoryGroupLabel,
+                  parentId: options.parentCategoryId,
+                });
+                return;
+              }
+              void handleCreateCustomCategory({
+                asChild: false,
+                group: options?.groupLabel ?? defaultCategoryGroupLabel,
+              });
+            }}
           />
         </LexiconSection>
       ) : null}
@@ -4943,12 +4115,21 @@ function PromptLexiconWorkspace({
               disabled={
                 isBusy ||
                 tagAnalysisProgress?.status === "running" ||
-                visibleTagPromptGroups.length === 0 ||
-                analyzableTagPromptGroupCount === 0
+                tagAnalysisPromptGroupCount === 0
               }
-              onClick={() => void handleAnalyzeVisibleTagPromptGroups()}
+              onClick={() => void handleAnalyzeVisibleTagPromptGroups({ force: true })}
             >
               {tagAnalysisProgress?.status === "running" ? "分析中" : "AI标签"}
+            </Button>
+          }
+          toolbarExtra={
+            <Button
+              icon={<RefreshCw size={16} />}
+              disabled={isBusy || tagAnalysisProgress?.status === "running" || tagPromptGroups.length === 0}
+              title="清空全部标签（不会自动分析；需要时再点「AI标签」）"
+              onClick={() => void handleResetAndReanalyzeTags()}
+            >
+              清空标签
             </Button>
           }
           title={meta.title}
@@ -4958,6 +4139,8 @@ function PromptLexiconWorkspace({
               ...currentDrafts,
             ])
           }
+          deleteSelectedLabel="移出标签"
+          showToolbarDelete={false}
           onDeleteSelected={() => void handleDeleteSelectedTagPromptGroups()}
           onExport={() => void onExportLexicon("tags", tagImageDrafts)}
           onImport={() => void handleImportTagImages()}
@@ -4979,6 +4162,7 @@ function PromptLexiconWorkspace({
             onCancelAnalysis={handleCancelTagAnalysis}
             onOpenDetail={onOpenDetail}
             onRemoveSelectedPromptGroups={() => void handleDeleteSelectedTagPromptGroups()}
+            onDeleteSelectedTag={handleDeleteSelectedTag}
             onRenameGroup={(oldPath, newLabel) =>
               updateTagImageDrafts((currentDrafts) => renameImageGroupInDrafts(currentDrafts, oldPath, newLabel))
             }
@@ -4999,7 +4183,7 @@ function PromptLexiconWorkspace({
       ) : null}
     </section>
   );
-}
+});
 
 type PromptLexiconWorkspaceMeta = {
   description: string;
@@ -5011,20 +4195,9 @@ type PromptLexiconWorkspaceMeta = {
 };
 
 function getPromptLexiconWorkspaceMeta(kind: PromptLexiconKind): PromptLexiconWorkspaceMeta {
-  if (kind === "parameters") {
-    return {
-      description: "管理 AI 提取的参数、变量、值和来源。",
-      emptyText: "没有匹配的参数记录",
-      eyebrow: "参数词库",
-      icon: <SlidersHorizontal size={18} />,
-      searchPlaceholder: "搜索参数名称、变量或分组",
-      title: "AI 分析参数词库",
-    };
-  }
-
   if (kind === "categories") {
     return {
-      description: "按分类层级管理已保存提示词组。",
+      description: "按分类层级管理已保存提示词组。勾选后点「移出分类」只会移出分类，不会删除素材。",
       emptyText: "当前分类下没有匹配的提示词组",
       eyebrow: "分类词库",
       icon: <FolderTree size={18} />,
@@ -5034,7 +4207,8 @@ function getPromptLexiconWorkspaceMeta(kind: PromptLexiconKind): PromptLexiconWo
   }
 
   return {
-    description: "按标签管理已保存提示词组。",
+    description:
+      "按细粒度标签管理提示词组（材质/光影/构图/情绪等）。标签与分类互不重叠；「移出标签」只去掉标签，不删除素材。",
     emptyText: "当前标签下没有匹配的提示词组",
     eyebrow: "标签词库",
     icon: <Tags size={18} />,
@@ -5065,6 +4239,11 @@ type LexiconSectionProps = {
   onAdd: () => void;
   onClearSelectedImages?: () => void;
   onDeleteSelected: () => void;
+  /** Top toolbar action label — never imply permanent material delete for tag/category workspaces. */
+  deleteSelectedLabel?: string;
+  deleteSelectedDisabled?: boolean;
+  /** When false, hide the top-bar delete/remove button (batch toolbar already has it). Default true. */
+  showToolbarDelete?: boolean;
   onExport: () => void;
   onImport: () => void;
   onQueryChange: (query: string) => void;
@@ -5090,6 +4269,9 @@ function LexiconSection({
   onAdd,
   onClearSelectedImages,
   onDeleteSelected,
+  deleteSelectedLabel = "删除选中",
+  deleteSelectedDisabled = false,
+  showToolbarDelete = true,
   onExport,
   onImport,
   onQueryChange,
@@ -5097,8 +4279,8 @@ function LexiconSection({
   const sectionRef = useRef<HTMLElement | null>(null);
   const isPageLayout = layout === "page";
   const sectionClassName = isPageLayout
-    ? "relative flex min-h-[520px] flex-col overflow-visible rounded-2xl border border-border/70 bg-panel shadow-elevated"
-    : "relative flex min-h-[520px] max-h-[calc(100vh-14rem)] flex-col overflow-hidden rounded-2xl border border-border/70 bg-panel shadow-elevated";
+    ? "relative flex min-h-0 min-[720px]:min-h-[420px] flex-col overflow-visible rounded-2xl border border-border/70 bg-panel shadow-elevated"
+    : "relative flex min-h-0 min-[720px]:min-h-[420px] max-h-[calc(100dvh-10rem)] flex-col overflow-hidden rounded-2xl border border-border/70 bg-panel shadow-elevated";
   const bodyLayoutClassName = isPageLayout ? "min-h-0 pb-16" : "flex-1";
 
   function handleScrollToTop() {
@@ -5107,8 +4289,9 @@ function LexiconSection({
 
   return (
     <section className={sectionClassName} ref={sectionRef}>
-      <div className="grid gap-3 border-b border-border/70 bg-background/70 px-4 py-3">
-        <div className="flex flex-col gap-3 min-[960px]:flex-row min-[960px]:items-start min-[960px]:justify-between">
+      <div className="border-b border-border/70 bg-background/70 px-4 py-3">
+        {/* Row 1: title (left) + action buttons (right) */}
+        <div className="flex flex-col gap-3 min-[1100px]:flex-row min-[1100px]:items-start min-[1100px]:justify-between">
           <div className="flex min-w-0 items-start gap-3">
             <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground">
               {icon}
@@ -5117,7 +4300,9 @@ function LexiconSection({
               {eyebrow ? <p className="text-xs font-medium text-muted">{eyebrow}</p> : null}
               <div className="mt-0.5 flex flex-wrap items-center gap-2">
                 <h3 className="whitespace-nowrap text-base font-semibold text-foreground">{title}</h3>
-                <span className="shrink-0 rounded-lg border border-capsule-mist-border bg-capsule-mist px-2 py-1 text-xs text-capsule-mist-foreground">{count} 条</span>
+                <span className="shrink-0 rounded-lg border border-capsule-mist-border bg-capsule-mist px-2 py-1 text-xs text-capsule-mist-foreground">
+                  {count} 条
+                </span>
                 {selectedCount > 0 ? (
                   <span className="shrink-0 rounded-lg border border-capsule-lavender-border bg-capsule-lavender px-2 py-1 text-xs text-capsule-lavender-foreground">
                     已选 {selectedCount}
@@ -5125,23 +4310,19 @@ function LexiconSection({
                 ) : null}
                 {statusBadge}
               </div>
-              <p className="mt-1 text-xs text-muted">{description}</p>
+              <p className="mt-1 max-w-3xl text-xs leading-relaxed text-muted">{description}</p>
             </div>
           </div>
 
-          <div className="flex flex-col gap-2 min-[640px]:flex-row min-[640px]:items-center min-[960px]:shrink-0 min-[960px]:justify-end">
-            <label className="flex min-h-10 w-full items-center gap-2 rounded-xl border border-border/70 bg-panel px-3 text-sm text-muted transition-colors focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/20 min-[640px]:w-[16rem]">
-              <Search size={15} />
-              <input
-                aria-label={`${title}搜索`}
-                className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted"
-                placeholder={searchPlaceholder}
-                value={query}
-                onChange={(event) => onQueryChange(event.target.value)}
-              />
-            </label>
-            <div className="flex flex-wrap items-center gap-2">
-              {toolbarLeadingAction}
+          <div className="flex w-full flex-wrap items-center justify-end gap-1.5 min-[1100px]:w-auto min-[1100px]:max-w-[58%]">
+            {(toolbarLeadingAction || toolbarExtra) && (
+              <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-border/60 bg-panel/90 p-1 shadow-sm">
+                {toolbarLeadingAction}
+                {toolbarExtra}
+              </div>
+            )}
+
+            <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-border/60 bg-panel/90 p-1 shadow-sm">
               <Button icon={<Plus size={16} />} disabled={isBusy} onClick={onAdd}>
                 新增
               </Button>
@@ -5160,19 +4341,46 @@ function LexiconSection({
                   清除选中图像
                 </Button>
               ) : null}
-              <Button
-                icon={<Trash2 size={16} />}
-                variant="danger"
-                disabled={isBusy || selectedCount === 0}
-                onClick={onDeleteSelected}
-              >
-                删除选中
-              </Button>
             </div>
+
+            {showToolbarDelete ? (
+              <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-border/60 bg-panel/90 p-1 shadow-sm">
+                <Button
+                  icon={<Trash2 size={16} />}
+                  variant="danger"
+                  disabled={isBusy || selectedCount === 0 || deleteSelectedDisabled}
+                  onClick={onDeleteSelected}
+                >
+                  {deleteSelectedLabel}
+                </Button>
+              </div>
+            ) : null}
           </div>
         </div>
 
-        {toolbarExtra ? <div className="flex flex-wrap items-center gap-2">{toolbarExtra}</div> : null}
+        {/* Row 2: full-width search under actions — keeps header uncluttered */}
+        <div className="mt-3 border-t border-border/50 pt-3">
+          <label className="flex min-h-10 w-full items-center gap-2.5 rounded-xl border border-border/70 bg-panel px-3.5 text-sm text-muted shadow-sm transition-colors focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/20">
+            <Search className="shrink-0 opacity-70" size={15} />
+            <input
+              aria-label={`${title}搜索`}
+              className="min-w-0 flex-1 bg-transparent py-2 text-sm text-foreground outline-none placeholder:text-muted"
+              placeholder={searchPlaceholder}
+              value={query}
+              onChange={(event) => onQueryChange(event.target.value)}
+            />
+            {query.trim() ? (
+              <button
+                aria-label="清除搜索"
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-background hover:text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+                type="button"
+                onClick={() => onQueryChange("")}
+              >
+                <span className="text-base leading-none">×</span>
+              </button>
+            ) : null}
+          </label>
+        </div>
       </div>
 
       <div className={`${bodyLayoutClassName} ${bodyClassName}`}>{children}</div>
@@ -5187,46 +4395,6 @@ function LexiconSection({
   );
 }
 
-function ParameterMenuValidationNotice({
-  validation,
-}: {
-  validation: PromptParameterMenuValidationResult;
-}) {
-  if (validation.isValid) {
-    return null;
-  }
-
-  const visibleIssues = validation.issues.slice(0, 3);
-  const hiddenIssueCount = Math.max(0, validation.issues.length - visibleIssues.length);
-
-  return (
-    <div className="border-b border-danger/30 bg-danger-soft px-4 py-3 text-danger">
-      <div className="flex items-start gap-2">
-        <Info className="mt-0.5 shrink-0" size={16} />
-        <div className="min-w-0">
-          <p className="text-sm font-semibold">参数菜单校验未通过</p>
-          <div className="mt-1 grid gap-1 text-xs leading-5">
-            {visibleIssues.map((issue) => (
-              <p className="min-w-0 truncate" key={`${issue.code}-${issue.path}-${issue.name}`}>
-                {issue.message}
-              </p>
-            ))}
-            {hiddenIssueCount > 0 ? <p>另有 {hiddenIssueCount} 个问题，请先处理。</p> : null}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-type ParameterLexiconRowProps = {
-  entry: PromptParameterLexiconEntry;
-  isBusy: boolean;
-  selected: boolean;
-  onChange: (patch: Partial<PromptParameterLexiconEntry>) => void;
-  onRemove: () => void;
-  onSelectedChange: () => void;
-};
 
 type LexiconBatchToolbarProps = {
   totalCount: number;
@@ -5296,14 +4464,14 @@ function LexiconBatchToolbar({
 
 function getLexiconExplorerRootClassName(layout: LexiconLayout): string {
   return layout === "page"
-    ? "grid min-h-[560px] min-[1080px]:grid-cols-[280px_minmax(0,1fr)]"
-    : "grid h-full min-h-0 min-[1080px]:grid-cols-[280px_minmax(0,1fr)]";
+    ? "grid min-h-0 min-[900px]:min-h-[480px] min-[960px]:grid-cols-[minmax(200px,240px)_minmax(0,1fr)] min-[1200px]:grid-cols-[280px_minmax(0,1fr)]"
+    : "grid h-full min-h-0 min-[960px]:grid-cols-[minmax(200px,240px)_minmax(0,1fr)] min-[1200px]:grid-cols-[280px_minmax(0,1fr)]";
 }
 
 function getLexiconExplorerAsideClassName(layout: LexiconLayout): string {
   return layout === "page"
-    ? "flex max-h-[420px] min-h-[280px] flex-col border-b border-border/70 bg-background/60 p-3 min-[1080px]:sticky min-[1080px]:top-4 min-[1080px]:max-h-[calc(100vh-9rem)] min-[1080px]:self-start min-[1080px]:border-b-0 min-[1080px]:border-r"
-    : "flex min-h-0 flex-col border-b border-border/70 bg-background/60 p-3 min-[1080px]:border-b-0 min-[1080px]:border-r";
+    ? "flex max-h-[min(42vh,360px)] min-h-[200px] flex-col border-b border-border/70 bg-background/60 p-3 min-[960px]:sticky min-[960px]:top-4 min-[960px]:max-h-[calc(100dvh-9rem)] min-[960px]:self-start min-[960px]:border-b-0 min-[960px]:border-r"
+    : "flex min-h-0 max-h-[min(42vh,360px)] flex-col border-b border-border/70 bg-background/60 p-3 min-[960px]:max-h-none min-[960px]:border-b-0 min-[960px]:border-r";
 }
 
 function getLexiconExplorerColumnClassName(layout: LexiconLayout): string {
@@ -5317,296 +4485,24 @@ function getLexiconExplorerContentClassName(layout: LexiconLayout, extraClassNam
   return extraClassName ? `${baseClassName} ${extraClassName}` : baseClassName;
 }
 
-type ParameterLexiconExplorerProps = {
-  entries: PromptParameterLexiconEntry[];
-  filteredEntries: PromptParameterLexiconEntry[];
-  isBusy: boolean;
-  layout?: LexiconLayout;
-  selectedEntries: ReadonlySet<string>;
-  selectedGroupPath: string;
-  onAddEntry: (
-    group: string,
-    draft: Partial<Pick<PromptParameterLexiconEntry, "label" | "variable">>,
-    value?: string,
-  ) => void;
-  onChangeEntry: (entryId: string, patch: Partial<PromptParameterLexiconEntry>) => void;
-  onChangeSection: (
-    entryIds: readonly string[],
-    patch: Partial<Pick<PromptParameterLexiconEntry, "group" | "label" | "variable">>,
-  ) => void;
-  onRemoveEntry: (entryId: string) => void;
-  onRenameGroup: (oldPath: string, newLabel: string) => void;
-  onSelectEntry: (entryId: string) => void;
-  onSelectGroup: (groupPath: string) => void;
-  onSelectAll: () => void;
-  onSelectInvert: () => void;
-  onSelectNone: () => void;
-  onRemoveSelected: () => void;
-};
-
-function ParameterLexiconExplorer({
-  entries,
-  filteredEntries,
-  isBusy,
-  layout = "bounded",
-  selectedEntries,
-  selectedGroupPath,
-  onAddEntry,
-  onChangeEntry,
-  onChangeSection,
-  onRemoveEntry,
-  onRenameGroup,
-  onSelectEntry,
-  onSelectGroup,
-  onSelectAll,
-  onSelectInvert,
-  onSelectNone,
-  onRemoveSelected,
-}: ParameterLexiconExplorerProps) {
-  const visibleEntries = useMemo(() => entries.filter(isDisplayableParameterEntry), [entries]);
-  const visibleFilteredEntries = useMemo(() => filteredEntries.filter(isDisplayableParameterEntry), [filteredEntries]);
-  const visibleSelectedCount = useMemo(
-    () => visibleFilteredEntries.reduce((total, entry) => total + (selectedEntries.has(entry.id) ? 1 : 0), 0),
-    [visibleFilteredEntries, selectedEntries],
-  );
-  const groupTree = useMemo(() => buildParameterGroupTree(visibleEntries), [visibleEntries]);
-  const [expandedGroupPaths, setExpandedGroupPaths] = useState<Set<string>>(() => new Set());
-  const activeGroupLabel = getParameterGroupDisplayLabel(selectedGroupPath, visibleEntries.length > 0 ? visibleEntries : entries);
-  const isParameterItemSelected = selectedGroupPath.startsWith(parameterItemMenuPrefix);
-  const parameterCapsuleSections = useMemo(
-    () => buildParameterCapsuleSections(visibleFilteredEntries),
-    [visibleFilteredEntries],
-  );
-  const menuScrollRef = useRef<HTMLDivElement | null>(null);
-  const contentScrollRef = useRef<HTMLDivElement | null>(null);
-  const rootClassName = getLexiconExplorerRootClassName(layout);
-  const asideClassName = getLexiconExplorerAsideClassName(layout);
-  const columnClassName = getLexiconExplorerColumnClassName(layout);
-  const contentClassName = getLexiconExplorerContentClassName(layout);
-
-  useEffect(() => {
-    const activeMenuItem = menuScrollRef.current?.querySelector('[data-lexicon-menu-active="true"]');
-    activeMenuItem?.scrollIntoView({ block: "center" });
-  }, [expandedGroupPaths, selectedGroupPath]);
-
-  useEffect(() => {
-    contentScrollRef.current?.scrollTo({ top: 0 });
-  }, [selectedGroupPath]);
-
-  function handleSelectAllGroups() {
-    setExpandedGroupPaths(new Set());
-    onSelectGroup(allParameterGroupsValue);
-  }
-
-  function handleToggleGroup(groupPath: string) {
-    setExpandedGroupPaths((current) => {
-      const next = new Set(current);
-
-      if (next.has(groupPath)) {
-        next.delete(groupPath);
-      } else {
-        next.add(groupPath);
-      }
-
-      return next;
-    });
-    onSelectGroup(groupPath);
-  }
-
-  return (
-    <div className={rootClassName}>
-      <aside className={asideClassName}>
-        <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
-          <div>
-            <p className="text-sm font-semibold text-foreground">参数菜单</p>
-            <p className="mt-1 text-xs text-muted">按大类到小类逐级管理</p>
-          </div>
-          <span className="rounded-md border border-capsule-mist-border bg-capsule-mist px-2 py-1 text-xs text-capsule-mist-foreground">
-            {visibleEntries.length}
-          </span>
-        </div>
-        <div ref={menuScrollRef} className="grid min-h-0 gap-1 overflow-y-auto overscroll-contain pb-8 pr-1">
-          <ParameterGroupButton
-            active={selectedGroupPath === allParameterGroupsValue}
-            count={visibleEntries.length}
-            depth={0}
-            label="全部参数"
-            onClick={handleSelectAllGroups}
-          />
-          {groupTree.length > 0 ? (
-            groupTree.map((node) => (
-              <ParameterGroupNodeButton
-                expandedGroupPaths={expandedGroupPaths}
-                key={node.path}
-                node={node}
-                selectedGroupPath={selectedGroupPath}
-                onSelectGroup={onSelectGroup}
-                onToggleGroup={handleToggleGroup}
-                onRenameGroup={onRenameGroup}
-              />
-            ))
-          ) : (
-            <div className="rounded-md border border-border/70 bg-panel px-3 py-6 text-center text-xs text-muted">
-              暂无参数菜单
-            </div>
-          )}
-        </div>
-      </aside>
-
-      <div className={columnClassName}>
-        <div className="shrink-0 border-b border-border/70 bg-panel px-3 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-foreground">{activeGroupLabel}</p>
-            <p className="mt-1 text-xs text-muted">
-              {isParameterItemSelected
-                ? `显示 ${visibleFilteredEntries.length} 条具体参数`
-                : `${parameterCapsuleSections.length} 个集合，${visibleFilteredEntries.length} 条具体参数`}
-            </p>
-          </div>
-          {selectedGroupPath !== allParameterGroupsValue ? (
-            <button
-              className="inline-flex min-h-8 items-center gap-2 rounded-md border border-border/70 bg-background px-3 text-xs font-medium text-muted transition-colors hover:bg-primary-soft hover:text-foreground"
-              type="button"
-              onClick={handleSelectAllGroups}
-            >
-              查看全部
-            </button>
-          ) : null}
-          </div>
-        </div>
-
-        <LexiconBatchToolbar
-          totalCount={visibleFilteredEntries.length}
-          selectedCount={visibleSelectedCount}
-          onSelectAll={onSelectAll}
-          onSelectInvert={onSelectInvert}
-          onSelectNone={onSelectNone}
-          onRemoveSelected={onRemoveSelected}
-        />
-
-        <div ref={contentScrollRef} className={contentClassName}>
-          {visibleFilteredEntries.length > 0 ? (
-            <ParameterCapsuleSectionGrid
-              isBusy={isBusy}
-              sections={parameterCapsuleSections}
-              selectedEntries={selectedEntries}
-              onAddEntry={onAddEntry}
-              onChangeEntry={onChangeEntry}
-              onChangeSection={onChangeSection}
-              onRemoveEntry={onRemoveEntry}
-              onSelectEntry={onSelectEntry}
-            />
-          ) : (
-            <LexiconEmptyState text="当前菜单下没有匹配的参数记录" />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-type ParameterGroupNode = {
-  children: ParameterGroupNode[];
-  count: number;
-  items: ParameterItemNode[];
-  label: string;
-  path: string;
-};
-
-type ParameterItemNode = {
-  count: number;
-  key: string;
-  label: string;
-  menuPath: string;
-  variable: string;
-};
-
-type ParameterGroupNodeButtonProps = {
-  expandedGroupPaths: ReadonlySet<string>;
-  node: ParameterGroupNode;
-  selectedGroupPath: string;
-  onSelectGroup: (groupPath: string) => void;
-  onToggleGroup: (groupPath: string) => void;
-  onRenameGroup: (oldPath: string, newLabel: string) => void;
-};
-
-function ParameterGroupNodeButton({
-  expandedGroupPaths,
-  node,
-  selectedGroupPath,
-  onSelectGroup,
-  onToggleGroup,
-  onRenameGroup,
-}: ParameterGroupNodeButtonProps) {
-  const depth = Math.max(0, splitParameterGroupPath(node.path).length - 1);
-  const expandable = node.children.length > 0 || node.items.length > 0;
-  const expanded = expandedGroupPaths.has(node.path);
-
-  return (
-    <>
-      <ParameterGroupButton
-        active={selectedGroupPath === node.path}
-        count={node.count}
-        depth={depth}
-        expandable={expandable}
-        expanded={expanded}
-        label={node.label}
-        onClick={() => (expandable ? onToggleGroup(node.path) : onSelectGroup(node.path))}
-        onRename={(newLabel) => onRenameGroup(node.path, newLabel)}
-      />
-      {expanded
-        ? node.children.map((child) => (
-            <ParameterGroupNodeButton
-              expandedGroupPaths={expandedGroupPaths}
-              key={child.path}
-              node={child}
-              selectedGroupPath={selectedGroupPath}
-              onSelectGroup={onSelectGroup}
-              onToggleGroup={onToggleGroup}
-              onRenameGroup={onRenameGroup}
-            />
-          ))
-        : null}
-      {expanded
-        ? node.items.map((item) => (
-            <ParameterItemNodeButton
-              item={item}
-              key={item.menuPath}
-              parentDepth={depth}
-              selectedGroupPath={selectedGroupPath}
-              onSelectGroup={onSelectGroup}
-            />
-          ))
-        : null}
-    </>
-  );
-}
-
-type ParameterItemNodeButtonProps = {
-  item: ParameterItemNode;
-  parentDepth: number;
-  selectedGroupPath: string;
-  onSelectGroup: (groupPath: string) => void;
-};
-
-function ParameterItemNodeButton({ item, parentDepth, selectedGroupPath, onSelectGroup }: ParameterItemNodeButtonProps) {
-  return (
-    <ParameterGroupButton
-      active={selectedGroupPath === item.menuPath}
-      count={item.count}
-      depth={parentDepth + 1}
-      label={item.label}
-      onClick={() => onSelectGroup(item.menuPath)}
-    />
-  );
-}
 
 type MenuRenameInputProps = {
   initialValue: string;
   onCommit: (value: string) => void;
   onCancel: () => void;
 };
+
+/** Shared sidebar tree row chrome for category / tag / parameter explorers. */
+const lexiconTreeItemBaseClassName =
+  "group grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/25";
+
+function getLexiconTreeItemStateClassName(active: boolean): string {
+  // Aside sits on bg-background/60 — solid fill + soft border so hover/selected
+  // rows read clearly against the muted menu surface (category / tag / parameter).
+  return active
+    ? "border-capsule-sage-border/90 bg-capsule-sage text-capsule-sage-foreground shadow-sm"
+    : "border-transparent bg-transparent text-muted hover:border-border hover:bg-background hover:text-foreground hover:shadow-sm";
+}
 
 function MenuRenameInput({ initialValue, onCommit, onCancel }: MenuRenameInputProps) {
   const [value, setValue] = useState(initialValue);
@@ -5662,330 +4558,6 @@ function MenuRenameInput({ initialValue, onCommit, onCancel }: MenuRenameInputPr
   );
 }
 
-type ParameterGroupButtonProps = {
-  active: boolean;
-  count: number;
-  depth: number;
-  expandable?: boolean;
-  expanded?: boolean;
-  label: string;
-  onClick: () => void;
-  onRename?: (newLabel: string) => void;
-};
-
-function ParameterGroupButton({
-  active,
-  count,
-  depth,
-  expandable = false,
-  expanded = false,
-  label,
-  onClick,
-  onRename,
-}: ParameterGroupButtonProps) {
-  const [isEditing, setIsEditing] = useState(false);
-
-  if (isEditing && onRename) {
-    return (
-      <div
-        className="grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-primary bg-panel px-3 py-2 shadow-elevated"
-        style={{ paddingLeft: `${12 + depth * 16}px` }}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <MenuRenameInput
-          initialValue={label}
-          onCommit={(next) => {
-            setIsEditing(false);
-            onRename(next);
-          }}
-          onCancel={() => setIsEditing(false)}
-        />
-        <span className="rounded-md border border-border/70 bg-panel px-2 py-0.5 text-xs text-muted">{count}</span>
-      </div>
-    );
-  }
-
-  return (
-    <button
-      aria-pressed={active}
-      className={`group grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border px-3 py-2 text-left text-sm outline-none transition-all hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-primary/25 ${
-        active
-          ? "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground shadow-elevated"
-          : "border-transparent text-muted hover:bg-panel hover:text-foreground"
-      }`}
-      data-lexicon-menu-active={active ? "true" : undefined}
-      style={{ paddingLeft: `${12 + depth * 16}px` }}
-      type="button"
-      onClick={onClick}
-    >
-      <span className="flex min-w-0 items-center gap-2">
-        {expandable ? (
-          <ChevronRight
-            className={`shrink-0 text-muted transition-transform ${expanded ? "rotate-90" : ""}`}
-            size={13}
-          />
-        ) : depth > 0 ? (
-          <span className="size-[13px] shrink-0" aria-hidden="true" />
-        ) : null}
-        <span className="truncate">{label}</span>
-      </span>
-      <span className="flex items-center gap-1.5">
-        {onRename ? (
-          <span
-            role="button"
-            tabIndex={0}
-            aria-label="重命名"
-            className="inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted opacity-0 transition-opacity hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 group-hover:opacity-100"
-            onClick={(event) => {
-              event.stopPropagation();
-              event.preventDefault();
-              setIsEditing(true);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.stopPropagation();
-                event.preventDefault();
-                setIsEditing(true);
-              }
-            }}
-          >
-            <Pencil size={12} />
-          </span>
-        ) : null}
-        <span className="rounded-md border border-border/70 bg-panel px-2 py-0.5 text-xs text-muted">{count}</span>
-      </span>
-    </button>
-  );
-}
-
-type ParameterValueCapsuleGridProps = {
-  entries: PromptParameterLexiconEntry[];
-  isBusy: boolean;
-  selectedEntries: ReadonlySet<string>;
-  onChangeEntry: (entryId: string, patch: Partial<PromptParameterLexiconEntry>) => void;
-  onRemoveEntry: (entryId: string) => void;
-  onSelectEntry: (entryId: string) => void;
-};
-
-type ParameterCapsuleSection = {
-  entries: PromptParameterLexiconEntry[];
-  group: string;
-  id: string;
-  subtitle: string;
-  title: string;
-  variable: string;
-};
-
-type ParameterCapsuleSectionGridProps = {
-  isBusy: boolean;
-  sections: ParameterCapsuleSection[];
-  selectedEntries: ReadonlySet<string>;
-  onAddEntry: (
-    group: string,
-    draft: Partial<Pick<PromptParameterLexiconEntry, "label" | "variable">>,
-    value?: string,
-  ) => void;
-  onChangeEntry: (entryId: string, patch: Partial<PromptParameterLexiconEntry>) => void;
-  onChangeSection: (
-    entryIds: readonly string[],
-    patch: Partial<Pick<PromptParameterLexiconEntry, "group" | "label" | "variable">>,
-  ) => void;
-  onRemoveEntry: (entryId: string) => void;
-  onSelectEntry: (entryId: string) => void;
-};
-
-function ParameterCapsuleSectionGrid({
-  isBusy,
-  sections,
-  selectedEntries,
-  onAddEntry,
-  onChangeEntry,
-  onChangeSection,
-  onRemoveEntry,
-  onSelectEntry,
-}: ParameterCapsuleSectionGridProps) {
-  return (
-    <div className="min-h-[320px] bg-panel p-4">
-      <div className="grid gap-3">
-        {sections.map((section) => (
-          <section className="rounded-lg border border-border/70 bg-background/70 p-3" key={section.id}>
-            <ParameterSectionEditor
-              isBusy={isBusy}
-              section={section}
-              onAddEntry={() =>
-                onAddEntry(section.group, { label: section.title, variable: section.variable }, "新参数")
-              }
-              onChangeSection={(patch) => onChangeSection(section.entries.map((entry) => entry.id), patch)}
-            />
-            <div className="flex flex-wrap content-start gap-2">
-              {section.entries.map((entry) => (
-                <ParameterValueCapsule
-                  entry={entry}
-                  isBusy={isBusy}
-                  key={entry.id}
-                  selected={selectedEntries.has(entry.id)}
-                  onChangeValue={(value) => onChangeEntry(entry.id, { value })}
-                  onRemove={() => onRemoveEntry(entry.id)}
-                  onSelectedChange={() => onSelectEntry(entry.id)}
-                />
-              ))}
-            </div>
-          </section>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-type ParameterSectionEditorProps = {
-  isBusy: boolean;
-  section: ParameterCapsuleSection;
-  onAddEntry: () => void;
-  onChangeSection: (patch: Partial<Pick<PromptParameterLexiconEntry, "group" | "label" | "variable">>) => void;
-};
-
-function ParameterSectionEditor({ isBusy, section, onAddEntry }: ParameterSectionEditorProps) {
-  return (
-    <div className="mb-3 grid gap-3 rounded-md border border-border/70 bg-panel px-3 py-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold text-foreground">参数集合</span>
-          <span className="rounded-md border border-capsule-mist-border bg-capsule-mist px-2 py-0.5 text-xs text-capsule-mist-foreground">
-            {section.entries.length} 个值
-          </span>
-        </div>
-        <IconButton ariaLabel={`在${section.title}中新增参数值`} disabled={isBusy} icon={<Plus size={14} />} onClick={onAddEntry} />
-      </div>
-    </div>
-  );
-}
-
-function ParameterValueCapsuleGrid({
-  entries,
-  isBusy,
-  selectedEntries,
-  onChangeEntry,
-  onRemoveEntry,
-  onSelectEntry,
-}: ParameterValueCapsuleGridProps) {
-  return (
-    <div className="min-h-[320px] bg-panel p-4">
-      <div className="flex flex-wrap content-start gap-2">
-        {entries.map((entry) => (
-          <ParameterValueCapsule
-            entry={entry}
-            isBusy={isBusy}
-            key={entry.id}
-            selected={selectedEntries.has(entry.id)}
-            onChangeValue={(value) => onChangeEntry(entry.id, { value })}
-            onRemove={() => onRemoveEntry(entry.id)}
-            onSelectedChange={() => onSelectEntry(entry.id)}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-type ParameterValueCapsuleProps = {
-  entry: PromptParameterLexiconEntry;
-  isBusy: boolean;
-  selected: boolean;
-  onChangeValue: (value: string) => void;
-  onRemove: () => void;
-  onSelectedChange: () => void;
-};
-
-function ParameterValueCapsule({
-  entry,
-  isBusy,
-  selected,
-  onChangeValue,
-  onRemove,
-  onSelectedChange,
-}: ParameterValueCapsuleProps) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [draftValue, setDraftValue] = useState(entry.value);
-
-  useEffect(() => {
-    if (!isEditing) {
-      setDraftValue(entry.value);
-    }
-  }, [entry.value, isEditing]);
-
-  function commitEdit() {
-    onChangeValue(draftValue.trim());
-    setIsEditing(false);
-  }
-
-  function cancelEdit() {
-    setDraftValue(entry.value);
-    setIsEditing(false);
-  }
-
-  function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      commitEdit();
-      return;
-    }
-
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cancelEdit();
-    }
-  }
-
-  return (
-    <span
-      className={`inline-flex min-h-9 max-w-full items-center overflow-hidden rounded-full border text-sm shadow-sm transition-colors ${
-        selected
-          ? "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground"
-          : "border-border/70 bg-background text-foreground hover:bg-primary-soft"
-      }`}
-      title={`${entry.label || "未命名参数"} / ${entry.variable || "未设置变量名"}`}
-    >
-      {isEditing ? (
-        <input
-          aria-label="编辑参数值"
-          autoFocus
-          className="h-8 w-36 min-w-0 bg-transparent px-3 text-sm text-foreground outline-none placeholder:text-muted"
-          disabled={isBusy}
-          placeholder="参数值"
-          value={draftValue}
-          onBlur={commitEdit}
-          onChange={(event) => setDraftValue(event.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-      ) : (
-        <button
-          aria-label="选择参数值，双击可编辑"
-          className="min-w-0 px-3 py-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
-          disabled={isBusy}
-          type="button"
-          onClick={onSelectedChange}
-          onDoubleClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            setDraftValue(entry.value);
-            setIsEditing(true);
-          }}
-        >
-          <span className="block max-w-[14rem] truncate">{entry.value || "未设置具体参数"}</span>
-        </button>
-      )}
-      <button
-        aria-label="删除参数值"
-        className="flex size-8 shrink-0 items-center justify-center border-l border-border/70 text-muted outline-none transition-colors hover:bg-danger-soft hover:text-danger focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-40"
-        disabled={isBusy}
-        type="button"
-        onClick={onRemove}
-      >
-        <X size={13} />
-      </button>
-    </span>
-  );
-}
 
 type ImageLexiconKind = "category" | "tag";
 
@@ -6195,11 +4767,15 @@ function ImageLexiconExplorer({
   );
 }
 
+const promptGroupDragMime = "application/x-suyan-prompt-group-ids";
+
 type CategoryPromptGroupExplorerProps = {
   analysisProgress: CategoryAnalysisProgress | null;
   blurNsfwImages: boolean;
   categoryLabelsCache: ReadonlyMap<string, string[]>;
+  categoryTaxonomy?: CategoryTaxonomy | null;
   entries: PromptImageLexiconEntry[];
+  isBusy?: boolean;
   likedImageIds: string[];
   layout?: LexiconLayout;
   promptGroups: PromptImageGroup[];
@@ -6209,6 +4785,8 @@ type CategoryPromptGroupExplorerProps = {
   onCopyPrompt: (item: PromptCardData) => void;
   onCancelAnalysis: () => void;
   onChangeEntry: (entryId: string, patch: Partial<PromptImageLexiconEntry>) => void;
+  onDeleteCustomCategory?: (categoryId: string) => Promise<boolean>;
+  onMovePromptGroupsToCategory: (itemIds: readonly string[], categoryId: string | null, source?: "system" | "user" | "ai") => Promise<boolean>;
   onOpenDetail: (itemId: string) => void;
   onRemoveSelectedPromptGroups: () => void;
   onSelectAllPromptGroups: (groupIds: readonly string[]) => void;
@@ -6216,13 +4794,24 @@ type CategoryPromptGroupExplorerProps = {
   onSelectMenu: (menuPath: string) => void;
   onSelectNoPromptGroups: () => void;
   onTogglePromptGroupSelection: (groupId: string) => void;
+  onUpsertCustomCategory?: (input: {
+    id?: string | null;
+    name: string;
+    group?: string | null;
+    parentId?: string | null;
+  }) => Promise<string | null>;
+  /** Create a top-level custom category (group-header + button). */
+  /** Create a top-level custom category, or a child under parentCategoryId. */
+  onAddCustomCategory?: (options?: { groupLabel?: string; parentCategoryId?: string | null }) => void;
 };
 
 function CategoryPromptGroupExplorer({
   analysisProgress,
   blurNsfwImages,
   categoryLabelsCache,
+  categoryTaxonomy = null,
   entries,
+  isBusy = false,
   likedImageIds,
   layout = "bounded",
   promptGroups,
@@ -6232,6 +4821,8 @@ function CategoryPromptGroupExplorer({
   onCopyPrompt,
   onCancelAnalysis,
   onChangeEntry,
+  onDeleteCustomCategory,
+  onMovePromptGroupsToCategory,
   onOpenDetail,
   onRemoveSelectedPromptGroups,
   onSelectAllPromptGroups,
@@ -6239,24 +4830,64 @@ function CategoryPromptGroupExplorer({
   onSelectMenu,
   onSelectNoPromptGroups,
   onTogglePromptGroupSelection,
+  onUpsertCustomCategory,
+  onAddCustomCategory,
 }: CategoryPromptGroupExplorerProps) {
-  const categoryTree = useMemo(() => buildImageCategoryTree(entries), [entries]);
   const promptGroupCountByCategory = useMemo(() => buildPromptGroupCountByCategory(promptGroups, categoryLabelsCache), [categoryLabelsCache, promptGroups]);
   const deferredQuery = useDeferredValue(query);
   const deferredSelectedMenuPath = useDeferredValue(selectedMenuPath);
+  const fullCategoryTree = useMemo(() => (entries.length === 0 ? [] : buildGroupedCategoryTree(entries)), [entries]);
+  // Hide empty system leaves; keep empty custom leaves as drop targets.
   const visibleCategoryTree = useMemo(
-    () => filterCategoryTreeByPromptGroups(categoryTree, promptGroupCountByCategory),
-    [categoryTree, promptGroupCountByCategory],
+    () => filterCategoryTreeKeepingCustomEmpty(fullCategoryTree, promptGroupCountByCategory),
+    [fullCategoryTree, promptGroupCountByCategory],
   );
+  const moveTargetLeaves = useMemo(() => {
+    const leaves: PromptImageLexiconEntry[] = [];
+
+    function walk(nodes: readonly ImageCategoryNode[]) {
+      for (const node of nodes) {
+        if (!node.entry.id.startsWith("group:")) {
+          leaves.push(node.entry);
+        }
+        if (node.children.length > 0) {
+          walk(node.children);
+        }
+      }
+    }
+
+    walk(fullCategoryTree);
+    return leaves.sort((left, right) => {
+      const leftCustom = isCustomCategoryEntry(left) ? 0 : 1;
+      const rightCustom = isCustomCategoryEntry(right) ? 0 : 1;
+      if (leftCustom !== rightCustom) {
+        return leftCustom - rightCustom;
+      }
+      return (left.label || "").localeCompare(right.label || "", "zh-CN");
+    });
+  }, [fullCategoryTree]);
+  const [expandedCategoryGroupIds, setExpandedCategoryGroupIds] = useState<Set<string>>(() => new Set());
+  const [dropTargetEntryId, setDropTargetEntryId] = useState<string | null>(null);
+  const [isDraggingPromptGroup, setIsDraggingPromptGroup] = useState(false);
+  const [moveMenu, setMoveMenu] = useState<{ anchorX: number; anchorY: number; itemIds: string[] } | null>(null);
   const filteredPromptGroups = useMemo(
     () => filterPromptGroupsForCategoryMenu(promptGroups, entries, deferredSelectedMenuPath, deferredQuery, categoryLabelsCache),
     [categoryLabelsCache, deferredQuery, deferredSelectedMenuPath, entries, promptGroups],
   );
-  const selectedCategoryPromptGroupCount = useMemo(
-    () => countPromptGroupsForCategoryMenu(promptGroups, entries, deferredSelectedMenuPath, categoryLabelsCache),
-    [categoryLabelsCache, deferredSelectedMenuPath, entries, promptGroups],
-  );
   const activeMenuLabel = getImageLexiconMenuDisplayLabel("category", selectedMenuPath, entries);
+  const selectedCategoryEntry = useMemo(
+    () =>
+      selectedMenuPath === allCategoryGroupsValue
+        ? null
+        : entries.find((entry) => createImageCategoryMenuValue(entry.id) === selectedMenuPath) ?? null,
+    [entries, selectedMenuPath],
+  );
+  const canDeleteSelectedCategory = Boolean(
+    selectedCategoryEntry &&
+      !selectedCategoryEntry.id.startsWith("group:") &&
+      selectedCategoryEntry.id !== "system:uncategorized" &&
+      onDeleteCustomCategory,
+  );
   const filteredImageCount = filteredPromptGroups.reduce((total, group) => total + group.items.length, 0);
   const filteredSelectedCount = countSelectedPromptGroups(selectedPromptGroupIds, filteredPromptGroups);
   const menuScrollRef = useRef<HTMLDivElement | null>(null);
@@ -6265,6 +4896,47 @@ function CategoryPromptGroupExplorer({
   const asideClassName = getLexiconExplorerAsideClassName(layout);
   const columnClassName = getLexiconExplorerColumnClassName(layout);
   const contentClassName = getLexiconExplorerContentClassName(layout, "bg-panel p-4");
+  const [deleteCategoryTarget, setDeleteCategoryTarget] = useState<PromptImageLexiconEntry | null>(null);
+  const [isDeletingCategory, setIsDeletingCategory] = useState(false);
+
+  useEffect(() => {
+    if (!selectedMenuPath || selectedMenuPath === allCategoryGroupsValue) {
+      return;
+    }
+
+    function findGroupAncestors(nodes: readonly ImageCategoryNode[], targetPath: string): string[] | null {
+      for (const node of nodes) {
+        if (createImageCategoryMenuValue(node.entry.id) === targetPath) {
+          return [];
+        }
+        if (node.children.length === 0) {
+          continue;
+        }
+        const nested = findGroupAncestors(node.children, targetPath);
+        if (nested) {
+          return node.entry.id.startsWith("group:") ? [node.entry.id, ...nested] : nested;
+        }
+      }
+      return null;
+    }
+
+    const groupIdsToExpand = findGroupAncestors(visibleCategoryTree, selectedMenuPath);
+    if (!groupIdsToExpand || groupIdsToExpand.length === 0) {
+      return;
+    }
+
+    setExpandedCategoryGroupIds((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const id of groupIdsToExpand) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [selectedMenuPath, visibleCategoryTree]);
 
   useEffect(() => {
     const activeMenuItem = menuScrollRef.current?.querySelector('[data-lexicon-menu-active="true"]');
@@ -6276,18 +4948,123 @@ function CategoryPromptGroupExplorer({
   }, [query, selectedMenuPath]);
 
   useEffect(() => {
-    if (selectedMenuPath !== allCategoryGroupsValue && selectedCategoryPromptGroupCount === 0) {
-      onSelectMenu(allCategoryGroupsValue);
+    if (!moveMenu) {
+      return;
     }
-  }, [onSelectMenu, selectedCategoryPromptGroupCount, selectedMenuPath]);
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-category-move-menu='true']")) {
+        return;
+      }
+      setMoveMenu(null);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setMoveMenu(null);
+      }
+    }
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [moveMenu]);
+
+  function handleToggleCategoryGroup(groupId: string) {
+    setExpandedCategoryGroupIds((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }
+
+  function resolveCategoryIdForEntry(entry: PromptImageLexiconEntry): string | null {
+    if (entry.id.startsWith("group:")) {
+      return null;
+    }
+    if (entry.id.startsWith("system:") || entry.id.startsWith("custom:") || entry.id.startsWith("ai:")) {
+      return entry.id;
+    }
+    if (categoryTaxonomy) {
+      return resolveCategoryIdFromLegacyName(categoryTaxonomy, entry.label) ?? entry.id;
+    }
+    return entry.id;
+  }
+
+  async function handleDropOnCategory(entry: PromptImageLexiconEntry, event: React.DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDropTargetEntryId(null);
+    setIsDraggingPromptGroup(false);
+    const categoryId = resolveCategoryIdForEntry(entry);
+    if (!categoryId) {
+      return;
+    }
+    const raw = event.dataTransfer.getData(promptGroupDragMime) || event.dataTransfer.getData("text/plain");
+    let itemIds: string[] = [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        itemIds = parsed.filter((value): value is string => typeof value === "string" && value.length > 0);
+      }
+    } catch {
+      if (raw.trim()) {
+        itemIds = [raw.trim()];
+      }
+    }
+    if (itemIds.length === 0) {
+      return;
+    }
+    await onMovePromptGroupsToCategory(itemIds, categoryId);
+  }
+
+  function handleOpenMoveMenu(itemIds: string[], clientX: number, clientY: number) {
+    if (itemIds.length === 0) {
+      return;
+    }
+    setMoveMenu({ anchorX: clientX, anchorY: clientY, itemIds });
+  }
+
+  async function handleMoveMenuSelect(categoryId: string | null) {
+    if (!moveMenu) {
+      return;
+    }
+    const itemIds = moveMenu.itemIds;
+    setMoveMenu(null);
+    await onMovePromptGroupsToCategory(itemIds, categoryId);
+  }
+
+  async function handleRenameCategory(entryId: string, newLabel: string) {
+    const trimmed = newLabel.trim();
+    if (!trimmed) {
+      return;
+    }
+    onChangeEntry(entryId, { label: trimmed });
+    if (onUpsertCustomCategory && (entryId.startsWith("custom:") || entryId.startsWith("ai:"))) {
+      const existing = entries.find((entry) => entry.id === entryId);
+      await onUpsertCustomCategory({
+        id: entryId,
+        name: trimmed,
+        group: existing?.group || defaultCategoryGroupLabel,
+        parentId: existing?.parentId ?? null,
+      });
+    }
+  }
 
   return (
     <div className={rootClassName}>
       <aside className={asideClassName}>
         <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
           <div>
-            <p className="text-sm font-semibold text-foreground">分类菜单</p>
-            <p className="mt-1 text-xs text-muted">按父子分类延伸到最小分类</p>
+            <p className="text-sm font-semibold text-foreground">素材目录</p>
+            <p className="mt-1 text-xs text-muted">
+              {isDraggingPromptGroup ? "拖到左侧分类即可归类" : "自定义优先 · 拖拽或菜单移动"}
+            </p>
           </div>
           <span className="rounded-md border border-capsule-mist-border bg-capsule-mist px-2 py-1 text-xs text-capsule-mist-foreground">
             {promptGroups.length}
@@ -6305,13 +5082,34 @@ function CategoryPromptGroupExplorer({
 
           {visibleCategoryTree.length > 0 ? (
             <>
-              <p className="px-3 pt-3 text-xs font-medium text-muted">分类层级</p>
+              <p className="px-3 pt-3 text-xs font-medium text-muted">分类目录（自定义优先）</p>
               {visibleCategoryTree.map((node) => (
                 <PromptCategoryNodeButton
                   countByCategory={promptGroupCountByCategory}
+                  dropTargetEntryId={dropTargetEntryId}
+                  expandedGroupIds={expandedCategoryGroupIds}
+                  isDraggingPromptGroup={isDraggingPromptGroup}
                   key={node.entry.id}
                   node={node}
-                  onChangeEntry={onChangeEntry}
+                  onChangeEntry={(entryId, patch) => {
+                    if (patch.label) {
+                      void handleRenameCategory(entryId, patch.label);
+                      return;
+                    }
+                    onChangeEntry(entryId, patch);
+                  }}
+                  onDeleteCustomCategory={onDeleteCustomCategory}
+                  onDragEnterCategory={(entryId) => setDropTargetEntryId(entryId)}
+                  onDragLeaveCategory={(entryId) =>
+                    setDropTargetEntryId((current) => (current === entryId ? null : current))
+                  }
+                  onDropOnCategory={(entry, event) => void handleDropOnCategory(entry, event)}
+                  onToggleGroup={handleToggleCategoryGroup}
+                  onAddCategoryInGroup={
+                    onAddCustomCategory
+                      ? (options) => onAddCustomCategory(options)
+                      : undefined
+                  }
                   selectedMenuPath={selectedMenuPath}
                   onSelectMenu={onSelectMenu}
                 />
@@ -6319,7 +5117,9 @@ function CategoryPromptGroupExplorer({
             </>
           ) : (
             <div className="rounded-md border border-border/70 bg-panel px-3 py-6 text-center text-xs text-muted">
-              暂无已归纳提示词组的分类。
+              {entries.length === 0
+                ? "暂无分类目录，请检查 taxonomy 是否加载。"
+                : "当前素材未归入任何分类，归类后将显示对应目录。"}
             </div>
           )}
         </div>
@@ -6333,16 +5133,33 @@ function CategoryPromptGroupExplorer({
               <p className="mt-1 text-xs text-muted">
                 {filteredPromptGroups.length} 个提示词组 / {filteredImageCount} 张图片
                 {query.trim() ? "，已按搜索词过滤" : ""}
+                {" · 拖拽卡片到左侧分类，或点 ⋯ 菜单移动"}
               </p>
             </div>
             {selectedMenuPath !== allCategoryGroupsValue ? (
-              <button
-                className="inline-flex min-h-8 items-center gap-2 rounded-md border border-border/70 bg-background px-3 text-xs font-medium text-muted transition-colors hover:bg-primary-soft hover:text-foreground"
-                type="button"
-                onClick={() => onSelectMenu(allCategoryGroupsValue)}
-              >
-                查看全部
-              </button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {canDeleteSelectedCategory ? (
+                  <button
+                    className="inline-flex min-h-8 items-center gap-2 rounded-md border border-danger/35 bg-danger-soft px-3 text-xs font-medium text-danger transition-colors hover:bg-danger/15"
+                    type="button"
+                    onClick={() => {
+                      if (selectedCategoryEntry) {
+                        setDeleteCategoryTarget(selectedCategoryEntry);
+                      }
+                    }}
+                  >
+                    <Trash2 size={14} />
+                    删除分类
+                  </button>
+                ) : null}
+                <button
+                  className="inline-flex min-h-8 items-center gap-2 rounded-md border border-border/70 bg-background px-3 text-xs font-medium text-muted transition-colors hover:bg-primary-soft hover:text-foreground"
+                  type="button"
+                  onClick={() => onSelectMenu(allCategoryGroupsValue)}
+                >
+                  查看全部
+                </button>
+              </div>
             ) : null}
           </div>
         </div>
@@ -6358,17 +5175,23 @@ function CategoryPromptGroupExplorer({
             onSelectInvert={() => onSelectInvertPromptGroups(filteredPromptGroups.map((group) => group.id))}
             onSelectNone={onSelectNoPromptGroups}
             onRemoveSelected={onRemoveSelectedPromptGroups}
-            removeLabel="移出该分类"
-            removeDisabled={selectedMenuPath === allCategoryGroupsValue}
+            removeLabel={selectedMenuPath === allCategoryGroupsValue ? "移出分类" : "移出该分类"}
           />
           {filteredPromptGroups.length > 0 ? (
             <GridPromptGallery
               blurNsfwImages={blurNsfwImages}
+              enableCategoryDnD
               groups={filteredPromptGroups}
               likedImageIds={likedImageIds}
               selectedGroupIds={selectedPromptGroupIds}
               variant="compact"
               onCopyPrompt={onCopyPrompt}
+              onDragPromptGroupsEnd={() => {
+                setIsDraggingPromptGroup(false);
+                setDropTargetEntryId(null);
+              }}
+              onDragPromptGroupsStart={() => setIsDraggingPromptGroup(true)}
+              onOpenMoveMenu={handleOpenMoveMenu}
               onToggleGroupSelection={onTogglePromptGroupSelection}
               onViewDetail={onOpenDetail}
             />
@@ -6377,8 +5200,129 @@ function CategoryPromptGroupExplorer({
           )}
         </div>
       </div>
+
+      {moveMenu
+        ? createPortal(
+            <div
+              className="fixed z-[80] max-h-[min(420px,70vh)] w-[min(280px,calc(100vw-24px))] overflow-hidden rounded-xl border border-border bg-panel shadow-elevated"
+              data-category-move-menu="true"
+              style={{
+                left: Math.min(moveMenu.anchorX, window.innerWidth - 296),
+                top: Math.min(moveMenu.anchorY, window.innerHeight - 280),
+              }}
+            >
+              <div className="border-b border-border/70 px-3 py-2 text-xs font-medium text-muted">
+                移动到分类（{moveMenu.itemIds.length} 组）
+              </div>
+              <div className="max-h-[min(360px,60vh)] overflow-y-auto p-1">
+                <button
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-muted hover:bg-primary-soft hover:text-foreground"
+                  type="button"
+                  onClick={() => void handleMoveMenuSelect(null)}
+                >
+                  移出分类 / 未分类
+                </button>
+                {moveTargetLeaves.map((entry) => {
+                  const categoryId = resolveCategoryIdForEntry(entry);
+                  if (!categoryId) {
+                    return null;
+                  }
+                  return (
+                    <button
+                      key={entry.id}
+                      className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm text-foreground hover:bg-primary-soft"
+                      type="button"
+                      onClick={() => void handleMoveMenuSelect(categoryId)}
+                    >
+                      <span className="min-w-0 truncate">{entry.label}</span>
+                      <span className="shrink-0 text-[10px] text-muted">
+                        {isCustomCategoryEntry(entry) ? "自定义" : entry.group || "系统"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      <ConfirmDialog
+        busyLabel="删除中…"
+        confirmLabel="删除分类"
+        description={
+          <>
+            分类「{deleteCategoryTarget?.label || "未命名分类"}」中的素材、图片和提示词都会保留，只会移出该分类。
+          </>
+        }
+        icon={<Trash2 size={18} />}
+        isBusy={isDeletingCategory}
+        open={Boolean(deleteCategoryTarget)}
+        title="确定删除分类吗？"
+        onCancel={() => {
+          if (!isDeletingCategory) {
+            setDeleteCategoryTarget(null);
+          }
+        }}
+        onConfirm={() => {
+          if (!deleteCategoryTarget || !onDeleteCustomCategory || isDeletingCategory) {
+            return;
+          }
+          void (async () => {
+            setIsDeletingCategory(true);
+            try {
+              const categoryId = resolveCategoryIdForEntry(deleteCategoryTarget);
+              const deleted = categoryId ? await onDeleteCustomCategory(categoryId) : false;
+              setDeleteCategoryTarget(null);
+              if (deleted) {
+                onSelectMenu(allCategoryGroupsValue);
+                onSelectNoPromptGroups();
+              }
+            } finally {
+              setIsDeletingCategory(false);
+            }
+          })();
+        }}
+      />
     </div>
   );
+}
+
+function isCustomCategoryEntry(entry: PromptImageLexiconEntry): boolean {
+  if (entry.id.startsWith("custom:") || entry.id.startsWith("ai:")) {
+    return true;
+  }
+  // Freeform categories derived from item.category labels (not system taxonomy).
+  if (entry.id.startsWith("derived-category-")) {
+    return true;
+  }
+  const groupKey = normalizeCategoryLabelKey(entry.group || "");
+  return groupKey === normalizeCategoryLabelKey("自定义分类") || groupKey.startsWith("自定义");
+}
+
+function filterCategoryTreeKeepingCustomEmpty(
+  nodes: readonly ImageCategoryNode[],
+  countByCategory: ReadonlyMap<string, number>,
+): ImageCategoryNode[] {
+  return nodes
+    .map((node) => {
+      if (node.entry.id.startsWith("group:")) {
+        const children = filterCategoryTreeKeepingCustomEmpty(node.children, countByCategory);
+        if (children.length === 0) {
+          return null;
+        }
+        return { ...node, children };
+      }
+      const count = countPromptGroupsForCategoryNode(node, countByCategory);
+      if (count > 0 || isCustomCategoryEntry(node.entry)) {
+        return {
+          ...node,
+          children: filterCategoryTreeKeepingCustomEmpty(node.children, countByCategory),
+        };
+      }
+      return null;
+    })
+    .filter((node): node is ImageCategoryNode => node !== null);
 }
 
 type TagPromptGroupExplorerProps = {
@@ -6395,6 +5339,7 @@ type TagPromptGroupExplorerProps = {
   tagLabelsCache: ReadonlyMap<string, string[]>;
   onCancelAnalysis: () => void;
   onCopyPrompt: (item: PromptCardData) => void;
+  onDeleteSelectedTag: () => Promise<boolean>;
   onOpenDetail: (itemId: string) => void;
   onRemoveSelectedPromptGroups: () => void;
   onRenameGroup: (oldPath: string, newLabel: string) => void;
@@ -6420,6 +5365,7 @@ function TagPromptGroupExplorer({
   tagLabelsCache,
   onCancelAnalysis,
   onCopyPrompt,
+  onDeleteSelectedTag,
   onOpenDetail,
   onRemoveSelectedPromptGroups,
   onRenameGroup,
@@ -6431,6 +5377,8 @@ function TagPromptGroupExplorer({
   onTogglePromptGroupSelection,
 }: TagPromptGroupExplorerProps) {
   const tagGroupTree = useMemo(() => (isMenuReady ? buildImageLexiconGroupTree(entries) : []), [entries, isMenuReady]);
+  const [expandedTagGroupPaths, setExpandedTagGroupPaths] = useState<Set<string>>(() => new Set());
+  const hasInitializedTagGroupExpansion = useRef(false);
   const promptGroupCountByTag = useMemo(() => buildPromptGroupCountByTag(promptGroups, tagLabelsCache), [promptGroups, tagLabelsCache]);
   const deferredQuery = useDeferredValue(query);
   const deferredSelectedMenuPath = useDeferredValue(selectedMenuPath);
@@ -6455,6 +5403,38 @@ function TagPromptGroupExplorer({
   const asideClassName = getLexiconExplorerAsideClassName(layout);
   const columnClassName = getLexiconExplorerColumnClassName(layout);
   const contentClassName = getLexiconExplorerContentClassName(layout, "bg-panel p-4");
+  const [isDeleteTagConfirmOpen, setIsDeleteTagConfirmOpen] = useState(false);
+  const [isDeletingTag, setIsDeletingTag] = useState(false);
+
+  useEffect(() => {
+    const knownPaths = collectImageGroupPaths(tagGroupTree);
+    if (knownPaths.length === 0) {
+      return;
+    }
+
+    setExpandedTagGroupPaths((current) => {
+      if (!hasInitializedTagGroupExpansion.current) {
+        hasInitializedTagGroupExpansion.current = true;
+        return new Set(knownPaths);
+      }
+
+      const knownPathSet = new Set(knownPaths);
+      const next = new Set([...current].filter((path) => knownPathSet.has(path)));
+      return next.size === current.size ? current : next;
+    });
+  }, [tagGroupTree]);
+
+  function handleToggleTagGroup(path: string) {
+    setExpandedTagGroupPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }
 
   useEffect(() => {
     const activeMenuItem = menuScrollRef.current?.querySelector('[data-lexicon-menu-active="true"]');
@@ -6477,7 +5457,7 @@ function TagPromptGroupExplorer({
         <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
           <div>
             <p className="text-sm font-semibold text-foreground">标签菜单</p>
-            <p className="mt-1 text-xs text-muted">只显示已被提示词组使用的标签</p>
+          <p className="mt-1 text-xs text-muted">按主体、环境、构图、材质等语义自动归类</p>
           </div>
           <span className="rounded-md border border-capsule-mist-border bg-capsule-mist px-2 py-1 text-xs text-capsule-mist-foreground">
             {promptGroups.length}
@@ -6508,8 +5488,10 @@ function TagPromptGroupExplorer({
                   onRenameGroup={onRenameGroup}
                   onRenameItem={onRenameItem}
                   promptGroups={promptGroups}
+                  expandedGroupPaths={expandedTagGroupPaths}
                   selectedMenuPath={selectedMenuPath}
                   onSelectMenu={onSelectMenu}
+                  onToggleGroup={handleToggleTagGroup}
                 />
               ))}
             </>
@@ -6532,13 +5514,23 @@ function TagPromptGroupExplorer({
               </p>
             </div>
             {selectedMenuPath !== allTagGroupsValue ? (
-              <button
-                className="inline-flex min-h-8 items-center gap-2 rounded-md border border-border/70 bg-background px-3 text-xs font-medium text-muted transition-colors hover:bg-primary-soft hover:text-foreground"
-                type="button"
-                onClick={() => onSelectMenu(allTagGroupsValue)}
-              >
-                查看全部
-              </button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  className="inline-flex min-h-8 items-center gap-2 rounded-md border border-danger/35 bg-danger-soft px-3 text-xs font-medium text-danger transition-colors hover:bg-danger/15"
+                  type="button"
+                  onClick={() => setIsDeleteTagConfirmOpen(true)}
+                >
+                  <Trash2 size={14} />
+                  删除标签
+                </button>
+                <button
+                  className="inline-flex min-h-8 items-center gap-2 rounded-md border border-border/70 bg-background px-3 text-xs font-medium text-muted transition-colors hover:bg-primary-soft hover:text-foreground"
+                  type="button"
+                  onClick={() => onSelectMenu(allTagGroupsValue)}
+                >
+                  查看全部
+                </button>
+              </div>
             ) : null}
           </div>
         </div>
@@ -6558,8 +5550,7 @@ function TagPromptGroupExplorer({
             onSelectInvert={() => onSelectInvertPromptGroups(filteredPromptGroups.map((group) => group.id))}
             onSelectNone={onSelectNoPromptGroups}
             onRemoveSelected={onRemoveSelectedPromptGroups}
-            removeLabel="移出该标签"
-            removeDisabled={selectedMenuPath === allTagGroupsValue}
+            removeLabel={selectedMenuPath === allTagGroupsValue ? "移出标签" : "移出该标签"}
           />
           {filteredPromptGroups.length > 0 ? (
             <GridPromptGallery
@@ -6577,6 +5568,42 @@ function TagPromptGroupExplorer({
           )}
         </div>
       </div>
+
+      <ConfirmDialog
+        busyLabel="删除中…"
+        confirmLabel="删除标签"
+        description={
+          <>
+            「{activeMenuLabel}」对应的标签会从素材和标签目录中移除，素材、图片和提示词本身不会删除。
+          </>
+        }
+        icon={<Trash2 size={18} />}
+        isBusy={isDeletingTag}
+        open={isDeleteTagConfirmOpen}
+        title="确定删除标签吗？"
+        onCancel={() => {
+          if (!isDeletingTag) {
+            setIsDeleteTagConfirmOpen(false);
+          }
+        }}
+        onConfirm={() => {
+          if (isDeletingTag) {
+            return;
+          }
+          void (async () => {
+            setIsDeletingTag(true);
+            try {
+              const deleted = await onDeleteSelectedTag();
+              if (deleted) {
+                setIsDeleteTagConfirmOpen(false);
+                onSelectNoPromptGroups();
+              }
+            } finally {
+              setIsDeletingTag(false);
+            }
+          })();
+        }}
+      />
     </div>
   );
 }
@@ -6684,6 +5711,39 @@ function waitForInteractionFrame(): Promise<void> {
   });
 }
 
+async function normalizeCanvasReferenceBlob(blob: Blob): Promise<Blob> {
+  const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+  let mime = "";
+
+  if (
+    header.length >= 8 &&
+    header[0] === 0x89 &&
+    header[1] === 0x50 &&
+    header[2] === 0x4e &&
+    header[3] === 0x47 &&
+    header[4] === 0x0d &&
+    header[5] === 0x0a &&
+    header[6] === 0x1a &&
+    header[7] === 0x0a
+  ) {
+    mime = "image/png";
+  } else if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+    mime = "image/jpeg";
+  } else if (
+    header.length >= 12 &&
+    String.fromCharCode(...header.slice(0, 4)) === "RIFF" &&
+    String.fromCharCode(...header.slice(8, 12)) === "WEBP"
+  ) {
+    mime = "image/webp";
+  }
+
+  if (!mime) {
+    throw new Error("IMAGE_FORMAT_UNSUPPORTED");
+  }
+
+  return blob.type === mime ? blob : new Blob([blob], { type: mime });
+}
+
 function logRendererStartupEvent(event: string, details: Record<string, unknown> = {}): void {
   try {
     window.suyanApi.logStartupEvent(event, details);
@@ -6693,62 +5753,230 @@ function logRendererStartupEvent(event: string, details: Record<string, unknown>
 
 type PromptCategoryNodeButtonProps = {
   countByCategory: ReadonlyMap<string, number>;
+  dropTargetEntryId?: string | null;
+  expandedGroupIds: ReadonlySet<string>;
+  isDraggingPromptGroup?: boolean;
   node: ImageCategoryNode;
   onChangeEntry: (entryId: string, patch: Partial<PromptImageLexiconEntry>) => void;
+  onDeleteCustomCategory?: (categoryId: string) => Promise<boolean>;
+  onDragEnterCategory?: (entryId: string) => void;
+  onDragLeaveCategory?: (entryId: string) => void;
+  onDropOnCategory?: (entry: PromptImageLexiconEntry, event: React.DragEvent) => void;
+  onToggleGroup: (groupId: string) => void;
+  /** Add a top-level custom category under this group header (e.g. 自定义分类). */
+  /** Create top-level custom (group header) or child under a selected custom category. */
+  onAddCategoryInGroup?: (options: { groupLabel: string; parentCategoryId?: string | null }) => void;
   selectedMenuPath: string;
   onSelectMenu: (menuPath: string) => void;
 };
 
-function PromptCategoryNodeButton({ countByCategory, node, onChangeEntry, selectedMenuPath, onSelectMenu }: PromptCategoryNodeButtonProps) {
+function PromptCategoryNodeButton({
+  countByCategory,
+  dropTargetEntryId = null,
+  expandedGroupIds,
+  isDraggingPromptGroup = false,
+  node,
+  onChangeEntry,
+  onDeleteCustomCategory,
+  onDragEnterCategory,
+  onDragLeaveCategory,
+  onDropOnCategory,
+  onToggleGroup,
+  onAddCategoryInGroup,
+  selectedMenuPath,
+  onSelectMenu,
+}: PromptCategoryNodeButtonProps) {
+  const isGroupHeader = node.entry.id.startsWith("group:");
   const menuPath = createImageCategoryMenuValue(node.entry.id);
+  // Includes this node + nested children labels (parentId tree).
   const count = countPromptGroupsForCategoryNode(node, countByCategory);
+  const expanded = isGroupHeader ? expandedGroupIds.has(node.entry.id) : true;
+  const isDropTarget = !isGroupHeader && dropTargetEntryId === node.entry.id;
+  const canAcceptDrop = !isGroupHeader && Boolean(onDropOnCategory);
+  const canDelete = !isGroupHeader && isCustomCategoryEntry(node.entry) && Boolean(onDeleteCustomCategory);
+  // "+" only when needed: custom group header, or currently selected custom category (add child).
+  const canAddInGroup =
+    Boolean(onAddCategoryInGroup) &&
+    ((isGroupHeader &&
+      (normalizeCategoryLabelKey(node.entry.label || node.entry.group || "") ===
+        normalizeCategoryLabelKey(defaultCategoryGroupLabel) ||
+        normalizeCategoryLabelKey(node.entry.label || node.entry.group || "").startsWith("自定义"))) ||
+      (!isGroupHeader && isCustomCategoryEntry(node.entry) && selectedMenuPath === menuPath));
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const categoryLabel = node.entry.label || "未命名分类";
 
   return (
     <>
-      <ImageLexiconMenuButton
-        active={selectedMenuPath === menuPath}
-        count={count}
-        depth={node.depth}
-        label={node.entry.label || "未命名分类"}
-        onClick={() => onSelectMenu(menuPath)}
-        onRename={(newLabel) => onChangeEntry(node.entry.id, { label: newLabel })}
-      />
-      {node.children.map((child) => (
-        <PromptCategoryNodeButton
-          countByCategory={countByCategory}
-          key={child.entry.id}
-          node={child}
-          onChangeEntry={onChangeEntry}
-          selectedMenuPath={selectedMenuPath}
-          onSelectMenu={onSelectMenu}
+      <div
+        className={isDropTarget ? "rounded-md ring-2 ring-primary/50" : undefined}
+        onDragEnter={
+          canAcceptDrop
+            ? (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onDragEnterCategory?.(node.entry.id);
+              }
+            : undefined
+        }
+        onDragOver={
+          canAcceptDrop
+            ? (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                event.dataTransfer.dropEffect = "move";
+                onDragEnterCategory?.(node.entry.id);
+              }
+            : undefined
+        }
+        onDragLeave={
+          canAcceptDrop
+            ? (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onDragLeaveCategory?.(node.entry.id);
+              }
+            : undefined
+        }
+        onDrop={
+          canAcceptDrop
+            ? (event) => {
+                onDropOnCategory?.(node.entry, event);
+              }
+            : undefined
+        }
+      >
+        <ImageLexiconMenuButton
+          active={!isGroupHeader && selectedMenuPath === menuPath}
+          count={count}
+          depth={node.depth}
+          expandable={isGroupHeader}
+          expanded={expanded}
+          label={
+            isDraggingPromptGroup && !isGroupHeader
+              ? `↓ ${categoryLabel}`
+              : categoryLabel
+          }
+          onClick={() => {
+            if (isGroupHeader) {
+              onToggleGroup(node.entry.id);
+              return;
+            }
+            onSelectMenu(menuPath);
+          }}
+          onRename={
+            isGroupHeader
+              ? undefined
+              : (newLabel) => onChangeEntry(node.entry.id, { label: newLabel })
+          }
+          onDelete={
+            canDelete
+              ? () => {
+                  setIsDeleteConfirmOpen(true);
+                }
+              : undefined
+          }
+          onAdd={
+            canAddInGroup
+              ? () => {
+                  if (isGroupHeader) {
+                    onAddCategoryInGroup?.({
+                      groupLabel: node.entry.label || node.entry.group || defaultCategoryGroupLabel,
+                      parentCategoryId: null,
+                    });
+                    return;
+                  }
+                  onAddCategoryInGroup?.({
+                    groupLabel: node.entry.group || defaultCategoryGroupLabel,
+                    parentCategoryId: node.entry.id,
+                  });
+                }
+              : undefined
+          }
         />
-      ))}
+      </div>
+      {expanded
+        ? node.children.map((child) => (
+            <PromptCategoryNodeButton
+              countByCategory={countByCategory}
+              dropTargetEntryId={dropTargetEntryId}
+              expandedGroupIds={expandedGroupIds}
+              isDraggingPromptGroup={isDraggingPromptGroup}
+              key={child.entry.id}
+              node={child}
+              onChangeEntry={onChangeEntry}
+              onDeleteCustomCategory={onDeleteCustomCategory}
+              onDragEnterCategory={onDragEnterCategory}
+              onDragLeaveCategory={onDragLeaveCategory}
+              onDropOnCategory={onDropOnCategory}
+              onToggleGroup={onToggleGroup}
+              onAddCategoryInGroup={onAddCategoryInGroup}
+              selectedMenuPath={selectedMenuPath}
+              onSelectMenu={onSelectMenu}
+            />
+          ))
+        : null}
+      <ConfirmDialog
+        busyLabel="删除中…"
+        confirmLabel="删除分类"
+        description={
+          <>
+            将删除自定义分类「{categoryLabel}」。其下提示词会变为未分类，素材本身不会被删除。
+          </>
+        }
+        icon={<Trash2 size={18} />}
+        isBusy={isDeleting}
+        open={isDeleteConfirmOpen}
+        title="删除自定义分类？"
+        onCancel={() => {
+          if (!isDeleting) {
+            setIsDeleteConfirmOpen(false);
+          }
+        }}
+        onConfirm={() => {
+          void (async () => {
+            setIsDeleting(true);
+            try {
+              await onDeleteCustomCategory?.(node.entry.id);
+              setIsDeleteConfirmOpen(false);
+            } finally {
+              setIsDeleting(false);
+            }
+          })();
+        }}
+      />
     </>
   );
 }
 
 type PromptTagGroupNodeButtonProps = {
   countByTag: ReadonlyMap<string, number>;
+  expandedGroupPaths: ReadonlySet<string>;
   node: ImageGroupNode;
   onRenameGroup: (oldPath: string, newLabel: string) => void;
   onRenameItem: (groupPath: string, itemKey: string, newLabel: string) => void;
   promptGroups: readonly PromptImageGroup[];
   selectedMenuPath: string;
   onSelectMenu: (menuPath: string) => void;
+  onToggleGroup: (path: string) => void;
 };
 
 function PromptTagGroupNodeButton({
   countByTag,
+  expandedGroupPaths,
   node,
   onRenameGroup,
   onRenameItem,
   promptGroups,
   selectedMenuPath,
   onSelectMenu,
+  onToggleGroup,
 }: PromptTagGroupNodeButtonProps) {
   const menuPath = createImageGroupMenuValue(node.path);
   const depth = Math.max(0, splitParameterGroupPath(node.path).length - 1);
   const count = countPromptGroupsByTagKeys(promptGroups, getTagGroupNodeLabelKeys(node));
+  const expandable = node.children.length > 0 || node.items.length > 0;
+  const expanded = expandedGroupPaths.has(node.path);
 
   return (
     <>
@@ -6756,33 +5984,46 @@ function PromptTagGroupNodeButton({
         active={selectedMenuPath === menuPath}
         count={count}
         depth={depth}
+        expandable={expandable}
+        expanded={expanded}
         label={node.label}
-        onClick={() => onSelectMenu(menuPath)}
+        onClick={() => {
+          if (expandable) {
+            onToggleGroup(node.path);
+          }
+          onSelectMenu(menuPath);
+        }}
         onRename={(newLabel) => onRenameGroup(node.path, newLabel)}
       />
-      {node.children.map((child) => (
-        <PromptTagGroupNodeButton
-          countByTag={countByTag}
-          key={child.path}
-          node={child}
-          onRenameGroup={onRenameGroup}
-          onRenameItem={onRenameItem}
-          promptGroups={promptGroups}
-          selectedMenuPath={selectedMenuPath}
-          onSelectMenu={onSelectMenu}
-        />
-      ))}
-      {node.items.map((item) => (
-        <ImageLexiconMenuButton
-          active={selectedMenuPath === item.menuPath}
-          count={countByTag.get(item.key) ?? 0}
-          depth={depth + 1}
-          key={item.menuPath}
-          label={item.label}
-          onClick={() => onSelectMenu(item.menuPath)}
-          onRename={(newLabel) => onRenameItem(node.path, item.key, newLabel)}
-        />
-      ))}
+      {expanded
+        ? node.children.map((child) => (
+            <PromptTagGroupNodeButton
+              countByTag={countByTag}
+              expandedGroupPaths={expandedGroupPaths}
+              key={child.path}
+              node={child}
+              onRenameGroup={onRenameGroup}
+              onRenameItem={onRenameItem}
+              promptGroups={promptGroups}
+              selectedMenuPath={selectedMenuPath}
+              onSelectMenu={onSelectMenu}
+              onToggleGroup={onToggleGroup}
+            />
+          ))
+        : null}
+      {expanded
+        ? node.items.map((item) => (
+            <ImageLexiconMenuButton
+              active={selectedMenuPath === item.menuPath}
+              count={countByTag.get(item.key) ?? 0}
+              depth={depth + 1}
+              key={item.menuPath}
+              label={item.label}
+              onClick={() => onSelectMenu(item.menuPath)}
+              onRename={(newLabel) => onRenameItem(node.path, item.key, newLabel)}
+            />
+          ))
+        : null}
     </>
   );
 }
@@ -6801,6 +6042,14 @@ type ImageItemNode = {
   label: string;
   menuPath: string;
 };
+
+function collectImageGroupPaths(nodes: readonly ImageGroupNode[]): string[] {
+  const paths: string[] = [];
+  for (const node of nodes) {
+    paths.push(node.path, ...collectImageGroupPaths(node.children));
+  }
+  return paths;
+}
 
 type ImageGroupNodeButtonProps = {
   node: ImageGroupNode;
@@ -6922,12 +6171,29 @@ type ImageLexiconMenuButtonProps = {
   active: boolean;
   count: number;
   depth: number;
+  expandable?: boolean;
+  expanded?: boolean;
   label: string;
   onClick: () => void;
   onRename?: (newLabel: string) => void;
+  /** Optional icon-only delete action, aligned on the same row as the label. */
+  onDelete?: () => void;
+  /** Optional icon-only add action (e.g. add category under a group header). */
+  onAdd?: () => void;
 };
 
-function ImageLexiconMenuButton({ active, count, depth, label, onClick, onRename }: ImageLexiconMenuButtonProps) {
+function ImageLexiconMenuButton({
+  active,
+  count,
+  depth,
+  expandable = false,
+  expanded = false,
+  label,
+  onClick,
+  onRename,
+  onDelete,
+  onAdd,
+}: ImageLexiconMenuButtonProps) {
   const [isEditing, setIsEditing] = useState(false);
 
   if (isEditing && onRename) {
@@ -6952,28 +6218,55 @@ function ImageLexiconMenuButton({ active, count, depth, label, onClick, onRename
 
   return (
     <button
+      aria-expanded={expandable ? expanded : undefined}
       aria-pressed={active}
-      className={`group grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border px-3 py-2 text-left text-sm outline-none transition-all hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-primary/25 ${
-        active
-          ? "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground shadow-elevated"
-          : "border-transparent text-muted hover:bg-panel hover:text-foreground"
-      }`}
+      className={`${lexiconTreeItemBaseClassName} ${getLexiconTreeItemStateClassName(active)}`}
       data-lexicon-menu-active={active ? "true" : undefined}
       style={{ paddingLeft: `${12 + depth * 16}px` }}
       type="button"
       onClick={onClick}
     >
       <span className="flex min-w-0 items-center gap-2">
-        {depth > 0 ? <ChevronRight className="shrink-0 text-muted" size={13} /> : null}
+        {expandable ? (
+          <ChevronRight
+            className={`shrink-0 text-muted transition-transform ${expanded ? "rotate-90" : ""}`}
+            size={13}
+          />
+        ) : depth > 0 ? (
+          <span className="size-[13px] shrink-0" aria-hidden="true" />
+        ) : null}
         <span className="truncate">{label}</span>
       </span>
-      <span className="flex items-center gap-1.5">
+      <span className="flex items-center gap-1">
+        {onAdd ? (
+          <span
+            role="button"
+            tabIndex={0}
+            aria-label="新增分类"
+            title="新增分类"
+            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted opacity-0 transition-opacity hover:bg-primary-soft hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+            onClick={(event) => {
+              event.stopPropagation();
+              event.preventDefault();
+              onAdd();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.stopPropagation();
+                event.preventDefault();
+                onAdd();
+              }
+            }}
+          >
+            <Plus size={12} />
+          </span>
+        ) : null}
         {onRename ? (
           <span
             role="button"
             tabIndex={0}
             aria-label="重命名"
-            className="inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted opacity-0 transition-opacity hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 group-hover:opacity-100"
+            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted opacity-0 transition-opacity hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 group-hover:opacity-100 group-focus-within:opacity-100"
             onClick={(event) => {
               event.stopPropagation();
               event.preventDefault();
@@ -6988,6 +6281,29 @@ function ImageLexiconMenuButton({ active, count, depth, label, onClick, onRename
             }}
           >
             <Pencil size={12} />
+          </span>
+        ) : null}
+        {onDelete ? (
+          <span
+            role="button"
+            tabIndex={0}
+            aria-label="删除自定义分类"
+            title="删除自定义分类"
+            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted opacity-0 transition-opacity hover:bg-danger-soft hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/35 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+            onClick={(event) => {
+              event.stopPropagation();
+              event.preventDefault();
+              onDelete();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.stopPropagation();
+                event.preventDefault();
+                onDelete();
+              }
+            }}
+          >
+            <Trash2 size={12} />
           </span>
         ) : null}
         <span className="rounded-md border border-border/70 bg-panel px-2 py-0.5 text-xs text-muted">{count}</span>
@@ -7253,66 +6569,6 @@ function ImageLexiconCapsule({
   );
 }
 
-function ParameterLexiconRow({
-  entry,
-  isBusy,
-  selected,
-  onChange,
-  onRemove,
-  onSelectedChange,
-}: ParameterLexiconRowProps) {
-  const [isEditing, setIsEditing] = useState(false);
-
-  return (
-    <div
-      className="grid gap-3 border-b border-border/70 bg-panel px-3 py-3 transition-colors last:border-b-0 hover:bg-background min-[980px]:grid-cols-[32px_minmax(12rem,1.15fr)_minmax(10rem,0.75fr)_minmax(14rem,1fr)_76px] min-[980px]:items-center"
-    >
-      <SelectionButton selected={selected} ariaLabel="选择参数记录" disabled={isBusy} onClick={onSelectedChange} />
-      {isEditing ? (
-        <>
-          <LexiconTextInput
-            ariaLabel="参数名称"
-            placeholder="参数名称"
-            value={entry.label}
-            onChange={(value) => onChange({ label: value })}
-          />
-          <LexiconTextInput
-            ariaLabel="变量名"
-            placeholder="变量名"
-            value={entry.variable}
-            onChange={(value) => onChange({ variable: value })}
-          />
-          <LexiconTextInput
-            ariaLabel="默认值"
-            placeholder="默认值"
-            value={entry.value}
-            onChange={(value) => onChange({ value })}
-          />
-        </>
-      ) : (
-        <>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-foreground">{entry.label || "未命名参数"}</p>
-            <p className="mt-1 truncate text-xs text-muted">{entry.group || "未分组"}</p>
-          </div>
-          <span className="min-w-0 truncate rounded-md border border-capsule-mist-border bg-capsule-mist px-2 py-1 text-xs text-capsule-mist-foreground">
-            {entry.variable || "未设置变量名"}
-          </span>
-          <span className="min-w-0 truncate text-sm text-muted">{entry.value || "未设置默认值"}</span>
-        </>
-      )}
-      <div className="flex items-center gap-1">
-        <IconButton
-          ariaLabel={isEditing ? "完成编辑参数" : "编辑参数"}
-          disabled={isBusy}
-          icon={isEditing ? <Check size={15} /> : <FileText size={15} />}
-          onClick={() => setIsEditing((current) => !current)}
-        />
-        <IconButton ariaLabel="删除参数" disabled={isBusy} icon={<Trash2 size={15} />} onClick={onRemove} />
-      </div>
-    </div>
-  );
-}
 
 type ImageLexiconRowProps = {
   entry: PromptImageLexiconEntry;
@@ -7494,63 +6750,30 @@ function IconButton({ ariaLabel, disabled = false, icon, onClick }: IconButtonPr
   );
 }
 
-function createTagDrafts(tags: string[]): TagEditorDraft[] {
-  return tags.map((tag, index) => ({
-    id: `${index}-${tag}`,
-    originalTag: tag,
-    label: tag,
-  }));
-}
-
-function moveDraft(drafts: TagEditorDraft[], draftId: string, direction: -1 | 1): TagEditorDraft[] {
-  const currentIndex = drafts.findIndex((draft) => draft.id === draftId);
-  const nextIndex = currentIndex + direction;
-
-  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= drafts.length) {
-    return drafts;
-  }
-
-  const nextDrafts = [...drafts];
-  const [draft] = nextDrafts.splice(currentIndex, 1);
-  nextDrafts.splice(nextIndex, 0, draft);
-
-  return nextDrafts;
-}
-
-function createPromptLexiconDrafts(
-  promptLexicons: PromptLexiconSettings | null,
-  tagDrafts: TagEditorDraft[],
-): PromptLexiconSettings {
-  if (promptLexicons) {
-    return {
-      parameters: normalizeParameterLexiconEntries(promptLexicons.parameters),
-      categories: normalizeImageLexiconEntries(promptLexicons.categories),
-      tags: normalizeTagImageLexiconEntries(promptLexicons.tags),
-    };
-  }
-
-  return createDefaultPromptLexiconSettings(tagDrafts.map((draft) => draft.label));
-}
-
-function createPromptParameterDrafts(
-  promptLexicons: PromptLexiconSettings | null,
-  popularTags: string[],
-  shouldNormalize: boolean,
-): PromptParameterLexiconEntry[] {
-  if (promptLexicons) {
-    return shouldNormalize
-      ? normalizeParameterLexiconEntries(promptLexicons.parameters)
-      : promptLexicons.parameters;
-  }
-
-  return createDefaultPromptLexiconSettings(popularTags).parameters;
-}
 
 function createPromptCategoryDrafts(
   promptLexicons: PromptLexiconSettings | null,
   popularTags: string[],
   shouldNormalize: boolean,
+  categoryTaxonomy?: import("../types/category").CategoryTaxonomy | null,
 ): PromptImageLexiconEntry[] {
+  // New taxonomy mode: always seed from system+custom taxonomy first.
+  const taxonomyEntries = taxonomyToLexiconFallback(categoryTaxonomy);
+  if (taxonomyEntries.length > 0) {
+    const fromLexicon = promptLexicons?.categories ?? [];
+    const merged = [...taxonomyEntries];
+    const seen = new Set(taxonomyEntries.map((entry) => normalizeLexiconItemKey(entry.label)));
+    for (const entry of fromLexicon) {
+      const key = normalizeLexiconItemKey(entry.label);
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(entry);
+    }
+    return shouldNormalize ? normalizeImageLexiconEntries(merged) : merged;
+  }
+
   if (promptLexicons) {
     return shouldNormalize
       ? normalizeImageLexiconEntries(promptLexicons.categories)
@@ -7560,45 +6783,52 @@ function createPromptCategoryDrafts(
   return createDefaultPromptLexiconSettings(popularTags).categories;
 }
 
+function taxonomyToLexiconFallback(
+  categoryTaxonomy?: CategoryTaxonomy | null,
+): PromptImageLexiconEntry[] {
+  const taxonomy =
+    categoryTaxonomy && categoryTaxonomy.nodes.length > 0
+      ? categoryTaxonomy
+      : createEmptyCategoryTaxonomy();
+  return taxonomyToLexiconCategories(taxonomy);
+}
+
 function createPromptTagImageDrafts(
   promptLexicons: PromptLexiconSettings | null,
   popularTags: string[],
   shouldNormalize: boolean,
 ): PromptImageLexiconEntry[] {
-  if (promptLexicons) {
-    return shouldNormalize
-      ? normalizeTagImageLexiconEntries(promptLexicons.tags)
-      : promptLexicons.tags;
+  // Prefer the saved tag directory. Also fold in live material tags so AI-recognized
+  // labels appear under 标签浏览 even before the next lexicon autosave settles.
+  const savedTags = promptLexicons?.tags ?? [];
+  const baseTags = shouldNormalize ? normalizeTagImageLexiconEntries(savedTags) : savedTags;
+  const knownKeys = new Set(baseTags.map((entry) => normalizeLexiconItemKey(entry.label)).filter(Boolean));
+  const derivedFromMaterials = popularTags
+    .map((label) => label.trim())
+    .filter((label) => {
+      const key = normalizeLexiconItemKey(label);
+      return Boolean(key) && !knownKeys.has(key);
+    })
+    .map((label) => createDerivedTagLexiconEntry(label));
+
+  if (derivedFromMaterials.length === 0) {
+    return baseTags;
   }
 
-  return createDefaultPromptLexiconSettings(popularTags).tags;
+  return shouldNormalize
+    ? normalizeTagImageLexiconEntries([...baseTags, ...derivedFromMaterials])
+    : [...baseTags, ...derivedFromMaterials];
 }
 
-function createBlankParameterEntry(
-  source: Partial<Pick<PromptParameterLexiconEntry, "sourcePromptId" | "sourcePromptTitle">> = {},
-  group = defaultParameterGroupLabel,
-  draft: Partial<Pick<PromptParameterLexiconEntry, "label" | "variable">> = {},
-  value = "新参数",
-): PromptParameterLexiconEntry {
-  return {
-    id: createClientLexiconId("parameter"),
-    group: normalizePromptParameterGroupPath(group || defaultParameterGroupLabel),
-    label: draft.label ?? "新参数",
-    sourcePromptId: source.sourcePromptId ?? null,
-    sourcePromptTitle: source.sourcePromptTitle ?? null,
-    variable: draft.variable ?? "customParameter",
-    value,
-  };
-}
-
-function createBlankImageEntry(
+  function createBlankImageEntry(
   kind: "category" | "tag",
   draft: Partial<Pick<PromptImageLexiconEntry, "group" | "label" | "parentId">> = {},
 ): PromptImageLexiconEntry {
+  const label = draft.label ?? (kind === "category" ? "新分类" : "新标签");
   return {
-    id: createClientLexiconId(kind),
-    group: draft.group ?? (kind === "category" ? defaultCategoryGroupLabel : defaultTagGroupLabel),
-    label: draft.label ?? (kind === "category" ? "新分类" : "新标签"),
+    id: kind === "category" ? buildCustomCategoryId(label) : `custom-tag-${createClientLexiconId("tag")}`,
+    group: draft.group ?? (kind === "category" ? "自定义分类" : defaultTagGroupLabel),
+    label,
     description: "",
     parentId: draft.parentId ?? null,
     imageFileName: null,
@@ -7609,43 +6839,6 @@ function createClientLexiconId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function normalizeParameterLexiconEntries(entries: readonly PromptParameterLexiconEntry[]): PromptParameterLexiconEntry[] {
-  const normalizedEntries: PromptParameterLexiconEntry[] = [];
-  const entriesByKey = new Map<string, PromptParameterLexiconEntry>();
-  const usedIds = new Set<string>();
-
-  for (const entry of entries) {
-    const label = entry.label.trim();
-    const variable = normalizeParameterVariableName(entry.variable);
-
-    if (!label || !variable) {
-      continue;
-    }
-
-    const id = getUniqueLexiconId(entry.id, usedIds, "parameter");
-    const normalizedEntry: PromptParameterLexiconEntry = {
-      id,
-      group: resolveParameterEntryGroup(entry),
-      label,
-      sourcePromptId: normalizeOptionalLexiconValue(entry.sourcePromptId),
-      sourcePromptTitle: normalizeOptionalLexiconValue(entry.sourcePromptTitle),
-      variable,
-      value: entry.value.trim(),
-    };
-    const duplicateKey = getParameterEntryDedupKey(normalizedEntry);
-    const existingEntry = entriesByKey.get(duplicateKey);
-
-    if (existingEntry) {
-      mergeParameterEntrySource(existingEntry, normalizedEntry);
-      continue;
-    }
-
-    entriesByKey.set(duplicateKey, normalizedEntry);
-    normalizedEntries.push(normalizedEntry);
-  }
-
-  return normalizedEntries;
-}
 
 function normalizeImageLexiconEntries(entries: readonly PromptImageLexiconEntry[]): PromptImageLexiconEntry[] {
   const normalizedEntries: PromptImageLexiconEntry[] = [];
@@ -7709,12 +6902,6 @@ function normalizeTagImageLexiconEntries(entries: readonly PromptImageLexiconEnt
   return normalizedEntries;
 }
 
-function normalizeParameterVariableName(value: string): string {
-  const variable = value.trim().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32);
-  const sectionKey = getPromptSectionKeyByVariable(variable);
-
-  return sectionKey ? promptSectionMeta[sectionKey].variable : variable;
-}
 
 function getUniqueLexiconId(id: string, usedIds: Set<string>, prefix: string): string {
   const normalizedId = id.trim() || createClientLexiconId(prefix);
@@ -7734,394 +6921,11 @@ function getUniqueLexiconId(id: string, usedIds: Set<string>, prefix: string): s
   return nextId;
 }
 
-function matchesLexiconQuery(entry: PromptLexiconEntry, query: string): boolean {
-  const normalizedQuery = query.trim().toLowerCase();
-
-  if (!normalizedQuery) {
-    return true;
-  }
-
-  return getLexiconSearchText(entry).toLowerCase().includes(normalizedQuery);
-}
-
-function getLexiconSearchText(entry: PromptLexiconEntry): string {
-  if (isPromptParameterLexiconEntry(entry)) {
-    return `${resolveParameterEntryGroup(entry)} ${entry.label} ${entry.variable} ${entry.value} ${entry.sourcePromptTitle ?? ""}`;
-  }
-
-  return `${entry.group} ${entry.label} ${entry.description}`;
-}
-
-type ParameterSourceOption = {
-  label: string;
-  sourcePromptId?: string | null;
-  sourcePromptTitle?: string | null;
-  value: string;
-};
-
-function buildParameterSourceOptions(entries: readonly PromptParameterLexiconEntry[]): ParameterSourceOption[] {
-  const sourceOptions: ParameterSourceOption[] = [
-    { label: "全部提示词", value: allParameterSourcesValue },
-    { label: "通用词库", value: globalParameterSourceValue },
-  ];
-  const usedValues = new Set(sourceOptions.map((option) => option.value));
-
-  for (const entry of entries) {
-    const sourcePromptId = normalizeOptionalLexiconValue(entry.sourcePromptId);
-    const sourcePromptTitle = normalizeOptionalLexiconValue(entry.sourcePromptTitle);
-
-    if (!sourcePromptId && !sourcePromptTitle) {
-      continue;
-    }
-
-    const value = createParameterSourceValue(sourcePromptId, sourcePromptTitle);
-
-    if (usedValues.has(value)) {
-      continue;
-    }
-
-    usedValues.add(value);
-    sourceOptions.push({
-      label: sourcePromptTitle || "未命名提示词",
-      sourcePromptId,
-      sourcePromptTitle,
-      value,
-    });
-  }
-
-  return sourceOptions;
-}
-
-function matchesParameterSource(entry: PromptParameterLexiconEntry, selectedSource: string): boolean {
-  if (selectedSource === allParameterSourcesValue) {
-    return true;
-  }
-
-  const sourcePromptId = normalizeOptionalLexiconValue(entry.sourcePromptId);
-  const sourcePromptTitle = normalizeOptionalLexiconValue(entry.sourcePromptTitle);
-
-  if (selectedSource === globalParameterSourceValue) {
-    return !sourcePromptId && !sourcePromptTitle;
-  }
-
-  return createParameterSourceValue(sourcePromptId, sourcePromptTitle) === selectedSource;
-}
-
-function getParameterSourceDraft(
-  options: readonly ParameterSourceOption[],
-  selectedSource: string,
-): Partial<Pick<PromptParameterLexiconEntry, "sourcePromptId" | "sourcePromptTitle">> {
-  const option = options.find((item) => item.value === selectedSource);
-
-  if (!option || option.value === allParameterSourcesValue || option.value === globalParameterSourceValue) {
-    return {};
-  }
-
-  return {
-    sourcePromptId: option.sourcePromptId ?? null,
-    sourcePromptTitle: option.sourcePromptTitle ?? null,
-  };
-}
-
-function getParameterGroupDraft(selectedGroupPath: string): string {
-  if (selectedGroupPath === allParameterGroupsValue) {
-    return defaultParameterGroupLabel;
-  }
-
-  const parsedItem = parseParameterItemMenuValue(selectedGroupPath);
-  const groupPath = parsedItem?.groupPath ?? selectedGroupPath;
-  const segments = splitParameterGroupPath(groupPath);
-
-  if (segments.length === 0 || segments[0] === ungroupedParameterGroupLabel) {
-    return defaultParameterGroupLabel;
-  }
-
-  return segments.join(" / ");
-}
-
-function getParameterItemDraft(
-  selectedGroupPath: string,
-  entries: readonly PromptParameterLexiconEntry[],
-): Partial<Pick<PromptParameterLexiconEntry, "label" | "variable">> {
-  const parsedItem = parseParameterItemMenuValue(selectedGroupPath);
-
-  if (!parsedItem) {
-    return {};
-  }
-
-  const matchedEntry = entries.find(
-    (entry) => isExactParameterGroupMatch(entry, parsedItem.groupPath) && getParameterItemKey(entry) === parsedItem.itemKey,
-  );
-
-  if (!matchedEntry) {
-    return {};
-  }
-
-  return {
-    label: matchedEntry.label,
-    variable: matchedEntry.variable,
-  };
-}
-
-function buildParameterCapsuleSections(entries: readonly PromptParameterLexiconEntry[]): ParameterCapsuleSection[] {
-  const sectionMap = new Map<string, ParameterCapsuleSection>();
-
-  for (const entry of entries) {
-    const groupPath = getParameterGroupSegments(entry).join(" / ");
-    const itemKey = getParameterItemKey(entry);
-    const sectionId = `${groupPath}|${itemKey}`;
-    let section = sectionMap.get(sectionId);
-
-    if (!section) {
-      section = {
-        entries: [],
-        group: groupPath,
-        id: sectionId,
-        subtitle: groupPath || ungroupedParameterGroupLabel,
-        title: getParameterItemLabel(entry),
-        variable: entry.variable.trim(),
-      };
-      sectionMap.set(sectionId, section);
-    }
-
-    section.entries.push(entry);
-  }
-
-  return [...sectionMap.values()]
-    .map((section) => ({
-      ...section,
-      entries: [...section.entries].sort(compareParameterCapsuleEntry),
-    }))
-    .sort(
-      (left, right) =>
-        left.subtitle.localeCompare(right.subtitle, "zh-Hans-CN") ||
-        left.title.localeCompare(right.title, "zh-Hans-CN") ||
-        left.variable.localeCompare(right.variable, "zh-Hans-CN"),
-    );
-}
-
-function isDisplayableParameterEntry(entry: PromptParameterLexiconEntry): boolean {
-  return Boolean(entry.label.trim() && entry.variable.trim() && isMeaningfulParameterValue(entry.value));
-}
-
-function isMeaningfulParameterValue(value: string): boolean {
-  const normalizedValue = value.trim().toLowerCase();
-
-  if (!normalizedValue) {
-    return false;
-  }
-
-  return !(
-    /^未(?:设置|指定|提供|识别)/u.test(normalizedValue) ||
-    ["未设置具体参数", "未设置默认值", "未设置参数", "暂无", "无", "none", "n/a", "null", "-"].includes(
-      normalizedValue,
-    )
-  );
-}
-
-function compareParameterCapsuleEntry(left: PromptParameterLexiconEntry, right: PromptParameterLexiconEntry): number {
-  const leftValue = left.value.trim();
-  const rightValue = right.value.trim();
-
-  return leftValue.localeCompare(rightValue, "zh-Hans-CN") || left.id.localeCompare(right.id);
-}
-
-function matchesParameterGroup(entry: PromptParameterLexiconEntry, selectedGroupPath: string): boolean {
-  if (selectedGroupPath === allParameterGroupsValue) {
-    return true;
-  }
-
-  const parsedItem = parseParameterItemMenuValue(selectedGroupPath);
-
-  if (parsedItem) {
-    return isExactParameterGroupMatch(entry, parsedItem.groupPath) && getParameterItemKey(entry) === parsedItem.itemKey;
-  }
-
-  const selectedSegments = splitParameterGroupPath(selectedGroupPath);
-  const entrySegments = getParameterGroupSegments(entry);
-
-  return selectedSegments.every((segment, index) => entrySegments[index] === segment);
-}
-
-function getParameterGroupDisplayLabel(groupPath: string, entries: readonly PromptParameterLexiconEntry[]): string {
-  if (groupPath === allParameterGroupsValue) {
-    return "全部参数";
-  }
-
-  const parsedItem = parseParameterItemMenuValue(groupPath);
-
-  if (parsedItem) {
-    const matchedEntry = entries.find(
-      (entry) => isExactParameterGroupMatch(entry, parsedItem.groupPath) && getParameterItemKey(entry) === parsedItem.itemKey,
-    );
-    const label = matchedEntry?.label || parsedItem.itemKey.split("|")[0] || "未命名参数";
-    const groupLabel = getParameterGroupDisplayLabel(parsedItem.groupPath, entries);
-    return `${groupLabel} / ${label}`;
-  }
-
-  const segments = splitParameterGroupPath(groupPath);
-  return segments.length > 0 ? segments.join(" / ") : ungroupedParameterGroupLabel;
-}
-
-function buildParameterGroupTree(entries: readonly PromptParameterLexiconEntry[]): ParameterGroupNode[] {
-  const rootNodes: ParameterGroupNode[] = [];
-
-  for (const entry of entries) {
-    let currentNodes = rootNodes;
-    const pathSegments: string[] = [];
-
-    for (const segment of getParameterGroupSegments(entry)) {
-      pathSegments.push(segment);
-      const path = pathSegments.join(" / ");
-      let node = currentNodes.find((item) => item.label === segment);
-
-      if (!node) {
-        node = {
-          children: [],
-          count: 0,
-          items: [],
-          label: segment,
-          path,
-        };
-        currentNodes.push(node);
-      }
-
-      node.count += 1;
-      currentNodes = node.children;
-    }
-
-    const groupPath = getParameterGroupSegments(entry).join(" / ");
-    const groupNode = findParameterGroupNode(rootNodes, groupPath);
-    const itemKey = getParameterItemKey(entry);
-    let itemNode = groupNode?.items.find((item) => item.key === itemKey);
-
-    if (groupNode && !itemNode) {
-      itemNode = {
-        count: 0,
-        key: itemKey,
-        label: getParameterItemLabel(entry),
-        menuPath: createParameterItemMenuValue(groupPath, itemKey),
-        variable: entry.variable,
-      };
-      groupNode.items.push(itemNode);
-    }
-
-    if (itemNode) {
-      itemNode.count += 1;
-    }
-  }
-
-  return sortParameterGroupNodes(rootNodes);
-}
-
-function sortParameterGroupNodes(nodes: ParameterGroupNode[]): ParameterGroupNode[] {
-  return nodes
-    .map((node) => ({
-      ...node,
-      children: sortParameterGroupNodes(node.children),
-      items: sortParameterItemNodes(node.items),
-    }))
-    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, "zh-Hans-CN"));
-}
-
-function sortParameterItemNodes(nodes: ParameterItemNode[]): ParameterItemNode[] {
-  return [...nodes].sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, "zh-Hans-CN"));
-}
-
-function getParameterGroupSegments(entry: PromptParameterLexiconEntry): string[] {
-  const segments = splitParameterGroupPath(resolveParameterEntryGroup(entry));
-  return segments.length > 0 ? segments : [ungroupedParameterGroupLabel];
-}
-
-function resolveParameterEntryGroup(entry: Pick<PromptParameterLexiconEntry, "group" | "variable">): string {
-  const sectionKey = getPromptSectionKeyByVariable(entry.variable);
-
-  if (sectionKey) {
-    return getPromptParameterGroup(sectionKey);
-  }
-
-  return normalizePromptParameterGroupPath(entry.group || defaultParameterGroupLabel);
-}
-
-function findParameterGroupNode(nodes: readonly ParameterGroupNode[], groupPath: string): ParameterGroupNode | null {
-  for (const node of nodes) {
-    if (node.path === groupPath) {
-      return node;
-    }
-
-    const childNode = findParameterGroupNode(node.children, groupPath);
-
-    if (childNode) {
-      return childNode;
-    }
-  }
-
-  return null;
-}
-
-function isExactParameterGroupMatch(entry: PromptParameterLexiconEntry, groupPath: string): boolean {
-  const selectedSegments = splitParameterGroupPath(groupPath);
-  const entrySegments = getParameterGroupSegments(entry);
-
-  return selectedSegments.length === entrySegments.length && selectedSegments.every((segment, index) => entrySegments[index] === segment);
-}
-
-function createParameterItemMenuValue(groupPath: string, itemKey: string): string {
-  return `${parameterItemMenuPrefix}${encodeURIComponent(groupPath)}|${encodeURIComponent(itemKey)}`;
-}
-
-function parseParameterItemMenuValue(menuPath: string): { groupPath: string; itemKey: string } | null {
-  if (!menuPath.startsWith(parameterItemMenuPrefix)) {
-    return null;
-  }
-
-  const payload = menuPath.slice(parameterItemMenuPrefix.length);
-  const [encodedGroupPath, encodedItemKey] = payload.split("|");
-
-  if (!encodedGroupPath || !encodedItemKey) {
-    return null;
-  }
-
-  return {
-    groupPath: decodeURIComponent(encodedGroupPath),
-    itemKey: decodeURIComponent(encodedItemKey),
-  };
-}
-
-function getParameterItemKey(entry: PromptParameterLexiconEntry): string {
-  return normalizeLexiconItemKey(getParameterItemLabel(entry)) || "unnamed-parameter";
-}
-
-function getParameterItemLabel(entry: PromptParameterLexiconEntry): string {
-  return entry.label.trim() || entry.variable.trim() || "未命名参数";
-}
-
 function normalizeLexiconItemKey(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("zh-Hans-CN");
 }
 
-function getParameterEntryDedupKey(entry: PromptParameterLexiconEntry): string {
-  const groupKey = getParameterGroupSegments(entry).join(" / ").toLowerCase();
-  const labelKey = normalizeLexiconItemKey(entry.label);
-  const valueKey = normalizeLexiconItemKey(entry.value);
 
-  return `${groupKey}|${labelKey}|${valueKey}`;
-}
-
-function mergeParameterEntrySource(
-  targetEntry: PromptParameterLexiconEntry,
-  duplicateEntry: PromptParameterLexiconEntry,
-): void {
-  const targetSourceId = normalizeOptionalLexiconValue(targetEntry.sourcePromptId);
-  const targetSourceTitle = normalizeOptionalLexiconValue(targetEntry.sourcePromptTitle);
-  const duplicateSourceId = normalizeOptionalLexiconValue(duplicateEntry.sourcePromptId);
-  const duplicateSourceTitle = normalizeOptionalLexiconValue(duplicateEntry.sourcePromptTitle);
-
-  if (targetSourceId !== duplicateSourceId || targetSourceTitle !== duplicateSourceTitle) {
-    targetEntry.sourcePromptId = null;
-    targetEntry.sourcePromptTitle = null;
-  }
-}
 
 function splitParameterGroupPath(groupPath: string): string[] {
   return groupPath
@@ -8130,38 +6934,6 @@ function splitParameterGroupPath(groupPath: string): string[] {
     .filter(Boolean);
 }
 
-function renameParameterGroupInDrafts(
-  drafts: readonly PromptParameterLexiconEntry[],
-  oldPath: string,
-  newLabel: string,
-): PromptParameterLexiconEntry[] {
-  const oldSegments = splitParameterGroupPath(oldPath);
-  if (oldSegments.length === 0) {
-    return [...drafts];
-  }
-  const newSegments = [...oldSegments.slice(0, -1), newLabel];
-
-  return drafts.map((entry) => {
-    if (getPromptSectionKeyByVariable(entry.variable)) {
-      return entry;
-    }
-    const entrySegments = splitParameterGroupPath(
-      normalizePromptParameterGroupPath(entry.group || defaultParameterGroupLabel),
-    );
-    if (entrySegments.length < oldSegments.length) {
-      return entry;
-    }
-    const isUnderOldPath = oldSegments.every((segment, index) => entrySegments[index] === segment);
-    if (!isUnderOldPath) {
-      return entry;
-    }
-    const remainingSegments = entrySegments.slice(oldSegments.length);
-    const nextGroup = remainingSegments.length > 0
-      ? [...newSegments, ...remainingSegments].join(" / ")
-      : newSegments.join(" / ");
-    return { ...entry, group: nextGroup };
-  });
-}
 
 function renameImageGroupInDrafts(
   drafts: readonly PromptImageLexiconEntry[],
@@ -8557,6 +7329,70 @@ function buildImageCategoryTree(entries: readonly PromptImageLexiconEntry[]): Im
   return nodes;
 }
 
+/** Build group → categories tree, nesting children via parentId under their parents. */
+function buildGroupedCategoryTree(entries: readonly PromptImageLexiconEntry[]): ImageCategoryNode[] {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const childrenByParentId = new Map<string, PromptImageLexiconEntry[]>();
+  const rootsByGroup = new Map<string, PromptImageLexiconEntry[]>();
+
+  for (const entry of entries) {
+    const parentId = normalizeOptionalLexiconValue(entry.parentId);
+    if (parentId && parentId !== entry.id && byId.has(parentId)) {
+      const children = childrenByParentId.get(parentId) ?? [];
+      children.push(entry);
+      childrenByParentId.set(parentId, children);
+      continue;
+    }
+    const group = (entry.group || defaultCategoryGroupLabel).trim() || defaultCategoryGroupLabel;
+    const list = rootsByGroup.get(group) ?? [];
+    list.push(entry);
+    rootsByGroup.set(group, list);
+  }
+
+  for (const children of childrenByParentId.values()) {
+    children.sort(compareImageLexiconEntries);
+  }
+  for (const roots of rootsByGroup.values()) {
+    roots.sort(compareImageLexiconEntries);
+  }
+
+  function buildEntryNode(entry: PromptImageLexiconEntry, depth: number, lineage: Set<string>): ImageCategoryNode {
+    const nextLineage = new Set(lineage);
+    nextLineage.add(entry.id);
+    const children = (childrenByParentId.get(entry.id) ?? [])
+      .filter((child) => !nextLineage.has(child.id))
+      .map((child) => buildEntryNode(child, depth + 1, nextLineage));
+
+    return {
+      children,
+      count: 1 + children.reduce((total, child) => total + child.count, 0),
+      depth,
+      entry,
+    };
+  }
+
+  return Array.from(rootsByGroup.entries())
+    .sort(([a], [b]) => compareCategoryGroupPriority(a, b))
+    .map(([group, rootEntries]) => {
+      const groupId = `group:${normalizeLexiconItemKey(group) || "ungrouped"}`;
+      const children = rootEntries.map((entry) => buildEntryNode(entry, 1, new Set<string>()));
+
+      return {
+        children,
+        count: children.reduce((total, child) => total + child.count, 0),
+        depth: 0,
+        entry: {
+          id: groupId,
+          group,
+          label: group,
+          description: "",
+          parentId: null,
+          imageFileName: null,
+        },
+      };
+    });
+}
+
 function compareImageLexiconEntries(left: PromptImageLexiconEntry, right: PromptImageLexiconEntry): number {
   return (left.label || left.group).localeCompare(right.label || right.group, "zh-Hans-CN");
 }
@@ -8601,9 +7437,9 @@ function buildPromptGroupCountByCategory(
 
   for (const group of groups) {
     const labels = labelsCache?.get(group.id) ?? getPromptGroupCategoryLabels(group);
-    const groupCategoryKeys = new Set(labels.map(normalizeLexiconItemKey).filter(Boolean));
+    const categoryKeys = new Set(labels.map(normalizeLexiconItemKey).filter(Boolean));
 
-    for (const categoryKey of groupCategoryKeys) {
+    for (const categoryKey of categoryKeys) {
       countByCategory.set(categoryKey, (countByCategory.get(categoryKey) ?? 0) + 1);
     }
   }
@@ -8616,23 +7452,12 @@ function mergeCategoryLexiconEntriesWithPromptGroups(
   groups: readonly PromptImageGroup[],
   labelsCache?: ReadonlyMap<string, string[]>,
 ): PromptImageLexiconEntry[] {
-  const mergedEntries = [...entries];
-  const existingLabelKeys = new Set(entries.map((entry) => normalizeLexiconItemKey(entry.label)).filter(Boolean));
-
-  for (const group of groups) {
-    for (const label of (labelsCache?.get(group.id) ?? getPromptGroupCategoryLabels(group))) {
-      const labelKey = normalizeLexiconItemKey(label);
-
-      if (!labelKey || existingLabelKeys.has(labelKey)) {
-        continue;
-      }
-
-      existingLabelKeys.add(labelKey);
-      mergedEntries.push(createDerivedCategoryLexiconEntry(label));
-    }
-  }
-
-  return mergedEntries;
+  // Do NOT invent custom categories from freeform item.category labels.
+  // That re-filled「自定义分类」with residual names (创意 / 图表 / 即梦AI …).
+  // Taxonomy + user-created customs are the only category menu sources.
+  void groups;
+  void labelsCache;
+  return [...entries];
 }
 
 function createDerivedCategoryLexiconEntry(label: string): PromptImageLexiconEntry {
@@ -8673,33 +7498,51 @@ function mergeTagLexiconEntriesWithPromptGroups(
   groups: readonly PromptImageGroup[],
   labelsCache?: ReadonlyMap<string, string[]>,
 ): PromptImageLexiconEntry[] {
-  const mergedEntries = [...entries];
-  const existingLabelKeys = new Set(entries.map((entry) => normalizeLexiconItemKey(entry.label)).filter(Boolean));
+  // Keep every used tag visible in its semantic group. Older versions collapsed
+  // scene, material, pose and composition labels into one fun-recipe bucket.
+  void groups;
+  void labelsCache;
+  const categoryLabelKeys = new Set(
+    photographyCategoryLabels.map((label) => normalizeLexiconItemKey(label)).filter(Boolean),
+  );
+  const cleaned = normalizeTagImageLexiconEntries(
+    entries.filter((entry) => {
+      const key = normalizeLexiconItemKey(entry.label);
+      return Boolean(key) && !categoryLabelKeys.has(key);
+    }),
+  );
 
+  // Build used keys from current groups for orphan hiding.
+  const usedKeys = new Set<string>();
   for (const group of groups) {
-    for (const label of (labelsCache?.get(group.id) ?? getPromptGroupTagLabels(group))) {
-      const labelKey = normalizeLexiconItemKey(label);
-
-      if (!labelKey || existingLabelKeys.has(labelKey)) {
-        continue;
+    for (const label of labelsCache?.get(group.id) ?? getPromptGroupTagLabels(group)) {
+      const key = normalizeLexiconItemKey(label);
+      if (key) {
+        usedKeys.add(key);
       }
-
-      existingLabelKeys.add(labelKey);
-      mergedEntries.push(createDerivedTagLexiconEntry(label));
     }
   }
 
-  return normalizeTagImageLexiconEntries(mergedEntries);
+  return cleaned.filter(
+    (entry) =>
+      entry.id.startsWith("custom-tag-") ||
+      usedKeys.size === 0 ||
+      usedKeys.has(normalizeLexiconItemKey(entry.label)),
+  );
 }
 
 function createDerivedTagLexiconEntry(label: string): PromptImageLexiconEntry {
   const normalizedLabel = label.trim();
+  // Never promote formal category names into the tag lexicon.
+  const isCategoryLike = photographyCategoryLabels.some(
+    (category) => normalizeLexiconItemKey(category) === normalizeLexiconItemKey(normalizedLabel),
+  );
 
   return {
     id: `derived-tag-${normalizeLexiconItemKey(normalizedLabel)}`,
-    group: getPromptTagGroup(normalizedLabel, defaultTagGroupLabel),
+    group: isCategoryLike ? defaultTagGroupLabel : getPromptTagGroup(normalizedLabel, defaultTagGroupLabel),
     label: normalizedLabel,
-    description: "",
+    description: isCategoryLike ? "已从分类名中隔离" : "",
     parentId: null,
     imageFileName: null,
   };
@@ -8758,13 +7601,13 @@ function countPromptGroupsForCategoryMenu(
   selectedMenuPath: string,
   labelsCache?: ReadonlyMap<string, string[]>,
 ): number {
-  const categoryKeys = getSelectedCategoryLabelKeys(entries, selectedMenuPath);
+  const selection = getSelectedCategorySelection(entries, selectedMenuPath);
 
-  if (categoryKeys === null) {
+  if (selection === null) {
     return groups.length;
   }
 
-  return groups.filter((group) => (labelsCache?.get(group.id) ?? getPromptGroupCategoryLabels(group)).some((label) => categoryKeys.has(normalizeLexiconItemKey(label))))
+  return groups.filter((group) => promptGroupMatchesCategorySelection(group, selection, labelsCache))
     .length;
 }
 
@@ -8785,30 +7628,18 @@ function countPromptGroupsForTagMenu(
 }
 
 function shouldAnalyzePromptGroupCategory(group: PromptImageGroup): boolean {
-  return getPromptGroupCategoryLabels(group).length < 3;
+  // Analyze when the primary item has no formal category or secondary genre yet.
+  return getPromptGroupCategoryLabels(group).length === 0;
 }
 
 function shouldAnalyzePromptGroupTags(group: PromptImageGroup): boolean {
-  return getPromptGroupTagLabels(group).length < maxBatchAiTagCount;
-}
-
-function getPromptGroupCategoryLabels(group: PromptImageGroup): string[] {
-  const knownCategoryKeys = new Map(photographyCategoryLabels.map((label) => [normalizeLexiconItemKey(label), label]));
-  const labels: string[] = [];
-  const seenKeys = new Set<string>();
-
-  for (const item of group.items) {
-    addPromptGroupCategoryLabel(labels, seenKeys, item.category, true, knownCategoryKeys);
-
-    for (const tag of item.tags) {
-      addPromptGroupCategoryLabel(labels, seenKeys, tag, false, knownCategoryKeys);
-    }
-  }
-
-  return labels;
+  // Analyze when the group has few concrete (non-category) tags left.
+  return getPromptGroupTagLabels(group).length < Math.min(5, maxBatchAiTagCount);
 }
 
 function getPromptGroupTagLabels(group: PromptImageGroup): string[] {
+  // Prompt cards already run sanitizePromptTags in toPromptCardData — reuse those
+  // tags here. Re-sanitizing every group on each menu open was ~3.6s of main-thread work.
   const labels: string[] = [];
   const seenKeys = new Set<string>();
 
@@ -8816,11 +7647,9 @@ function getPromptGroupTagLabels(group: PromptImageGroup): string[] {
     for (const tag of item.tags) {
       const label = tag.trim();
       const key = normalizeLexiconItemKey(label);
-
-      if (!key || seenKeys.has(key)) {
+      if (!key || key === normalizeLexiconItemKey("未分类") || seenKeys.has(key)) {
         continue;
       }
-
       seenKeys.add(key);
       labels.push(label);
     }
@@ -8829,70 +7658,199 @@ function getPromptGroupTagLabels(group: PromptImageGroup): string[] {
   return labels;
 }
 
-function addPromptGroupCategoryLabel(
-  labels: string[],
-  seenKeys: Set<string>,
-  label: string,
-  allowCustomLabel: boolean,
-  knownCategoryKeys: ReadonlyMap<string, string>,
-): void {
-  const normalizedKey = normalizeLexiconItemKey(label);
-
-  if (!normalizedKey || normalizedKey === normalizeLexiconItemKey("未分类")) {
-    return;
-  }
-
-  const resolvedLabel = knownCategoryKeys.get(normalizedKey) ?? (allowCustomLabel ? label.trim() : "");
-  const resolvedKey = normalizeLexiconItemKey(resolvedLabel);
-
-  if (!resolvedLabel || seenKeys.has(resolvedKey)) {
-    return;
-  }
-
-  seenKeys.add(resolvedKey);
-  labels.push(resolvedLabel);
-}
-
 function buildPromptGroupCategoryPatch(
   item: PromptCardData,
-  analysis: { primaryCategory: string; suggestedCategories: string[] },
-): Pick<LibraryItem, "category" | "tags"> | null {
-  const nextCategories = normalizeBatchCategorySuggestions([
-    ...analysis.suggestedCategories,
-    analysis.primaryCategory,
-  ]).slice(0, 3);
+  analysis: {
+    primaryCategory: string;
+    suggestedCategories: string[];
+    taxonomyPrimaryCategoryId?: string | null;
+    taxonomySuggestions?: Array<{ categoryId: string; confidence: number }>;
+    taxonomyBand?: "high" | "mid" | "low" | "none";
+  },
+  taxonomy?: CategoryTaxonomy | null,
+): Partial<LibraryItem> | null {
+  const suggestionIds = Array.isArray(analysis.taxonomySuggestions)
+    ? analysis.taxonomySuggestions
+        .map((suggestion) => suggestion.categoryId)
+        .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+    : [];
+
+  const taxonomyId = analysis.taxonomyPrimaryCategoryId ?? suggestionIds[0] ?? null;
+  if (taxonomyId && taxonomy) {
+    const name = resolveCategoryName(taxonomy, taxonomyId, analysis.primaryCategory);
+    if (!name || name === "未分类") {
+      return null;
+    }
+
+    const orderedNames = dedupeExclusiveGenreLabels([
+      name,
+      ...suggestionIds
+        .filter((id) => id !== taxonomyId)
+        .map((id) => resolveCategoryName(taxonomy, id, ""))
+        .filter(Boolean),
+    ]);
+    const orderedIds = orderedNames
+      .map((label) => resolveCategoryIdFromLegacyName(taxonomy, label))
+      .filter((id): id is string => Boolean(id));
+    // 只新增不替换：素材已有主分类时保留原主分类，AI 结果全部作为次分类追加。
+    const hasExistingCategory =
+      typeof item.category === "string" && item.category.trim() && item.category.trim() !== "未分类";
+    const primaryId = hasExistingCategory ? item.categoryId ?? orderedIds[0] ?? taxonomyId : orderedIds[0] ?? taxonomyId;
+    const primaryName = hasExistingCategory ? item.category!.trim() : orderedNames[0] ?? name;
+    // 次分类只写 genreIds。绝不能塞进 tags —— saveItem 会对 tags 跑标签清洗
+    // （normalizeConcretePromptTags），分类名会被整体剥掉，导致次分类存不住。
+    const genreIds = mergeAnalysisLabelsWithFitCap({
+      existing: item.genreIds ?? [],
+      incoming: orderedIds,
+      maxCount: maxAiCategoryCount,
+      protectedCount: 1,
+    });
+    const currentGenreKey = (item.genreIds ?? []).join("|");
+    const nextGenreKey = genreIds.join("|");
+
+    if (
+      item.categoryId === primaryId &&
+      normalizeLexiconItemKey(item.category ?? "") === normalizeLexiconItemKey(primaryName) &&
+      currentGenreKey === nextGenreKey
+    ) {
+      return null;
+    }
+
+    return {
+      category: primaryName,
+      categoryId: primaryId,
+      genreIds,
+      categorySource: "ai",
+      categoryConfidence:
+        analysis.taxonomyBand === "high" ? 0.96 : analysis.taxonomyBand === "mid" ? 0.8 : 0.65,
+    };
+  }
+
+  const nextCategories = dedupeExclusiveGenreLabels(
+    normalizeBatchCategorySuggestions([
+      analysis.primaryCategory,
+      ...analysis.suggestedCategories,
+    ]),
+  ).slice(0, maxAiCategoryCount);
 
   if (nextCategories.length === 0) {
     return null;
   }
 
-  const category = nextCategories[0];
-  const tags = uniqueNormalizedLabels([...item.tags, ...nextCategories.slice(1)]);
+  // 只新增不替换：素材已有主分类时保留原主分类，AI 结果全部作为次分类追加。
+  const hasExistingLabel =
+    typeof item.category === "string" && item.category.trim() && item.category.trim() !== "未分类";
+  const category = hasExistingLabel ? item.category!.trim() : nextCategories[0];
+  const resolvedIds = nextCategories
+    .map((label) => (taxonomy ? resolveCategoryIdFromLegacyName(taxonomy, label) : null))
+    .filter((id): id is string => Boolean(id));
+  const resolvedId = hasExistingLabel ? item.categoryId ?? resolvedIds[0] ?? null : resolvedIds[0] ?? null;
+  // 次分类只写 genreIds，不夹带进 tags（tags 会被 saveItem 做标签清洗剥掉分类名）。
+  const mergedGenreIds = mergeAnalysisLabelsWithFitCap({
+    existing: item.genreIds ?? [],
+    incoming: resolvedIds,
+    maxCount: maxAiCategoryCount,
+    protectedCount: 1,
+  });
+  const genreIds = mergedGenreIds.length > 0 ? mergedGenreIds : null;
 
-  if (normalizeLexiconItemKey(category) === normalizeLexiconItemKey(item.category) && areLabelArraysEqual(tags, item.tags)) {
+  if (
+    normalizeLexiconItemKey(category) === normalizeLexiconItemKey(item.category ?? "") &&
+    item.categoryId === resolvedId &&
+    (item.genreIds ?? []).join("|") === (genreIds ?? []).join("|")
+  ) {
     return null;
   }
 
-  return { category, tags };
+  return {
+    category,
+    categoryId: resolvedId,
+    genreIds,
+    categorySource: "ai",
+    categoryConfidence: 0.8,
+  };
 }
 
 function buildPromptGroupTagPatch(
   item: PromptCardData,
   analysis: { suggestedTags: string[] },
 ): Pick<LibraryItem, "tags"> | null {
-  const suggestedTags = uniqueNormalizedLabels(analysis.suggestedTags).slice(0, maxBatchAiTagCount);
+  const formalCategory =
+    typeof item.category === "string" && item.category.trim() && item.category.trim() !== "未分类"
+      ? item.category.trim()
+      : "";
+
+  // AI tags: merge, sanitize, and force into wiki dimensions (Object/Purpose/Technique/Scene/Style…).
+  const suggestedTags = normalizeWikiDimensionTags(analysis.suggestedTags, {
+    category: formalCategory,
+    maxCount: maxBatchAiTagCount,
+  });
 
   if (suggestedTags.length === 0) {
     return null;
   }
 
-  const tags = uniqueNormalizedLabels([...item.tags, ...suggestedTags]).slice(0, maxBatchAiTagCount);
+  // 未满纯新增；满了之后高匹配度的新标签顶掉低匹配度的旧标签。
+  const tags = normalizeWikiDimensionTags(
+    mergeAnalysisLabelsWithFitCap({
+      existing: item.tags,
+      incoming: suggestedTags,
+      maxCount: maxBatchAiTagCount,
+    }),
+    {
+      category: formalCategory,
+      maxCount: maxBatchAiTagCount,
+    },
+  );
 
   if (areLabelArraysEqual(tags, item.tags)) {
     return null;
   }
 
   return { tags };
+}
+
+/** Map free tags into professional wiki tag layers; never promote to Genre. */
+function normalizeWikiDimensionTags(
+  tags: readonly string[],
+  options: { category?: string | null; maxCount?: number } = {},
+): string[] {
+  // 1) strip genre names / generics / noise
+  // 2) drop pseudo-genre phrases (红色产品摄影 / 高级感摄影 …)
+  const cleaned = sanitizePromptTags(tags, {
+    category: options.category,
+    maxCount: (options.maxCount ?? maxBatchAiTagCount) * 2,
+  });
+
+  // 优先保留标签层该负责的具体事实：主体、服饰、环境、构图、动作、
+  // 道具、光影和材质。纯色只作为补充信息，不能挤掉实体标签。
+  // 风格 / 情绪 / 应用 已经归分类，sanitizePromptTags 上一步就把它们剥掉了，
+  // 继续列在这里只会让人以为标签还管这些维度。
+  const preferred: string[] = [];
+  const rest: string[] = [];
+  for (const tag of cleaned) {
+    const group = getPromptTagGroup(tag);
+    if (
+      group.startsWith("主体") ||
+      group.startsWith("服饰") ||
+      group.startsWith("空间环境") ||
+      group.startsWith("景别") ||
+      group.startsWith("构图") ||
+      group.startsWith("动作姿态") ||
+      group.startsWith("道具与配饰") ||
+      group.startsWith("光影") ||
+      group.startsWith("材质") ||
+      group.includes("数量")
+    ) {
+      preferred.push(tag);
+    } else if (tag.length <= 12) {
+      rest.push(tag);
+    }
+  }
+
+  const merged = uniqueNormalizedLabels([...preferred, ...rest]);
+  const maxCount = options.maxCount ?? maxBatchAiTagCount;
+  return merged.slice(0, maxCount);
 }
 
 function normalizeBatchCategorySuggestions(values: readonly string[]): string[] {
@@ -8946,15 +7904,84 @@ function filterPromptGroupsForCategoryMenu(
   query: string,
   labelsCache?: ReadonlyMap<string, string[]>,
 ): PromptImageGroup[] {
-  const categoryKeys = getSelectedCategoryLabelKeys(entries, selectedMenuPath);
+  const selection = getSelectedCategorySelection(entries, selectedMenuPath);
 
   return groups.filter((group) => {
     const matchesCategory =
-      categoryKeys === null ||
-      (labelsCache?.get(group.id) ?? getPromptGroupCategoryLabels(group)).some((label) => categoryKeys.has(normalizeLexiconItemKey(label)));
+      selection === null || promptGroupMatchesCategorySelection(group, selection, labelsCache);
 
     return matchesCategory && matchesPromptGroupQuery(group, query);
   });
+}
+
+type CategoryMenuSelection = {
+  /** Taxonomy / lexicon entry ids under the selected menu (includes descendants). */
+  entryIds: ReadonlySet<string>;
+  /** Normalized labels for freeform categories that only have a display name. */
+  labelKeys: ReadonlySet<string>;
+};
+
+function getSelectedCategorySelection(
+  entries: readonly PromptImageLexiconEntry[],
+  selectedMenuPath: string,
+): CategoryMenuSelection | null {
+  if (selectedMenuPath === allCategoryGroupsValue) {
+    return null;
+  }
+
+  if (!selectedMenuPath.startsWith(imageCategoryMenuPrefix)) {
+    return { entryIds: new Set(), labelKeys: new Set() };
+  }
+
+  const rootId = selectedMenuPath.slice(imageCategoryMenuPrefix.length);
+  const relatedIds = getImageLexiconDescendantIds(entries, rootId);
+  relatedIds.add(rootId);
+
+  const selectedEntries = entries.filter((entry) => relatedIds.has(entry.id));
+  return {
+    entryIds: new Set(selectedEntries.map((entry) => entry.id)),
+    labelKeys: new Set(
+      selectedEntries.map((entry) => normalizeLexiconItemKey(entry.label)).filter(Boolean),
+    ),
+  };
+}
+
+function promptGroupMatchesCategorySelection(
+  group: PromptImageGroup,
+  selection: CategoryMenuSelection,
+  labelsCache?: ReadonlyMap<string, string[]>,
+): boolean {
+  const membership = getPromptGroupCategoryMembershipKeys(group);
+
+  // Prefer exact taxonomy ids (primary + secondary genres).
+  if (membership.categoryIds.some((id) => selection.entryIds.has(id))) {
+    return true;
+  }
+
+  if (membership.labelKeys.some((key) => selection.labelKeys.has(key))) {
+    return true;
+  }
+
+  // Cache path for freeform-only labels (no categoryId yet).
+  const cached = labelsCache?.get(group.id);
+  if (cached && cached.length > 0) {
+    if (cached.some((label) => selection.labelKeys.has(normalizeLexiconItemKey(label)))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getSelectedCategoryLabelKeys(
+  entries: readonly PromptImageLexiconEntry[],
+  selectedMenuPath: string,
+): Set<string> | null {
+  const selection = getSelectedCategorySelection(entries, selectedMenuPath);
+  if (selection === null) {
+    return null;
+  }
+  return new Set(selection.labelKeys);
 }
 
 function filterPromptGroupsForTagMenu(
@@ -8968,34 +7995,13 @@ function filterPromptGroupsForTagMenu(
 
   return groups.filter((group) => {
     const matchesTag =
-      tagKeys === null || (labelsCache?.get(group.id) ?? getPromptGroupTagLabels(group)).some((label) => tagKeys.has(normalizeLexiconItemKey(label)));
+      tagKeys === null ||
+      (labelsCache?.get(group.id) ?? getPromptGroupTagLabels(group)).some((label) =>
+        tagKeys.has(normalizeLexiconItemKey(label)),
+      );
 
     return matchesTag && matchesPromptGroupQuery(group, query);
   });
-}
-
-function getSelectedCategoryLabelKeys(
-  entries: readonly PromptImageLexiconEntry[],
-  selectedMenuPath: string,
-): Set<string> | null {
-  if (selectedMenuPath === allCategoryGroupsValue) {
-    return null;
-  }
-
-  if (!selectedMenuPath.startsWith(imageCategoryMenuPrefix)) {
-    return new Set<string>();
-  }
-
-  const rootId = selectedMenuPath.slice(imageCategoryMenuPrefix.length);
-  const relatedIds = getImageLexiconDescendantIds(entries, rootId);
-  relatedIds.add(rootId);
-
-  return new Set(
-    entries
-      .filter((entry) => relatedIds.has(entry.id))
-      .map((entry) => normalizeLexiconItemKey(entry.label))
-      .filter(Boolean),
-  );
 }
 
 function getSelectedTagLabelKeys(
@@ -9122,9 +8128,6 @@ function getImageLexiconParentOptions(
   return entries.filter((entry) => entry.id !== entryId && !descendantIds.has(entry.id));
 }
 
-function createParameterSourceValue(sourcePromptId: string | null, sourcePromptTitle: string | null): string {
-  return sourcePromptId ? `item:${sourcePromptId}` : `title:${sourcePromptTitle ?? ""}`;
-}
 
 function normalizeOptionalLexiconValue(value: string | null | undefined): string | null {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -9224,13 +8227,7 @@ function buildRemoveLabelsPatch(
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
-function countDisplayableParameterEntries(entries: readonly PromptParameterLexiconEntry[]): number {
-  return entries.reduce((count, entry) => (isDisplayableParameterEntry(entry) ? count + 1 : count), 0);
-}
 
-function isPromptParameterLexiconEntry(entry: PromptLexiconEntry): entry is PromptParameterLexiconEntry {
-  return "variable" in entry;
-}
 
 function isPromptImageLexiconEntry(entry: PromptLexiconEntry): entry is PromptImageLexiconEntry {
   return "description" in entry;
@@ -9253,7 +8250,7 @@ type GalleryToolbarProps = {
   onSortModeChange: (mode: PromptSortMode) => void;
 };
 
-function GalleryToolbar({
+const GalleryToolbar = memo(function GalleryToolbar({
   collectionMode,
   galleryMode,
   isMasonrySizeControlOpen,
@@ -9273,28 +8270,46 @@ function GalleryToolbar({
   const masonrySizeAutoCloseTimerRef = useRef<number | null>(null);
   const sortControlRef = useRef<HTMLDivElement | null>(null);
   const [isSortControlOpen, setIsSortControlOpen] = useState(false);
+  /** After the last column adjustment, wait this long with no further input before auto-closing. */
+  const masonrySizeIdleCloseMs = 2000;
+
+  function clearMasonrySizeAutoCloseTimer() {
+    if (masonrySizeAutoCloseTimerRef.current !== null) {
+      window.clearTimeout(masonrySizeAutoCloseTimerRef.current);
+      masonrySizeAutoCloseTimerRef.current = null;
+    }
+  }
+
+  function scheduleMasonrySizeIdleClose() {
+    clearMasonrySizeAutoCloseTimer();
+    masonrySizeAutoCloseTimerRef.current = window.setTimeout(() => {
+      onMasonrySizeControlOpenChange(false);
+      masonrySizeAutoCloseTimerRef.current = null;
+    }, masonrySizeIdleCloseMs);
+  }
 
   useEffect(() => {
     return () => {
-      if (masonrySizeAutoCloseTimerRef.current !== null) {
-        window.clearTimeout(masonrySizeAutoCloseTimerRef.current);
-      }
+      clearMasonrySizeAutoCloseTimer();
     };
   }, []);
 
   useEffect(() => {
     if (!isMasonrySizeControlOpen) {
+      clearMasonrySizeAutoCloseTimer();
       return;
     }
 
     function handlePointerDown(event: PointerEvent) {
       if (!masonrySizeControlRef.current?.contains(event.target as Node)) {
+        clearMasonrySizeAutoCloseTimer();
         onMasonrySizeControlOpenChange(false);
       }
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        clearMasonrySizeAutoCloseTimer();
         onMasonrySizeControlOpenChange(false);
       }
     }
@@ -9334,22 +8349,27 @@ function GalleryToolbar({
     };
   }, [isSortControlOpen]);
 
-  function scheduleMasonrySizeControlClose(count: number) {
+  function handleMasonryColumnLiveChange(count: number) {
+    // Any drag / key adjustment restarts the idle timer so the popover stays open
+    // while the user is still fine-tuning columns.
+    onMasonryColumnCountChange(count);
+    scheduleMasonrySizeIdleClose();
+  }
+
+  function handleMasonryColumnCommit(count: number) {
     onMasonryColumnCountCommit(count);
-
-    if (masonrySizeAutoCloseTimerRef.current !== null) {
-      window.clearTimeout(masonrySizeAutoCloseTimerRef.current);
-    }
-
-    masonrySizeAutoCloseTimerRef.current = window.setTimeout(() => {
-      onMasonrySizeControlOpenChange(false);
-      masonrySizeAutoCloseTimerRef.current = null;
-    }, 700);
+    // After release, keep the panel for 2s of inactivity before auto-hiding.
+    scheduleMasonrySizeIdleClose();
   }
 
   function handleMasonryModeClick() {
     if (galleryMode === "masonry") {
-      onMasonrySizeControlOpenChange(!isMasonrySizeControlOpen);
+      if (isMasonrySizeControlOpen) {
+        clearMasonrySizeAutoCloseTimer();
+        onMasonrySizeControlOpenChange(false);
+      } else {
+        onMasonrySizeControlOpenChange(true);
+      }
       return;
     }
 
@@ -9396,8 +8416,8 @@ function GalleryToolbar({
             {isMasonrySizeControlOpen ? (
               <MasonrySizeControl
                 value={masonryColumnCount}
-                onChange={onMasonryColumnCountChange}
-                onCommit={scheduleMasonrySizeControlClose}
+                onChange={handleMasonryColumnLiveChange}
+                onCommit={handleMasonryColumnCommit}
               />
             ) : null}
           </div>
@@ -9439,9 +8459,10 @@ function GalleryToolbar({
           ) : null}
         </div>
       </div>
+
     </div>
   );
-}
+});
 
 type SortControlPanelProps = {
   sortDirection: PromptSortDirection;
@@ -9478,7 +8499,7 @@ const radialSortOptions: RadialSortOption[] = [
     label: "导入时间",
     shortLabel: "导入",
     value: "importedAt",
-    colorClassName: "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground",
+    colorClassName: CAPSULE_TONES.sage.solid,
   },
   {
     id: "sort-updated-at",
@@ -9487,7 +8508,7 @@ const radialSortOptions: RadialSortOption[] = [
     label: "修改时间",
     shortLabel: "修改",
     value: "updatedAt",
-    colorClassName: "border-capsule-mist-border bg-capsule-mist text-capsule-mist-foreground",
+    colorClassName: CAPSULE_TONES.mist.solid,
   },
   {
     id: "sort-image-size",
@@ -9496,7 +8517,7 @@ const radialSortOptions: RadialSortOption[] = [
     label: "尺寸大小",
     shortLabel: "尺寸",
     value: "imageSize",
-    colorClassName: "border-capsule-mist-border bg-capsule-mist text-capsule-mist-foreground",
+    colorClassName: CAPSULE_TONES.mist.solid,
   },
   {
     id: "sort-random",
@@ -9505,7 +8526,7 @@ const radialSortOptions: RadialSortOption[] = [
     label: "随机排列",
     shortLabel: "随机",
     value: "random",
-    colorClassName: "border-capsule-lavender-border bg-capsule-lavender text-capsule-lavender-foreground",
+    colorClassName: CAPSULE_TONES.lavender.solid,
   },
   {
     id: "sort-asc",
@@ -9514,7 +8535,7 @@ const radialSortOptions: RadialSortOption[] = [
     label: "升序",
     shortLabel: "升序",
     value: "asc",
-    colorClassName: "border-capsule-sage-border bg-capsule-sage text-capsule-sage-foreground",
+    colorClassName: CAPSULE_TONES.sage.solid,
   },
   {
     id: "sort-desc",
@@ -9523,7 +8544,7 @@ const radialSortOptions: RadialSortOption[] = [
     label: "降序",
     shortLabel: "降序",
     value: "desc",
-    colorClassName: "border-capsule-mist-border bg-capsule-mist text-capsule-mist-foreground",
+    colorClassName: CAPSULE_TONES.mist.solid,
   },
 ];
 
@@ -9649,38 +8670,86 @@ type MasonrySizeControlProps = {
 
 function MasonrySizeControl({ value, onChange, onCommit }: MasonrySizeControlProps) {
   const clampedValue = clampMasonryColumnCount(value);
-  const progress =
-    ((clampedValue - minMasonryColumnCount) / (maxMasonryColumnCount - minMasonryColumnCount)) * 100;
+  const span = maxMasonryColumnCount - minMasonryColumnCount;
+  const progress = span <= 0 ? 0 : ((clampedValue - minMasonryColumnCount) / span) * 100;
+  const tickValues = useMemo(
+    () =>
+      Array.from({ length: span + 1 }, (_, index) => minMasonryColumnCount + index),
+    // Constants; recompute only if range constants change at build time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  function readRangeValue(event: { currentTarget: HTMLInputElement }): number {
+    return clampMasonryColumnCount(Number(event.currentTarget.value));
+  }
 
   return (
     <div
       aria-label="调整瀑布流每行列数"
-      className="absolute left-1/2 top-full z-30 mt-3 w-48 -translate-x-1/2 rounded-2xl border border-border bg-panel px-3 pb-2 pt-3 shadow-elevated"
+      className="absolute left-1/2 top-full z-30 mt-3 w-56 -translate-x-1/2 rounded-2xl border border-border bg-panel px-3 pb-2.5 pt-3 shadow-elevated"
       role="dialog"
+      onPointerDown={(event) => event.stopPropagation()}
     >
+      <div className="mb-1.5 flex items-center justify-between text-[11px] font-medium text-muted">
+        <span>{minMasonryColumnCount} 列</span>
+        <span className="rounded-md bg-primary-soft px-2 py-0.5 text-xs font-semibold text-primary">
+          {clampedValue} 列
+        </span>
+        <span>{maxMasonryColumnCount} 列</span>
+      </div>
       <input
         aria-label="瀑布流每行列数"
-        className="h-5 w-full cursor-ew-resize accent-primary"
+        aria-valuemax={maxMasonryColumnCount}
+        aria-valuemin={minMasonryColumnCount}
+        aria-valuenow={clampedValue}
+        aria-valuetext={`${clampedValue}列`}
+        className="masonry-column-slider h-5 w-full cursor-ew-resize accent-primary"
         max={maxMasonryColumnCount}
         min={minMasonryColumnCount}
         step={1}
         type="range"
         value={clampedValue}
-        onChange={(event) => onChange(Number(event.target.value))}
-        onKeyUp={(event) => onCommit(Number(event.currentTarget.value))}
-        onPointerUp={(event) => onCommit(Number(event.currentTarget.value))}
+        onChange={(event) => onChange(readRangeValue(event))}
+        onInput={(event) => onChange(readRangeValue(event))}
+        onKeyDown={(event) => {
+          // Arrow keys should move exactly one column (browser default may vary).
+          if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+            event.preventDefault();
+            onChange(clampedValue - 1);
+          } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+            event.preventDefault();
+            onChange(clampedValue + 1);
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            onChange(minMasonryColumnCount);
+          } else if (event.key === "End") {
+            event.preventDefault();
+            onChange(maxMasonryColumnCount);
+          }
+        }}
+        onKeyUp={(event) => onCommit(readRangeValue(event))}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+          onCommit(readRangeValue(event));
+        }}
       />
-      <div className="relative mt-1 h-5">
-        <span
-          className="absolute top-0 inline-flex min-h-5 min-w-9 items-center justify-center whitespace-nowrap rounded-lg bg-foreground/70 px-2 text-xs font-semibold text-background"
-          style={{
-            left: `calc(8px + ${progress} * (100% - 16px) / 100)`,
-            transform: `translateX(-${progress}%)`,
-          }}
-        >
-          {clampedValue}列
-        </span>
+      <div className="mt-1 flex justify-between px-0.5" aria-hidden="true">
+        {tickValues.map((tick) => (
+          <span
+            key={tick}
+            className={`h-1 w-0.5 rounded-full ${
+              tick === clampedValue ? "bg-primary" : "bg-border"
+            }`}
+          />
+        ))}
       </div>
+      <div className="relative mt-1.5 h-0 overflow-hidden" style={{ ["--masonry-slider-progress" as string]: `${progress}%` }} />
     </div>
   );
 }
@@ -9760,7 +8829,7 @@ type PromptGalleryProps = {
   onPreviewMedia?: (item: PromptCardData) => void;
 };
 
-function MasonryPromptGallery({
+const MasonryPromptGallery = memo(function MasonryPromptGallery({
   blurNsfwImages,
   columnCount,
   items,
@@ -9822,7 +8891,7 @@ function MasonryPromptGallery({
       ))}
     </div>
   );
-}
+});
 
 const MasonryPromptTile = memo(function MasonryPromptTile({
   blurNsfwImages,
@@ -9850,6 +8919,9 @@ const MasonryPromptTile = memo(function MasonryPromptTile({
   return (
     <article
       className="group/tile block min-w-0 overflow-hidden rounded-2xl border border-border/70 bg-panel shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-image"
+      style={{
+        contain: "layout paint style",
+      }}
     >
       <div
         className="group relative block w-full overflow-hidden text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
@@ -9938,9 +9010,13 @@ type PromptGroupGalleryProps = {
   groups: PromptImageGroup[];
   likedImageIds: string[];
   blurNsfwImages: boolean;
+  enableCategoryDnD?: boolean;
   selectedGroupIds?: ReadonlySet<string>;
   variant?: "full" | "compact";
   onCopyPrompt: (item: PromptCardData) => void;
+  onDragPromptGroupsEnd?: () => void;
+  onDragPromptGroupsStart?: () => void;
+  onOpenMoveMenu?: (itemIds: string[], clientX: number, clientY: number) => void;
   onToggleGroupSelection?: (groupId: string) => void;
   onViewDetail: (itemId: string) => void;
   onPreviewMedia?: (item: PromptCardData) => void;
@@ -9948,13 +9024,17 @@ type PromptGroupGalleryProps = {
 
 const gridGalleryPageSize = 24;
 
-function GridPromptGallery({
+const GridPromptGallery = memo(function GridPromptGallery({
   blurNsfwImages,
+  enableCategoryDnD = false,
   groups,
   likedImageIds,
   selectedGroupIds,
   variant = "full",
   onCopyPrompt,
+  onDragPromptGroupsEnd,
+  onDragPromptGroupsStart,
+  onOpenMoveMenu,
   onToggleGroupSelection,
   onViewDetail,
   onPreviewMedia,
@@ -9964,7 +9044,17 @@ function GridPromptGallery({
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    setVisibleCount(gridGalleryPageSize);
+    setVisibleCount((current) => {
+      if (groups.length === 0) {
+        return gridGalleryPageSize;
+      }
+      // Parent expanded the window (home infinite scroll): keep progress, do not snap back.
+      if (groups.length > current) {
+        return current;
+      }
+      // Filter change / shorter list: restart from the first page.
+      return Math.min(gridGalleryPageSize, groups.length);
+    });
   }, [groups]);
 
   useEffect(() => {
@@ -9978,13 +9068,17 @@ function GridPromptGallery({
       return;
     }
 
+    const scrollRoot = sentinel.closest(".overflow-y-auto") as Element | null;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) {
           setVisibleCount((current) => Math.min(current + gridGalleryPageSize, groups.length));
         }
       },
-      { rootMargin: "600px" },
+      {
+        root: scrollRoot,
+        rootMargin: "600px",
+      },
     );
 
     observer.observe(sentinel);
@@ -9994,63 +9088,95 @@ function GridPromptGallery({
     };
   }, [groups.length, visibleCount]);
 
-  const visibleGroups = visibleCount >= groups.length ? groups : groups.slice(0, visibleCount);
+  const visibleGroups = useMemo(
+    () => (visibleCount >= groups.length ? groups : groups.slice(0, visibleCount)),
+    [groups, visibleCount],
+  );
+  const primaryItemIdByGroupId = useMemo(() => {
+    if (!enableCategoryDnD || !selectedGroupIds || selectedGroupIds.size === 0) {
+      return undefined;
+    }
+
+    const map = new Map<string, string>();
+    for (const group of groups) {
+      map.set(group.id, group.primaryItem.id);
+    }
+    return map;
+  }, [enableCategoryDnD, groups, selectedGroupIds]);
 
   return (
     <>
       <div
         className={
           variant === "compact"
-            ? "grid grid-cols-[repeat(auto-fill,minmax(min(100%,190px),1fr))] gap-3"
-            : "grid grid-cols-[repeat(auto-fill,minmax(min(100%,230px),1fr))] gap-4"
+            ? "grid grid-cols-[repeat(auto-fill,minmax(min(100%,150px),1fr))] gap-2.5 min-[640px]:grid-cols-[repeat(auto-fill,minmax(min(100%,190px),1fr))] min-[640px]:gap-3"
+            : "grid grid-cols-[repeat(auto-fill,minmax(min(100%,170px),1fr))] gap-3 min-[640px]:grid-cols-[repeat(auto-fill,minmax(min(100%,230px),1fr))] min-[640px]:gap-4"
         }
       >
         {visibleGroups.map((group, index) => (
           <GridPromptTile
             blurNsfwImages={blurNsfwImages}
+            enableCategoryDnD={enableCategoryDnD}
             group={group}
             isSelected={selectedGroupIds?.has(group.id) ?? false}
             key={group.id}
             likedImageIdSet={likedImageIdSet}
-            onCopyPrompt={() => onCopyPrompt(group.primaryItem)}
-            onPreviewMedia={onPreviewMedia ? () => onPreviewMedia(group.primaryItem) : undefined}
-            onToggleSelection={onToggleGroupSelection ? () => onToggleGroupSelection(group.id) : undefined}
+            primaryItemIdByGroupId={primaryItemIdByGroupId}
+            selectedGroupIds={selectedGroupIds}
+            onCopyPrompt={onCopyPrompt}
+            onDragPromptGroupsEnd={onDragPromptGroupsEnd}
+            onDragPromptGroupsStart={onDragPromptGroupsStart}
+            onOpenMoveMenu={onOpenMoveMenu}
+            onPreviewMedia={onPreviewMedia}
+            onToggleGroupSelection={onToggleGroupSelection}
             priorityImages={index < 8}
             tone={promptSiteCardToneClassNames[index % promptSiteCardToneClassNames.length]}
             variant={variant}
-            onViewDetail={() => onViewDetail(group.primaryItem.id)}
+            onViewDetail={onViewDetail}
           />
         ))}
       </div>
       {visibleCount < groups.length ? <div ref={sentinelRef} className="h-1 w-full" aria-hidden="true" /> : null}
     </>
   );
-}
+});
 
-function GridPromptTile({
+const GridPromptTile = memo(function GridPromptTile({
   blurNsfwImages,
+  enableCategoryDnD = false,
   group,
   isSelected,
   likedImageIdSet,
+  primaryItemIdByGroupId,
+  selectedGroupIds,
   onCopyPrompt,
+  onDragPromptGroupsEnd,
+  onDragPromptGroupsStart,
+  onOpenMoveMenu,
   onPreviewMedia,
-  onToggleSelection,
+  onToggleGroupSelection,
   priorityImages,
   tone,
   variant,
   onViewDetail,
 }: {
   blurNsfwImages: boolean;
+  enableCategoryDnD?: boolean;
   group: PromptImageGroup;
   isSelected: boolean;
   likedImageIdSet: ReadonlySet<string>;
-  onCopyPrompt: () => void;
-  onPreviewMedia?: () => void;
-  onToggleSelection?: () => void;
+  primaryItemIdByGroupId?: ReadonlyMap<string, string>;
+  selectedGroupIds?: ReadonlySet<string>;
+  onCopyPrompt: (item: PromptCardData) => void;
+  onDragPromptGroupsEnd?: () => void;
+  onDragPromptGroupsStart?: () => void;
+  onOpenMoveMenu?: (itemIds: string[], clientX: number, clientY: number) => void;
+  onPreviewMedia?: (item: PromptCardData) => void;
+  onToggleGroupSelection?: (groupId: string) => void;
   priorityImages: boolean;
   tone: PromptSiteCardToneClassNames;
   variant: "full" | "compact";
-  onViewDetail: () => void;
+  onViewDetail: (itemId: string) => void;
 }) {
   const item = group.primaryItem;
   const isCompact = variant === "compact";
@@ -10059,17 +9185,67 @@ function GridPromptTile({
   const hasLikedImage = !isCompact && group.items.some((groupItem) => likedImageIdSet.has(groupItem.id));
   const promptPreview = isCompact ? "" : buildPromptText(item);
   const sourceText = isCompact ? "" : getPromptSourceText(item);
+  const handleViewDetail = useCallback(() => onViewDetail(item.id), [item.id, onViewDetail]);
+  const handleCopyPrompt = useCallback(() => onCopyPrompt(item), [item, onCopyPrompt]);
+  const handlePreviewMedia = useMemo(
+    () => (onPreviewMedia ? () => onPreviewMedia(item) : undefined),
+    [item, onPreviewMedia],
+  );
+  const handleToggleSelection = useMemo(
+    () => (onToggleGroupSelection ? () => onToggleGroupSelection(group.id) : undefined),
+    [group.id, onToggleGroupSelection],
+  );
+
+  function resolveDragItemIds(): string[] {
+    if (selectedGroupIds && selectedGroupIds.size > 0 && selectedGroupIds.has(group.id) && primaryItemIdByGroupId) {
+      return Array.from(selectedGroupIds)
+        .map((groupId) => primaryItemIdByGroupId.get(groupId))
+        .filter((id): id is string => Boolean(id));
+    }
+    return [item.id];
+  }
 
   return (
     <article
       className={`group/tile min-w-0 overflow-hidden rounded-xl border bg-panel shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-image focus-within:-translate-y-1 focus-within:shadow-image ${
         isSelected ? "border-primary bg-primary-soft shadow-image" : tone.article
       }`}
+      draggable={enableCategoryDnD}
+      style={{
+        contain: "layout paint style",
+      }}
+      onDragEnd={() => onDragPromptGroupsEnd?.()}
+      onDragStart={(event) => {
+        if (!enableCategoryDnD) {
+          return;
+        }
+        const itemIds = resolveDragItemIds();
+        const payload = JSON.stringify(itemIds);
+        event.dataTransfer.setData(promptGroupDragMime, payload);
+        event.dataTransfer.setData("text/plain", payload);
+        event.dataTransfer.effectAllowed = "move";
+        onDragPromptGroupsStart?.();
+      }}
     >
-      <header className={`flex min-h-12 items-center border-b px-3 py-2 ${tone.header}`}>
-        <h2 className="line-clamp-2 text-sm font-semibold leading-5 text-current">
+      <header className={`flex min-h-12 items-center gap-2 border-b px-3 py-2 ${tone.header}`}>
+        <h2 className="line-clamp-2 min-w-0 flex-1 text-sm font-semibold leading-5 text-current">
           {item.title || "未命名提示词"}
         </h2>
+        {enableCategoryDnD && onOpenMoveMenu ? (
+          <button
+            aria-label="移动到分类"
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background/70 text-muted opacity-80 transition-opacity hover:opacity-100 hover:text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+            title="移动到分类"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              const itemIds = resolveDragItemIds();
+              onOpenMoveMenu(itemIds, event.clientX, event.clientY);
+            }}
+          >
+            <MoreHorizontal size={14} />
+          </button>
+        ) : null}
       </header>
 
       <div
@@ -10078,12 +9254,12 @@ function GridPromptTile({
         <GridPromptMosaic
           blurNsfwImages={blurNsfwImages}
           images={group.previewItems}
-          onActivate={onViewDetail}
-          onPreview={onPreviewMedia}
+          onActivate={handleViewDetail}
+          onPreview={handlePreviewMedia}
           priorityImages={priorityImages}
           title={item.title || "提示词效果图"}
         />
-        {onToggleSelection ? (
+        {handleToggleSelection ? (
           <button
             aria-label={isSelected ? "取消选择提示词组" : "选择提示词组"}
             aria-pressed={isSelected}
@@ -10096,7 +9272,7 @@ function GridPromptTile({
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              onToggleSelection();
+              handleToggleSelection();
             }}
           >
             {isSelected ? <CheckSquare size={16} /> : <Square size={16} />}
@@ -10110,7 +9286,7 @@ function GridPromptTile({
         {hasLikedImage ? (
           <span
             className={`absolute top-2 inline-flex size-8 items-center justify-center rounded-full bg-panel/85 text-danger opacity-90 shadow-elevated transition-opacity group-hover/tile:opacity-100 ${
-              onToggleSelection ? "left-12" : "left-2"
+              handleToggleSelection ? "left-12" : "left-2"
             }`}
           >
             <Heart size={15} fill="currentColor" />
@@ -10126,31 +9302,31 @@ function GridPromptTile({
             {visibleTags.length > 0 ? (
               <>
                 {visibleTags.map((tag) => (
-                  <span className={`rounded-lg border px-2 py-1 text-xs ${tone.tag}`} key={tag}>
+                  <span className={`max-w-full truncate rounded-lg border px-2 py-1 text-xs ${tone.tag}`} key={tag}>
                     {tag}
                   </span>
                 ))}
                 {hiddenTagCount > 0 ? (
-                  <span className={`rounded-lg border px-2 py-1 text-xs ${tone.tag}`}>
+                  <span className={`max-w-full truncate rounded-lg border px-2 py-1 text-xs ${tone.tag}`}>
                     +{hiddenTagCount}
                   </span>
                 ) : null}
               </>
             ) : (
-              <span className={`rounded-lg border px-2 py-1 text-xs ${tone.tag}`}>
+              <span className={`max-w-full truncate rounded-lg border px-2 py-1 text-xs ${tone.tag}`}>
                 {item.category}
               </span>
             )}
           </div>
           <div className="grid grid-cols-2 gap-2 pt-1">
-            <TileActionButton icon={<Eye size={14} />} label="查看详情" onClick={onViewDetail} />
-            <TileActionButton icon={<Copy size={14} />} label="复制提示词" primary onClick={onCopyPrompt} />
+            <TileActionButton icon={<Eye size={14} />} label="查看详情" onClick={handleViewDetail} />
+            <TileActionButton icon={<Copy size={14} />} label="复制提示词" primary onClick={handleCopyPrompt} />
           </div>
         </div>
       )}
     </article>
   );
-}
+});
 
 function GridPromptMosaic({
   blurNsfwImages,
@@ -10247,10 +9423,10 @@ function DirectoryImportModeDialog({ isBusy, onClose, onCopy, onIndex }: Directo
           onClick={onIndex}
         >
           <span className="flex items-center justify-between gap-3">
-            <span className="flex size-11 items-center justify-center rounded-xl bg-primary text-white">
+            <span className="flex size-11 items-center justify-center rounded-xl bg-primary text-primary-foreground">
               <FolderTree size={21} />
             </span>
-            <span className="rounded-full bg-primary px-2.5 py-1 text-xs font-semibold text-white">推荐大目录</span>
+            <span className="rounded-full bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground">推荐大目录</span>
           </span>
           <strong className="mt-4 text-base text-foreground">仅建立索引</strong>
           <p className="mt-2 text-sm leading-6 text-muted">
@@ -10294,6 +9470,7 @@ function DirectoryImportModeDialog({ isBusy, onClose, onCopy, onIndex }: Directo
     </AppDialog>
   );
 }
+
 type LibraryRootsDialogProps = {
   isBusy: boolean;
   roots: readonly LibraryRoot[];
@@ -10302,6 +9479,7 @@ type LibraryRootsDialogProps = {
   onPurgeMissing: (rootId: string) => void;
   onRemap: (rootId: string) => void;
   onRemove: (rootId: string) => void;
+  onReorder: (rootIds: string[]) => void;
   onScan: (rootId: string) => void;
   onWatchChange: (rootId: string, enabled: boolean) => void;
   onValidate: () => void;
@@ -10315,10 +9493,39 @@ function LibraryRootsDialog({
   onPurgeMissing,
   onRemap,
   onRemove,
+  onReorder,
   onScan,
   onWatchChange,
   onValidate,
 }: LibraryRootsDialogProps) {
+  const [orderedRoots, setOrderedRoots] = useState<LibraryRoot[]>(() => [...roots]);
+  const [draggedRootId, setDraggedRootId] = useState<string | null>(null);
+  const [dragOverRootId, setDragOverRootId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setOrderedRoots([...roots]);
+  }, [roots]);
+
+  function reorderRoots(sourceId: string, targetId: string) {
+    const sourceIndex = orderedRoots.findIndex((root) => root.id === sourceId);
+    const targetIndex = orderedRoots.findIndex((root) => root.id === targetId);
+
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+      return;
+    }
+
+    const nextRoots = [...orderedRoots];
+    const [movedRoot] = nextRoots.splice(sourceIndex, 1);
+
+    if (!movedRoot) {
+      return;
+    }
+
+    nextRoots.splice(sourceIndex < targetIndex ? targetIndex - 1 : targetIndex, 0, movedRoot);
+    setOrderedRoots(nextRoots);
+    onReorder(nextRoots.map((root) => root.id));
+  }
+
   return (
     <AppDialog overlayClassName="z-[130] px-4 py-8" panelClassName="flex max-h-full w-full max-w-xl flex-col" onClose={onClose}>
       <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
@@ -10329,11 +9536,61 @@ function LibraryRootsDialog({
         <DialogCloseButton onClick={onClose} />
       </header>
       <div className="grid min-h-0 gap-3 overflow-y-auto p-5">
-        {roots.length > 0 ? (
-          roots.map((root) => (
-            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-border bg-background px-3 py-3" key={root.id}>
+        {orderedRoots.length > 0 ? (
+          orderedRoots.map((root) => {
+            const isDragging = draggedRootId === root.id;
+            const isDragOver = dragOverRootId === root.id;
+
+            return (
+            <div
+              className={`grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg border bg-background px-3 py-3 transition-colors ${
+                isDragOver ? "border-primary bg-primary-soft/60 ring-1 ring-primary/30" : "border-border"
+              } ${isDragging ? "opacity-55" : ""}`}
+              draggable={orderedRoots.length > 1 && !isBusy}
+              key={root.id}
+              onDragStart={(event) => {
+                if (orderedRoots.length <= 1 || isBusy) {
+                  event.preventDefault();
+                  return;
+                }
+
+                setDraggedRootId(root.id);
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", root.id);
+              }}
+              onDragEnter={(event) => {
+                if (!draggedRootId || draggedRootId === root.id) {
+                  return;
+                }
+
+                event.preventDefault();
+                setDragOverRootId(root.id);
+              }}
+              onDragOver={(event) => {
+                if (!draggedRootId || draggedRootId === root.id) {
+                  return;
+                }
+
+                event.preventDefault();
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                const sourceId = draggedRootId ?? event.dataTransfer.getData("text/plain");
+                setDraggedRootId(null);
+                setDragOverRootId(null);
+
+                if (sourceId && sourceId !== root.id) {
+                  reorderRoots(sourceId, root.id);
+                }
+              }}
+              onDragEnd={() => {
+                setDraggedRootId(null);
+                setDragOverRootId(null);
+              }}
+            >
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-2">
+                  <GripVertical aria-hidden="true" className="shrink-0 text-muted/60" size={15} />
                   <span className={`size-2 shrink-0 rounded-full ${root.status === "missing" ? "bg-danger" : "bg-primary"}`} />
                   <p className="truncate text-sm font-medium text-foreground">{root.label}</p>
                   {root.status === "missing" ? <span className="shrink-0 text-xs font-medium text-danger">目录不可用</span> : null}
@@ -10358,7 +9615,7 @@ function LibraryRootsDialog({
                   >
                     <span
                       aria-hidden="true"
-                      className={`absolute left-0 top-0.5 size-4 rounded-full bg-white shadow-sm transition-transform ${
+                      className={`absolute left-0 top-0.5 size-4 rounded-full bg-panel shadow-sm transition-transform ${
                         root.watchEnabled ? "translate-x-[18px]" : "translate-x-0.5"
                       }`}
                     />
@@ -10400,7 +9657,8 @@ function LibraryRootsDialog({
                 />
               </div>
             </div>
-          ))
+            );
+          })
         ) : (
           <p className="py-8 text-center text-sm text-muted">还没有已挂载目录。</p>
         )}
@@ -10491,10 +9749,13 @@ function buildPromptText(item: PromptCardData): string {
 
 const promptSourceHostLabels: Array<{ hosts: string[]; label: string }> = [
   { hosts: ["webtomind.com"], label: "WebToMind" },
+  { hosts: ["opennana.com", "img.opennana.com"], label: "OpenNana" },
+  { hosts: ["youmind.com"], label: "YouMind" },
+  { hosts: ["prompts.chat"], label: "prompts.chat" },
+  { hosts: ["kookaigc.top"], label: "KookAIGC" },
   { hosts: ["jimeng.jianying.com"], label: "即梦AI" },
   { hosts: ["civitai.red", "civitai.com"], label: "civitai（C站）" },
   { hosts: ["liblib.art"], label: "LibLibAI" },
-  { hosts: ["youmind.com"], label: "YouMind" },
   { hosts: ["gpt-image2.canghe.ai"], label: "awesome-gpt-image-2" },
   { hosts: ["aiart.pics"], label: "aiart.pics" },
   { hosts: ["promptfill.tanshilong.com"], label: "提示词填空器" },
@@ -10530,181 +9791,4 @@ function resolvePromptSourceName(sourceUrl: string): string {
   } catch {
     return "网络来源";
   }
-}
-
-
-type LogExportSelection = {
-  minLevel: LogExportLevel;
-  range: LogExportRange;
-  format: LogExportFormat;
-};
-
-type LogExportDialogProps = {
-  activeAction: "save" | "feedback" | null;
-  onClose: () => void;
-  onExport: (options: LogExportSelection) => void;
-  onFeedback: (options: LogExportSelection) => void;
-};
-
-function LogExportDialog({
-  activeAction,
-  onClose,
-  onExport,
-  onFeedback,
-}: LogExportDialogProps) {
-  const [minLevel, setMinLevel] = useState<LogExportLevel>("ERROR");
-  const [range, setRange] = useState<LogExportRange>("all");
-  const [format, setFormat] = useState<LogExportFormat>("txt");
-  const isExporting = activeAction !== null;
-  const selection = { minLevel, range, format };
-
-  return (
-    <AppDialog
-      overlayClassName="z-50 px-6 py-8"
-      panelClassName="flex max-h-full w-full max-w-lg flex-col"
-      titleId="log-export-dialog-title"
-      onClose={() => {
-        if (!isExporting) {
-          onClose();
-        }
-      }}
-    >
-      <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
-        <div className="min-w-0">
-          <h2 className="flex items-center gap-2 text-lg font-semibold" id="log-export-dialog-title">
-            <ScrollText className="text-primary" size={18} />
-            导出应用日志
-          </h2>
-          <p className="mt-1 text-sm text-muted">选择日志范围后，可保存到本地或直接用于 GitHub 反馈。</p>
-        </div>
-        <DialogCloseButton
-          onClick={() => {
-            if (!isExporting) {
-              onClose();
-            }
-          }}
-        />
-      </header>
-
-      <div className="grid gap-4 overflow-y-auto px-5 py-4">
-        <div className="rounded-xl border border-border bg-background p-3 text-sm leading-6 text-muted">
-          默认筛选错误日志。TXT 便于阅读，ZIP 便于反馈；点击反馈会自动生成 ZIP、打开 Issue，并选中文件供拖入附件。
-        </div>
-
-        <fieldset className="grid gap-2">
-          <legend className="text-sm font-semibold text-foreground">日志级别</legend>
-          <div className="grid grid-cols-2 gap-2 min-[520px]:grid-cols-4">
-            {(
-              [
-                ["ERROR", "错误及以上"],
-                ["WARN", "警告及以上"],
-                ["INFO", "信息及以上"],
-                ["DEBUG", "全部调试"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                className={`rounded-xl border px-3 py-2 text-left text-sm transition ${
-                  minLevel === value
-                    ? "border-primary bg-primary/10 text-foreground"
-                    : "border-border bg-panel text-muted hover:border-primary/40 hover:text-foreground"
-                }`}
-                disabled={isExporting}
-                type="button"
-                onClick={() => setMinLevel(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </fieldset>
-
-        <fieldset className="grid gap-2">
-          <legend className="text-sm font-semibold text-foreground">时间范围</legend>
-          <div className="grid grid-cols-3 gap-2">
-            {(
-              [
-                ["today", "今天"],
-                ["7d", "近 7 天"],
-                ["all", "全部"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                className={`rounded-xl border px-3 py-2 text-sm transition ${
-                  range === value
-                    ? "border-primary bg-primary/10 text-foreground"
-                    : "border-border bg-panel text-muted hover:border-primary/40 hover:text-foreground"
-                }`}
-                disabled={isExporting}
-                type="button"
-                onClick={() => setRange(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </fieldset>
-
-        <fieldset className="grid gap-2">
-          <legend className="text-sm font-semibold text-foreground">导出格式</legend>
-          <div className="grid grid-cols-2 gap-2">
-            {(
-              [
-                ["txt", "TXT 文本"],
-                ["zip", "ZIP 日志包"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                className={`rounded-xl border px-3 py-2 text-sm transition ${
-                  format === value
-                    ? "border-primary bg-primary/10 text-foreground"
-                    : "border-border bg-panel text-muted hover:border-primary/40 hover:text-foreground"
-                }`}
-                disabled={isExporting}
-                type="button"
-                onClick={() => setFormat(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </fieldset>
-      </div>
-
-      <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-5 py-4">
-        <Button
-          disabled={isExporting}
-          type="button"
-          variant="ghost"
-          onClick={() => {
-            if (!isExporting) {
-              onClose();
-            }
-          }}
-        >
-          取消
-        </Button>
-        <Button
-          disabled={isExporting}
-          icon={<ScrollText size={16} />}
-          type="button"
-          variant="secondary"
-          onClick={() => onExport(selection)}
-        >
-          {activeAction === "save" ? "导出中..." : "导出日志"}
-        </Button>
-        <Button
-          disabled={isExporting}
-          icon={<ExternalLink size={16} />}
-          type="button"
-          variant="primary"
-          onClick={() => onFeedback(selection)}
-        >
-          {activeAction === "feedback" ? "准备反馈中..." : "去 GitHub 反馈"}
-        </Button>
-      </footer>
-    </AppDialog>
-  );
 }

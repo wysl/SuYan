@@ -1,24 +1,35 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { LibraryFile, LibraryItem, MediaStorage, VideoKeyframe } from "../../../src/features/library/types/library";
+import type { CategoryAssignmentSource } from "../../../src/features/library/types/category";
 import { normalizeNsfwRating } from "../../../src/features/library/utils/nsfwRating";
 import { normalizePromptType } from "../../../src/features/library/utils/promptType";
+import { createEmptyCategoryTaxonomy } from "../../../src/features/library/utils/categoryTaxonomy";
+import { migrateLibraryFileCategories, LIBRARY_SCHEMA_VERSION_V2 } from "../../../src/features/library/utils/categoryMigration";
 import { AppError } from "../ipc/errors";
 import { getImagesDir, getLibraryDataDir, getLibraryPath } from "./libraryPaths";
+import {
+  readLibraryJsonWithBackupRestore,
+  writeLibraryJsonAtomically,
+} from "./libraryJsonPersistence";
 import { createDefaultLibrary, createDefaultSeedImage, getDefaultSeedImageFileNames, shouldEnableDefaultLibrarySeed } from "./defaultLibrarySeed";
 import { refreshExternalMediaHealth } from "./externalMediaHealth";
 
-const schemaVersion = 1;
+const schemaVersion = LIBRARY_SCHEMA_VERSION_V2;
 const defaultSeedMarkerFileName = ".default-library-seeded";
 let libraryMutationQueue: Promise<void> = Promise.resolve();
 let cachedLibraryPath: string | null = null;
+let cachedLibrary: LibraryFile | null = null;
+let cachedItemsById: Map<string, LibraryItem> | null = null;
 let cachedItemsByImageFileName: Map<string, LibraryItem> | null = null;
+let cachedItemsByExternalPath: Map<string, LibraryItem> | null = null;
 
 export function createEmptyLibrary(): LibraryFile {
   return {
     schemaVersion,
     updatedAt: new Date().toISOString(),
     items: [],
+    categoryTaxonomy: createEmptyCategoryTaxonomy(),
   };
 }
 
@@ -88,19 +99,75 @@ export async function readLibraryFile(options?: { refreshExternalHealth?: boolea
 }
 
 async function readLibraryFileUnlocked(): Promise<LibraryFile> {
-  const content = await fs.readFile(getLibraryPath(), "utf8");
-  const parsed = JSON.parse(content) as unknown;
+  const libraryPath = getLibraryPath();
+
+  if (cachedLibraryPath === libraryPath && cachedLibrary) {
+    return cachedLibrary;
+  }
+
+  invalidateLibraryLookupCacheIfPathChanged(libraryPath);
+  const loaded = await loadLibraryJsonContent(libraryPath);
+  const parsed = loaded.parsed;
 
   if (!isLibraryFile(parsed)) {
     throw new AppError("LIBRARY_SCHEMA_INVALID", "素材库文件结构不合法。");
   }
 
-  const library: LibraryFile = {
+  const normalizedLibrary: LibraryFile = {
     ...parsed,
     items: parsed.items.map(normalizeItem),
   };
-  refreshLibraryLookupCache(library);
-  return library;
+  const taxonomy = normalizedLibrary.categoryTaxonomy ?? createEmptyCategoryTaxonomy();
+  const migrated = migrateLibraryFileCategories(normalizedLibrary, taxonomy);
+
+  if (migrated.changed || parsed.schemaVersion !== schemaVersion || loaded.restoredFromBackup) {
+    return writeLibraryFileUnlocked(migrated.library, { skipNormalize: false });
+  }
+
+  refreshLibraryLookupCache(migrated.library);
+  return migrated.library;
+}
+
+async function loadLibraryJsonContent(libraryPath: string): Promise<{
+  parsed: unknown;
+  restoredFromBackup: boolean;
+}> {
+  const primaryResult = await readLibraryJsonWithBackupRestore(libraryPath);
+  if (!primaryResult.ok) {
+    throw primaryResult.error;
+  }
+
+  try {
+    return {
+      parsed: JSON.parse(primaryResult.content) as unknown,
+      restoredFromBackup: primaryResult.restoredFromBackup !== null,
+    };
+  } catch (primaryParseError) {
+    if (primaryResult.restoredFromBackup !== null) {
+      throw new AppError("LIBRARY_SCHEMA_INVALID", "素材库备份文件无法解析。");
+    }
+
+    // Primary file exists but is corrupt: try bak slots directly, skipping the empty primary.
+    for (const backupPath of [
+      `${libraryPath}.bak`,
+      `${libraryPath}.bak.1`,
+      `${libraryPath}.bak.2`,
+    ]) {
+      try {
+        const backupContent = await fs.readFile(backupPath, "utf8");
+        if (!backupContent.trim()) {
+          continue;
+        }
+        const parsed = JSON.parse(backupContent) as unknown;
+        await writeLibraryJsonAtomically(libraryPath, backupContent);
+        return { parsed, restoredFromBackup: true };
+      } catch {
+        // try next slot
+      }
+    }
+
+    throw primaryParseError;
+  }
 }
 
 export async function writeLibraryFile(library: LibraryFile, options?: { skipNormalize?: boolean }): Promise<LibraryFile> {
@@ -117,27 +184,36 @@ async function writeLibraryFileUnlocked(
   await fs.mkdir(getLibraryDataDir(), { recursive: true });
   await fs.mkdir(getImagesDir(), { recursive: true });
 
+  const taxonomy = library.categoryTaxonomy ?? createEmptyCategoryTaxonomy();
+  const migrated = migrateLibraryFileCategories(
+    {
+      ...library,
+      schemaVersion: library.schemaVersion === 1 || library.schemaVersion === 2 ? library.schemaVersion : 1,
+      categoryTaxonomy: taxonomy,
+    },
+    taxonomy,
+  );
+
   const normalized: LibraryFile = options?.skipNormalize
     ? {
         schemaVersion,
         updatedAt: new Date().toISOString(),
-        items: library.items,
+        items: migrated.library.items,
+        categoryTaxonomy: migrated.taxonomy,
       }
     : {
         schemaVersion,
         updatedAt: new Date().toISOString(),
-        items: library.items.map(normalizeItem),
+        items: migrated.library.items.map(normalizeItem),
+        categoryTaxonomy: migrated.taxonomy,
       };
 
   if (!isLibraryFile(normalized)) {
     throw new AppError("LIBRARY_SCHEMA_INVALID", "素材库文件结构不合法。");
   }
 
-  const tempPath = `${getLibraryPath()}.tmp`;
-
-  // 紧凑 JSON 比 pretty-print 更小、更快，删除/导入时写盘更轻。
-  await fs.writeFile(tempPath, JSON.stringify(normalized), "utf8");
-  await fs.rename(tempPath, getLibraryPath());
+  // 紧凑 JSON 比 pretty-print 更小、更快；先写临时文件并滚动 .bak 再原子替换。
+  await writeLibraryJsonAtomically(getLibraryPath(), JSON.stringify(normalized));
   refreshLibraryLookupCache(normalized);
 
   return normalized;
@@ -188,23 +264,61 @@ export async function appendLibraryItems(items: LibraryItem[]): Promise<LibraryF
 }
 
 export async function findLibraryItemByImageFileName(imageFileName: string): Promise<LibraryItem | null> {
+  await ensureLookupCacheLoaded();
+  return cachedItemsByImageFileName?.get(imageFileName) ?? null;
+}
+
+export async function findLibraryItemById(itemId: string): Promise<LibraryItem | null> {
+  await ensureLookupCacheLoaded();
+  return cachedItemsById?.get(itemId) ?? null;
+}
+
+export async function findExternalLibraryItem(
+  rootId: string,
+  relativePath: string,
+): Promise<LibraryItem | null> {
+  await ensureLookupCacheLoaded();
+  return cachedItemsByExternalPath?.get(makeExternalPathKey(rootId, relativePath)) ?? null;
+}
+
+async function ensureLookupCacheLoaded(): Promise<void> {
   const libraryPath = getLibraryPath();
+  invalidateLibraryLookupCacheIfPathChanged(libraryPath);
 
-  if (cachedLibraryPath !== libraryPath) {
-    cachedLibraryPath = null;
-    cachedItemsByImageFileName = null;
-  }
-
-  if (!cachedItemsByImageFileName) {
+  if (!cachedLibrary) {
     await readLibraryFile();
   }
-
-  return cachedItemsByImageFileName?.get(imageFileName) ?? null;
 }
 
 function refreshLibraryLookupCache(library: LibraryFile): void {
   cachedLibraryPath = getLibraryPath();
+  cachedLibrary = library;
+  cachedItemsById = new Map(library.items.map((item) => [item.id, item]));
   cachedItemsByImageFileName = new Map(library.items.map((item) => [item.imageFileName, item]));
+  cachedItemsByExternalPath = new Map(
+    library.items.flatMap((item) => {
+      const storage = item.mediaStorage;
+      return storage && storage !== "managed"
+        ? [[makeExternalPathKey(storage.rootId, storage.relativePath), item] as const]
+        : [];
+    }),
+  );
+}
+
+function invalidateLibraryLookupCacheIfPathChanged(libraryPath: string): void {
+  if (cachedLibraryPath === libraryPath) {
+    return;
+  }
+
+  cachedLibraryPath = null;
+  cachedLibrary = null;
+  cachedItemsById = null;
+  cachedItemsByImageFileName = null;
+  cachedItemsByExternalPath = null;
+}
+
+function makeExternalPathKey(rootId: string, relativePath: string): string {
+  return `${rootId}\u0000${relativePath}`;
 }
 
 export function normalizeItem(item: LibraryItem): LibraryItem {
@@ -218,6 +332,11 @@ export function normalizeItem(item: LibraryItem): LibraryItem {
     prompt: item.prompt,
     negativePrompt: item.negativePrompt,
     category: normalizeOptionalString(item.category),
+    categoryId: normalizeOptionalString(item.categoryId),
+    genreIds: normalizeOptionalStringArray(item.genreIds),
+    categoryConfidence: normalizeOptionalConfidence(item.categoryConfidence),
+    categorySource: normalizeCategorySource(item.categorySource),
+    legacyCategory: normalizeOptionalString(item.legacyCategory),
     tags: item.tags,
     generationMethod: normalizeOptionalString(item.generationMethod),
     promptType: normalizePromptType(item.promptType, item),
@@ -245,7 +364,7 @@ function isLibraryFile(input: unknown): input is LibraryFile {
   }
 
   return (
-    input.schemaVersion === schemaVersion &&
+    (input.schemaVersion === 1 || input.schemaVersion === 2) &&
     typeof input.updatedAt === "string" &&
     Array.isArray(input.items) &&
     input.items.every(isLibraryItem)
@@ -267,6 +386,11 @@ function isLibraryItem(input: unknown): input is LibraryItem {
     Array.isArray(input.tags) &&
     input.tags.every((tag) => typeof tag === "string") &&
     isOptionalString(input.category) &&
+    isOptionalString(input.categoryId) &&
+    isOptionalStringArray(input.genreIds) &&
+    isOptionalConfidence(input.categoryConfidence) &&
+    isOptionalCategorySource(input.categorySource) &&
+    isOptionalString(input.legacyCategory) &&
     isOptionalString(input.generationMethod) &&
     isOptionalPromptType(input.promptType) &&
     isOptionalString(input.sourceUrl) &&
@@ -289,6 +413,22 @@ function isLibraryItem(input: unknown): input is LibraryItem {
 
 function isOptionalNsfwRating(input: unknown): boolean {
   return input === undefined || input === "unknown" || input === "safe" || input === "nsfw";
+}
+
+function isOptionalCategorySource(input: unknown): boolean {
+  return input === undefined || input === null || input === "system" || input === "user" || input === "ai";
+}
+
+function isOptionalConfidence(input: unknown): boolean {
+  return input === undefined || input === null || (typeof input === "number" && Number.isFinite(input));
+}
+
+function normalizeCategorySource(input: CategoryAssignmentSource | null | undefined): CategoryAssignmentSource | null {
+  return input === "system" || input === "user" || input === "ai" ? input : null;
+}
+
+function normalizeOptionalConfidence(input: number | null | undefined): number | null {
+  return typeof input === "number" && Number.isFinite(input) ? Math.min(1, Math.max(0, input)) : null;
 }
 
 function isOptionalRemoteImageStatus(input: unknown): boolean {
@@ -339,7 +479,15 @@ function isOptionalNumber(input: unknown): boolean {
 }
 
 function isOptionalStringArray(input: unknown): boolean {
-  return input === undefined || (Array.isArray(input) && input.every((entry) => typeof entry === "string"));
+  return input === undefined || input === null || (Array.isArray(input) && input.every((entry) => typeof entry === "string"));
+}
+
+function normalizeOptionalStringArray(input: unknown): string[] | null {
+  if (input === undefined || input === null) {
+    return null;
+  }
+
+  return normalizeStringArray(input);
 }
 
 function isOptionalVideoKeyframes(input: unknown): boolean {

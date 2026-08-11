@@ -76,6 +76,11 @@ export function isSameLibraryItem(a: LibraryItem, b: LibraryItem): boolean {
     a.prompt !== b.prompt ||
     a.negativePrompt !== b.negativePrompt ||
     a.category !== b.category ||
+    a.categoryId !== b.categoryId ||
+    a.categorySource !== b.categorySource ||
+    a.categoryConfidence !== b.categoryConfidence ||
+    a.legacyCategory !== b.legacyCategory ||
+    !areStringArraysEqual(a.genreIds, b.genreIds) ||
     a.generationMethod !== b.generationMethod ||
     a.promptType !== b.promptType ||
     a.sourceUrl !== b.sourceUrl ||
@@ -126,12 +131,14 @@ function areStringArraysEqual(left: readonly string[] | null | undefined, right:
     return true;
   }
 
-  if (!left || !right || left.length !== right.length) {
+  const leftList = left ?? [];
+  const rightList = right ?? [];
+  if (leftList.length !== rightList.length) {
     return false;
   }
 
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) {
+  for (let index = 0; index < leftList.length; index += 1) {
+    if (leftList[index] !== rightList[index]) {
       return false;
     }
   }

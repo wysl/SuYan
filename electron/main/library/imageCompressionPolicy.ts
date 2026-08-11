@@ -43,6 +43,28 @@ const allowedImportImageExtensions = new Set<ImportImageExtension>([
   ".apng",
 ]);
 
+/**
+ * Formats whose original bytes are preserved and can be copied without decoding.
+ */
+export const passthroughImportImageExtensions = new Set<ImportImageExtension>([
+  ".gif",
+  ".avif",
+  ".heic",
+  ".heif",
+  ".tif",
+  ".tiff",
+  ".svg",
+  ".ico",
+  ".apng",
+]);
+
+export function isPassthroughImportImageExtension(
+  extension: string,
+): extension is ImportImageExtension {
+  const normalized = normalizeImportImageExtension(extension);
+  return normalized !== null && passthroughImportImageExtensions.has(normalized);
+}
+
 export function normalizeImportImageExtension(input: string): ImportImageExtension | null {
   const normalized = input.trim().toLowerCase();
 

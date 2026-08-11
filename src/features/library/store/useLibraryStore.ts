@@ -1,4 +1,14 @@
 import { create } from "zustand";
+import {
+  errorStatus,
+  failureStatus,
+  formatSavedBytes,
+  infoStatus,
+  progressStatus,
+  successStatus,
+  statusToastAutoDismissMs,
+  type StatusMessage,
+} from "./statusMessages";
 import type {
   CompressProgress,
   CompressResult,
@@ -6,6 +16,8 @@ import type {
   DownloadRemoteMaterialData,
   ImageCompressOptions,
   ImportClipboardImageForItemData,
+  ImportGeneratedImagesData,
+  ImportGeneratedImagesPayload,
   ImportImageBufferInput,
   ImportImagesData,
   IpcResult,
@@ -14,18 +26,23 @@ import type {
 import type {
   AiActionPreference,
   AiAnalyzePromptPayload,
+  AiGeneratedImage,
   AiFeatureAction,
   AiProviderModelCapability,
   AiProviderModelSettings,
   AiOptimizePromptPayload,
+  AiRecognitionSourcePreferences,
   AiReverseImagePromptPayload,
+  AiSummarizePromptTitlePayload,
   AiTranslatePromptData,
   AiTranslatePromptPayload,
   PublicAiProviderProfile,
   PublicAiProviderSettings,
   SaveAiProviderSettingsPayload,
 } from "../types/ai";
-import { buildAiActionInstructions } from "../types/ai";
+import { buildAiActionInstructions, normalizeAiRecognitionSourcePreferences } from "../types/ai";
+import { buildPublicAiSettingsPayload, updateAiActionModelPreference } from "../utils/aiSettingsDraft";
+import type { CanvasDraftSettings, CanvasGenerationResult } from "../types/canvas";
 import type {
   LibraryFile,
   LibraryItem,
@@ -42,45 +59,89 @@ import type {
   PromptLexiconKind,
   PromptLexiconSettings,
   ThemeMode,
+  CategoryWorkspaceState,
 } from "../types/library";
+import type {
+  CategoryAssignmentSource,
+  CategoryCandidateProposal,
+  CategoryInboxItem,
+  CategoryLearningEvent,
+  CategoryTaxonomy,
+} from "../types/category";
+import {
+  createEmptyCategoryTaxonomy,
+  ensureSystemCategoryTaxonomy,
+  mergeLexiconCategoriesIntoTaxonomy,
+  removeCategoryNode,
+  recomputeCategoryUsageCounts,
+  resolveCategoryName,
+  syncLexiconCategoriesFromTaxonomy,
+  taxonomyToLexiconCategories,
+  upsertCustomCategoryNode,
+} from "../utils/categoryTaxonomy";
+import {
+  collectUsedTagKeysFromItems,
+  pruneOrphanTagLexiconEntries,
+  sanitizeMaterialTags,
+} from "../utils/tagNormalization";
+import { assignItemCategory } from "../utils/categoryMigration";
+import { normalizeCategoryLabelKey } from "../utils/categoryId";
 import type { ProxyDetectionData, ProxySettings } from "../types/proxy";
 import { defaultProxySettings } from "../types/proxy";
 import { buildLibraryFile, uniqueTags } from "../utils/buildLibraryFile";
+import { defaultCanvasDraftSettings, normalizeCanvasDraftSettings } from "../utils/canvasGeneration";
 import {
   defaultNsfwGradingSpeed,
   getNsfwGradingConcurrency,
 } from "../utils/nsfwGradingSpeed";
-import { analyzePromptText, buildAiPromptOptionAnalysis, normalizeConcretePromptTags } from "../utils/promptAnalysis";
+import {
+  analyzePromptText,
+  analyzePromptTags,
+  isolateCategoryAnalysisResult,
+  normalizeConcretePromptTags,
+} from "../utils/promptAnalysis";
 import {
   buildPromptAnalysisFromRemote,
   type PromptAnalysisRunResult,
 } from "../utils/remotePromptAnalysis";
 import { resolvePromptGroupPatchItemIds } from "../utils/promptImageGroups";
 import {
-  resolveNsfwRatingFromRemoteAnalysis,
+  resolveNsfwRatingFromRemoteAnalysisV2,
   shouldGradeNsfwItem,
 } from "../utils/nsfwRating";
 import { applyTagConfigurationToItems, type TagConfigurationDraft } from "../utils/tagSettings";
 import { getUiErrorMessage } from "../utils/uiMessages";
+import { buildAiErrorPresentation, type AiErrorPresentation } from "../utils/aiErrorPresentation";
 import { reconcileItemsByIdentity } from "../utils/libraryItemIdentity";
 import { applyThemeModeToRoot, finishThemeModeSwitch } from "../utils/themeMode";
 import { isPendingStatusFeedbackText, type StatusFeedbackMessage } from "../utils/statusFeedback";
 import {
   builtinModuleDefinitions,
-  hasBuiltinModuleCapability,
-  isBuiltinModuleInstalled,
   resolveBuiltinModuleState,
   getModuleRuntimeDependencies,
   type BuiltinModuleId,
   type BuiltinModuleState,
   type BuiltinModuleStatePatch,
 } from "../utils/moduleRegistry";
+import { resolveVideoRuntimeStateAfterProbe } from "../utils/moduleManagement";
 
-type StatusMessage = {
-  type: "success" | "error" | "info";
-  text: string;
-  autoDismissMs: number | null;
-};
+// Settings writes share one JSON file. Serialize them so an autosave from the
+// tag/category workspace cannot finish after a newer custom-entry save and
+// overwrite it with an older snapshot.
+let viewSettingsWriteChain: Promise<void> = Promise.resolve();
+let canvasDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let materialBrowserScrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function saveLibraryViewSettingsSerialized(
+  settings: LibraryViewSettings,
+): Promise<IpcResult<LibraryViewSettings>> {
+  const task = viewSettingsWriteChain.then(() => window.suyanApi.saveLibraryViewSettings(settings));
+  viewSettingsWriteChain = task.then(
+    () => undefined,
+    () => undefined,
+  );
+  return task;
+}
 
 type SaveItemOptions = {
   background?: boolean;
@@ -105,7 +166,6 @@ const defaultMasonryTileWidth = 4;
 const minMasonryTileWidth = 2;
 const maxMasonryTileWidth = 10;
 const importOperationTimeoutMs = 65_000;
-const statusToastAutoDismissMs = 1_800;
 
 const inFlightRemoteMaterialDownloads = new Set<string>();
 
@@ -116,8 +176,12 @@ type LibraryState = {
   /** 刚导入的素材 id（按导入顺序），用于素材浏览列表临时置顶展示。 */
   recentImportPinIds: string[];
   searchQuery: string;
+  canvasDraft: CanvasDraftSettings;
+  canvasGenerationResults: CanvasGenerationResult[];
+  canvasLastModel: string;
   tagOrder: string[];
   likedImageIds: string[];
+  starredRecommendations: string[];
   generationModelOrder: string[];
   hiddenGenerationModels: string[];
   themeMode: ThemeMode;
@@ -130,16 +194,26 @@ type LibraryState = {
   materialBrowserSortMode: MaterialBrowserSortMode;
   materialBrowserSortDirection: MaterialBrowserSortDirection;
   materialBrowserRandomSeed: number;
+  materialBrowserScrollTop: number;
   networkMaterialImportMode: NetworkMaterialImportMode;
   promptLexicons: PromptLexiconSettings | null;
+  categoryTaxonomy: import("../types/category").CategoryTaxonomy | null;
+  categoryInbox: import("../types/category").CategoryInboxItem[];
+  categoryCandidates: import("../types/category").CategoryCandidateProposal[];
+  categoryLearningEvents: import("../types/category").CategoryLearningEvent[];
   aiSettings: PublicAiProviderSettings;
   proxySettings: ProxySettings;
   isLoading: boolean;
   isBusy: boolean;
   statusMessage: StatusMessage | null;
+  aiErrorDialog: AiErrorPresentation | null;
+  aiAnalysisCircuitOpen: boolean;
   load: () => Promise<void>;
   showStatusMessage: (message: StatusFeedbackMessage) => void;
   setSearchQuery: (searchQuery: string) => void;
+  updateCanvasDraft: (patch: Partial<CanvasDraftSettings>) => void;
+  setCanvasGenerationResults: (results: CanvasGenerationResult[]) => void;
+  setCanvasLastModel: (model: string) => void;
   setSelectedItemId: (selectedItemId: string | null) => void;
   clearRecentImportPins: () => void;
   setThemeMode: (themeMode: ThemeMode) => Promise<void>;
@@ -155,30 +229,44 @@ type LibraryState = {
   saveNetworkMaterialImportMode: (networkMaterialImportMode: NetworkMaterialImportMode) => Promise<boolean>;
   saveMasonryTileWidth: (masonryTileWidth: number) => Promise<void>;
   saveMaterialBrowserSettings: (patch: MaterialBrowserSettingsPatch) => Promise<boolean>;
+  saveMaterialBrowserScrollTop: (scrollTop: number) => void;
   gradeAllImagesForNsfw: (options?: { force?: boolean }) => Promise<void>;
-  saveAiSettings: (settings: SaveAiProviderSettingsPayload) => Promise<boolean>;
+  saveAiSettings: (settings: SaveAiProviderSettingsPayload) => Promise<boolean | string>;
+  saveAiActionModelPreference: (
+    action: AiFeatureAction,
+    selection: { profileId: string; modelId: string },
+  ) => Promise<boolean>;
+  saveAiRecognitionSourcePreferences: (preferences: AiRecognitionSourcePreferences) => Promise<boolean>;
   testAiSettings: (settings: SaveAiProviderSettingsPayload) => Promise<AiConnectionTestResult>;
   listAiModels: (settings: SaveAiProviderSettingsPayload) => Promise<AiProviderModelSettings[] | null>;
   copyAiApiKey: (profileId: string, draftApiKey?: string) => Promise<boolean>;
   analyzePromptWithAi: (payload: AiAnalyzePromptPayload) => Promise<PromptAnalysisRunResult>;
   optimizePromptWithAi: (payload: AiOptimizePromptPayload) => Promise<string | null>;
+  summarizePromptTitleWithAi: (payload: AiSummarizePromptTitlePayload) => Promise<string | null>;
   translatePromptWithAi: (payload: AiTranslatePromptPayload) => Promise<AiTranslatePromptData | null>;
   reverseImagePromptWithAi: (payload: AiReverseImagePromptPayload) => Promise<string | null>;
   saveProxySettings: (settings: ProxySettings) => Promise<boolean>;
   testProxySettings: (settings: ProxySettings) => Promise<boolean>;
   detectProxySettings: () => Promise<ProxyDetectionData | null>;
   clearStatus: () => void;
+  clearAiErrorDialog: () => void;
+  clearAiAnalysisCircuit: () => void;
   openExternalUrl: (url: string, label?: string) => Promise<boolean>;
   importImages: () => Promise<void>;
   importManagedLibraryDirectory: () => Promise<void>;
   addAndScanLibraryRoot: () => Promise<void>;
   scanLibraryRoot: (rootId: string) => Promise<void>;
+  reorderLibraryRoots: (rootIds: string[]) => Promise<void>;
   setLibraryRootWatch: (rootId: string, enabled: boolean) => Promise<void>;
   remapLibraryRoot: (rootId: string) => Promise<void>;
   removeLibraryRoot: (rootId: string) => Promise<void>;
   purgeMissingLibraryRootItems: (rootId: string) => Promise<void>;
   validateExternalLibrary: () => Promise<void>;
   importImageBuffers: (images: ImportImageBufferInput[]) => Promise<void>;
+  importGeneratedImages: (
+    images: AiGeneratedImage[],
+    metadata: ImportGeneratedImagesPayload["metadata"],
+  ) => Promise<LibraryItem[]>;
   importImageFilesForItem: (itemId: string) => Promise<string | null>;
   importWordDocument: () => Promise<void>;
   importClipboardImage: () => Promise<void>;
@@ -192,16 +280,55 @@ type LibraryState = {
   importZip: () => Promise<void>;
   exportZip: (itemIds?: string[]) => Promise<void>;
   saveItem: (itemId: string, patch: Partial<LibraryItem>, options?: SaveItemOptions) => Promise<void>;
+  /**
+   * Apply the same or per-item patches to many items and persist once.
+   * Used by bulk clear-category / clear-tags to avoid N full library writes.
+   */
+  saveItemsBatch: (
+    patches: ReadonlyArray<{ itemId: string; patch: Partial<LibraryItem> }>,
+    options?: SaveItemOptions,
+  ) => Promise<boolean>;
+  /**
+   * Clear assignment data for one lexicon domain and persist both library + view-settings.
+   * - categories: wipe item category/genre fields (system taxonomy tree stays)
+   * - tags: wipe item tags + empty tag lexicon directory
+   */
+  clearLexiconDomain: (domain: "categories" | "tags") => Promise<boolean>;
   saveTagConfiguration: (
     originalTags: string[],
     drafts: TagConfigurationDraft[],
     promptLexicons?: PromptLexiconSettings,
   ) => Promise<void>;
-  savePromptLexicons: (promptLexicons: PromptLexiconSettings) => Promise<boolean>;
+  savePromptLexicons: (
+    promptLexicons: PromptLexiconSettings,
+    options?: { silent?: boolean },
+  ) => Promise<boolean>;
+  assignItemCategoryId: (
+    itemId: string,
+    categoryId: string | null,
+    source?: import("../types/category").CategoryAssignmentSource,
+  ) => Promise<void>;
+  /** Move one or more prompt groups (by primary item id) into a category. */
+  movePromptGroupsToCategory: (
+    itemIds: readonly string[],
+    categoryId: string | null,
+    source?: import("../types/category").CategoryAssignmentSource,
+  ) => Promise<boolean>;
+  upsertCustomCategory: (input: {
+    id?: string | null;
+    name: string;
+    group?: string | null;
+    description?: string | null;
+    parentId?: string | null;
+    imageFileName?: string | null;
+  }) => Promise<string | null>;
+  deleteCustomCategory: (categoryId: string, reassignToCategoryId?: string | null) => Promise<boolean>;
+  dismissCategoryInboxItem: (itemId: string) => Promise<void>;
   importPromptLexicon: (kind: PromptLexiconKind) => Promise<PromptLexiconEntry[] | null>;
   exportPromptLexicon: (kind: PromptLexiconKind, items: PromptLexiconEntry[]) => Promise<void>;
   importPromptLexiconImage: () => Promise<string | null>;
   toggleFavoriteImage: (itemId: string) => Promise<void>;
+  toggleRecommendationStar: (url: string) => Promise<void>;
   deleteItems: (itemIds: string[], deleteImages: boolean) => Promise<void>;
   deleteSelected: (deleteImages: boolean) => Promise<void>;
   copyImage: (imageFileName: string) => Promise<void>;
@@ -219,12 +346,21 @@ type LibraryState = {
   cancelCompress: () => Promise<void>;
   moduleState: BuiltinModuleState;
   setModuleState: (patch: BuiltinModuleStatePatch) => Promise<boolean>;
-  installModule: (moduleId: BuiltinModuleId) => Promise<boolean>;
+  installModule: (
+    moduleId: BuiltinModuleId,
+    options?: { source?: "download" | "local" },
+  ) => Promise<boolean>;
+  /** 实测 video-runtime 二进制是否可用，并同步修正 moduleState。 */
+  checkVideoRuntime: () => Promise<boolean>;
 };
 
 let themeSwitchRevision = 0;
 let themePersistenceQueue: Promise<void> = Promise.resolve();
-let isExternalLibraryWatchSubscribed = false;
+/** 主进程事件订阅（外部库变更 + FFmpeg 安装进度）只挂一次。 */
+let isMainProcessEventSubscribed = false;
+/** checkVideoRuntime 短缓存：避免关键帧/压缩连点时重复 IPC。安装成功后会主动刷新。 */
+let videoRuntimeProbeCache: { installed: boolean; checkedAt: number } | null = null;
+const VIDEO_RUNTIME_PROBE_TTL_MS = 30_000;
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   items: [],
@@ -232,8 +368,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   selectedItemId: null,
   recentImportPinIds: [],
   searchQuery: "",
+  canvasDraft: { ...defaultCanvasDraftSettings },
+  canvasGenerationResults: [],
+  canvasLastModel: "",
   tagOrder: [],
   likedImageIds: [],
+  starredRecommendations: [],
   generationModelOrder: [],
   hiddenGenerationModels: [],
   themeMode: "light",
@@ -246,8 +386,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   materialBrowserSortMode: "importedAt",
   materialBrowserSortDirection: "desc",
   materialBrowserRandomSeed: 0,
+  materialBrowserScrollTop: 0,
   networkMaterialImportMode: "download",
   promptLexicons: null,
+  categoryTaxonomy: null,
+  categoryInbox: [],
+  categoryCandidates: [],
+  categoryLearningEvents: [],
   aiSettings: {
     activeProfileId: "default",
     profiles: [
@@ -269,6 +414,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       },
     ],
     actionPreferences: {},
+    recognitionSourcePreferences: {},
     enabled: false,
     baseUrl: "https://api.openai.com/v1",
     hasApiKey: false,
@@ -280,14 +426,23 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   isLoading: false,
   isBusy: false,
   statusMessage: null,
+  aiErrorDialog: null,
+  aiAnalysisCircuitOpen: false,
 
   load: async () => {
     const loadStartedAt = performance.now();
     logRendererStartupEvent("library-load:start");
     set({ isLoading: true, statusMessage: null });
 
-    if (!isExternalLibraryWatchSubscribed) {
-      isExternalLibraryWatchSubscribed = true;
+    if (!isMainProcessEventSubscribed) {
+      isMainProcessEventSubscribed = true;
+      window.suyanApi.onFfmpegInstallProgress((progress) => {
+        if (progress.phase === "done") {
+          set({ statusMessage: successStatus("视频运行时安装完成。") });
+          return;
+        }
+        set({ statusMessage: progressStatus(progress.message) });
+      });
       window.suyanApi.onExternalLibraryChanged((data) => {
         const previousItemIds = new Set(get().items.map((item) => item.id));
         setLibrary(data.library, set, get);
@@ -340,6 +495,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       startupPromptLexiconSync: "skipped",
     });
 
+    // 解绑后视频运行时不再随包分发：启动时用真实二进制可用性校正持久化状态。
+    void get().checkVideoRuntime();
+
+    // Prune orphan tag-lexicon rows after load so cleared/unused labels don't reappear.
+    scheduleIdleWork(() => {
+      void pruneOrphanTagsAfterLoad(set, get).catch(() => undefined);
+    });
+
     void window.suyanApi
       .readAiSettings()
       .then((aiSettingsResult) => {
@@ -380,6 +543,31 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   setSearchQuery: (searchQuery) => set({ searchQuery }),
+  updateCanvasDraft: (patch) => {
+    const nextCanvasDraft = normalizeCanvasDraftSettings({ ...get().canvasDraft, ...patch });
+    set({ canvasDraft: nextCanvasDraft });
+
+    if (canvasDraftSaveTimer) {
+      clearTimeout(canvasDraftSaveTimer);
+    }
+
+    canvasDraftSaveTimer = setTimeout(() => {
+      canvasDraftSaveTimer = null;
+      void saveLibraryViewSettingsSerialized(buildLibraryViewSettings(get()))
+        .then((result) => {
+          if (!result.ok) {
+            set({ statusMessage: errorStatus(result.error.code, result.error.message) });
+          }
+        })
+        .catch(() => {
+          set({ statusMessage: errorStatus("VIEW_SETTINGS_SAVE_FAILED", "画布草稿自动保存失败，请稍后重试。") });
+        });
+    }, 450);
+  },
+  setCanvasGenerationResults: (results) => set({ canvasGenerationResults: results }),
+
+  setCanvasLastModel: (model) => set({ canvasLastModel: model }),
+
   setSelectedItemId: (selectedItemId) => set({ selectedItemId }),
   clearRecentImportPins: () => {
     if (get().recentImportPinIds.length === 0) {
@@ -425,7 +613,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         return;
       }
 
-      const result = await window.suyanApi.saveLibraryViewSettings(
+      const result = await saveLibraryViewSettingsSerialized(
         buildLibraryViewSettings(get(), { themeMode }),
       );
 
@@ -460,7 +648,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     set({ generationModelOrder, hiddenGenerationModels, statusMessage: null });
 
-    const result = await window.suyanApi.saveLibraryViewSettings(
+    const result = await saveLibraryViewSettingsSerialized(
       buildLibraryViewSettings(get(), { generationModelOrder, hiddenGenerationModels }),
     );
 
@@ -487,7 +675,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       statusMessage: null,
     });
 
-    const result = await window.suyanApi.saveLibraryViewSettings(
+    const result = await saveLibraryViewSettingsSerialized(
       buildLibraryViewSettings(get(), {
         autoNsfwGrading: settings.autoNsfwGrading,
         blurNsfwImages: settings.blurNsfwImages,
@@ -514,7 +702,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     set({ networkMaterialImportMode, statusMessage: null });
 
-    const result = await window.suyanApi.saveLibraryViewSettings(
+    const result = await saveLibraryViewSettingsSerialized(
       buildLibraryViewSettings(get(), { networkMaterialImportMode }),
     );
 
@@ -534,14 +722,24 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const currentMasonryTileWidth = get().masonryTileWidth;
     const nextMasonryTileWidth = normalizeMasonryTileWidth(masonryTileWidth);
 
+    if (nextMasonryTileWidth === currentMasonryTileWidth) {
+      return;
+    }
+
+    // Update local state only; avoid full settings re-sync chatter while dragging
+    // ends — settings persist in background, UI already holds the chosen count.
     set({ masonryTileWidth: nextMasonryTileWidth, statusMessage: null });
 
-    const result = await window.suyanApi.saveLibraryViewSettings(
+    const result = await saveLibraryViewSettingsSerialized(
       buildLibraryViewSettings(get(), { masonryTileWidth: nextMasonryTileWidth }),
     );
 
     if (result.ok) {
-      syncLibraryViewSettings(set, result.data);
+      // Keep masonryTileWidth from result, but do not thrash other UI if unchanged.
+      const savedWidth = normalizeMasonryTileWidth(result.data.masonryTileWidth);
+      if (savedWidth !== get().masonryTileWidth) {
+        set({ masonryTileWidth: savedWidth });
+      }
       return;
     }
 
@@ -569,7 +767,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     set({ ...nextSettings, statusMessage: null });
 
-    const result = await window.suyanApi.saveLibraryViewSettings(buildLibraryViewSettings(get(), nextSettings));
+    const result = await saveLibraryViewSettingsSerialized(buildLibraryViewSettings(get(), nextSettings));
 
     if (result.ok) {
       syncLibraryViewSettings(set, result.data);
@@ -578,6 +776,30 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     set({ ...currentSettings, statusMessage: errorStatus(result.error.code, result.error.message) });
     return false;
+  },
+
+  saveMaterialBrowserScrollTop: (scrollTop) => {
+    const nextScrollTop = normalizeMaterialBrowserScrollTop(scrollTop);
+    if (materialBrowserScrollSaveTimer) {
+      clearTimeout(materialBrowserScrollSaveTimer);
+    }
+
+    materialBrowserScrollSaveTimer = setTimeout(() => {
+      materialBrowserScrollSaveTimer = null;
+      if (nextScrollTop === get().materialBrowserScrollTop) {
+        return;
+      }
+      set({ materialBrowserScrollTop: nextScrollTop });
+      void saveLibraryViewSettingsSerialized(buildLibraryViewSettings(get()))
+        .then((result) => {
+          if (!result.ok) {
+            set({ statusMessage: errorStatus(result.error.code, result.error.message) });
+          }
+        })
+        .catch(() => {
+          set({ statusMessage: errorStatus("VIEW_SETTINGS_SAVE_FAILED", "素材浏览位置保存失败，请稍后重试。") });
+        });
+    }, 300);
   },
 
   gradeAllImagesForNsfw: async (options = {}) => {
@@ -589,24 +811,160 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   saveAiSettings: async (settings) => {
     const currentAiSettings = get().aiSettings;
 
-    set({ isBusy: true, statusMessage: null });
+    set({ isBusy: true, statusMessage: progressStatus("正在保存 API 设置...") });
 
-    const result = await window.suyanApi.saveAiSettings(settings);
+    try {
+      const result = await window.suyanApi.saveAiSettings(settings);
 
-    if (result.ok) {
-      set({
-        aiSettings: result.data,
-        statusMessage: successStatus(result.data.enabled ? "已保存远程模型配置。" : "已关闭远程 AI。"),
-      });
-    } else {
+      if (result.ok) {
+        set({
+          aiSettings: result.data,
+          aiErrorDialog: null,
+          aiAnalysisCircuitOpen: false,
+          statusMessage: successStatus(result.data.enabled ? "已保存远程模型配置。" : "已关闭远程 AI。"),
+        });
+        set({ isBusy: false });
+        return true;
+      }
+
+      const errorMessage = result.error?.message || "API 设置保存失败。";
       set({
         aiSettings: currentAiSettings,
-        statusMessage: errorStatus(result.error.code, result.error.message),
+        statusMessage: errorStatus(result.error.code, errorMessage),
       });
+      set({ isBusy: false });
+      return errorMessage;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "API 设置保存失败。";
+      set({
+        aiSettings: currentAiSettings,
+        statusMessage: errorStatus("AI_SETTINGS_SAVE_FAILED", errorMessage),
+      });
+      set({ isBusy: false });
+      return errorMessage;
+    }
+  },
+
+  saveAiActionModelPreference: async (action, selection) => {
+    const currentAiSettings = get().aiSettings;
+    const nextAiSettings = updateAiActionModelPreference(currentAiSettings, action, selection);
+
+    if (!nextAiSettings) {
+      set({
+        statusMessage: errorStatus("AI_SETTINGS_INVALID", "所选 API 或模型不可用于当前功能。"),
+      });
+      return false;
     }
 
-    set({ isBusy: false });
-    return result.ok;
+    const previousPreference = currentAiSettings.actionPreferences[action];
+    set({ aiSettings: nextAiSettings, statusMessage: null });
+
+    try {
+      const result = await window.suyanApi.saveAiSettings(
+        buildPublicAiSettingsPayload(
+          nextAiSettings,
+          nextAiSettings.actionPreferences,
+          nextAiSettings.recognitionSourcePreferences,
+        ),
+      );
+
+      if (result.ok) {
+        const latestAiSettings = get().aiSettings;
+
+        // Keep any newer quick preferences already visible while this request was in flight.
+        // This prevents an older response for one action from resetting another action.
+        set({
+          aiSettings: {
+            ...result.data,
+            actionPreferences: {
+              ...result.data.actionPreferences,
+              ...latestAiSettings.actionPreferences,
+            },
+            recognitionSourcePreferences: latestAiSettings.recognitionSourcePreferences,
+          },
+        });
+        return true;
+      }
+
+      const latestAiSettings = get().aiSettings;
+      const latestPreference = latestAiSettings.actionPreferences[action];
+
+      if (
+        latestPreference?.profileId === selection.profileId &&
+        latestPreference?.modelId === selection.modelId
+      ) {
+        const restoredActionPreferences = { ...latestAiSettings.actionPreferences };
+
+        if (previousPreference) {
+          restoredActionPreferences[action] = previousPreference;
+        } else {
+          delete restoredActionPreferences[action];
+        }
+
+        set({
+          aiSettings: {
+            ...latestAiSettings,
+            actionPreferences: restoredActionPreferences,
+          },
+          statusMessage: errorStatus(result.error.code, result.error.message),
+        });
+      }
+      return false;
+    } catch (error) {
+      const latestAiSettings = get().aiSettings;
+      const latestPreference = latestAiSettings.actionPreferences[action];
+
+      if (
+        latestPreference?.profileId === selection.profileId &&
+        latestPreference?.modelId === selection.modelId
+      ) {
+        const restoredActionPreferences = { ...latestAiSettings.actionPreferences };
+
+        if (previousPreference) {
+          restoredActionPreferences[action] = previousPreference;
+        } else {
+          delete restoredActionPreferences[action];
+        }
+
+        set({
+          aiSettings: {
+            ...latestAiSettings,
+            actionPreferences: restoredActionPreferences,
+          },
+          statusMessage: errorStatus(
+            "AI_SETTINGS_SAVE_FAILED",
+            error instanceof Error ? error.message : "API 模型偏好保存失败。",
+          ),
+        });
+      }
+      return false;
+    }
+  },
+
+  saveAiRecognitionSourcePreferences: async (preferences) => {
+    const currentAiSettings = get().aiSettings;
+    const recognitionSourcePreferences = normalizeAiRecognitionSourcePreferences(preferences);
+    const nextAiSettings: PublicAiProviderSettings = {
+      ...currentAiSettings,
+      recognitionSourcePreferences,
+    };
+
+    set({ aiSettings: nextAiSettings, statusMessage: null });
+
+    const result = await window.suyanApi.saveAiSettings(
+      buildPublicAiSettingsPayload(nextAiSettings, nextAiSettings.actionPreferences, recognitionSourcePreferences),
+    );
+
+    if (result.ok) {
+      set({ aiSettings: result.data });
+      return true;
+    }
+
+    set({
+      aiSettings: currentAiSettings,
+      statusMessage: errorStatus(result.error.code, result.error.message),
+    });
+    return false;
   },
 
   testAiSettings: async (settings) => {
@@ -616,8 +974,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     const statusMessage = result.ok
       ? successStatus("远程 AI 连接成功。")
       : errorStatus(result.error.code, result.error.message);
+    const presentation = result.ok
+      ? null
+      : buildAiErrorPresentation(result.error.code, result.error.message, "ai-connection");
 
     set({
+      aiErrorDialog: presentation,
+      aiAnalysisCircuitOpen: presentation?.shouldStopBackground === true ? true : result.ok ? false : get().aiAnalysisCircuitOpen,
       statusMessage,
     });
     set({ isBusy: false });
@@ -658,7 +1021,14 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   analyzePromptWithAi: async (payload) => {
     const startedAt = Date.now();
-    const resolvedPayload = applyAiActionPreference(get().aiSettings, payload.target, payload);
+    const taxonomy =
+      get().categoryTaxonomy ??
+      (await import("../utils/categoryTaxonomy")).createEmptyCategoryTaxonomy();
+    const { withKnownCategoriesFromTaxonomy, buildTaxonomyCategoryAiResult } = await import("../utils/categoryAiBinding");
+    const resolvedPayload = withKnownCategoriesFromTaxonomy(
+      applyAiActionPreference(get().aiSettings, payload.target, withoutNegativePromptForAnalysis(payload)),
+      taxonomy,
+    );
     const runInBackground = payload.runInBackground === true;
     const logAiAnalysisDone = (
       ok: boolean,
@@ -672,24 +1042,113 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         ...details,
       });
     };
+    const publishAiError = (code: string, message: string) => {
+      const presentation = buildAiErrorPresentation(code, message, resolvedPayload.target);
+      const currentPresentation = get().aiErrorDialog;
+      set({
+        aiErrorDialog:
+          currentPresentation?.code === presentation.code ? currentPresentation : presentation,
+        aiAnalysisCircuitOpen: get().aiAnalysisCircuitOpen || presentation.shouldStopBackground,
+      });
+      return presentation;
+    };
 
     logRendererStartupEvent("ai-analysis:start", {
       runInBackground,
       target: resolvedPayload.target,
     });
 
-    const localAnalysis = (): PromptAnalysisRunResult => ({
-      analysis:
-        resolvedPayload.target === "prompt-options"
-          ? buildAiPromptOptionAnalysis(resolvedPayload)
+    const persistTaxonomyIfGrown = (nextTaxonomy: CategoryTaxonomy, createdCategoryIds: readonly string[]) => {
+      if (createdCategoryIds.length === 0) {
+        return nextTaxonomy;
+      }
+      const nextPromptLexicons = syncLexiconCategoriesFromTaxonomy(get().promptLexicons, nextTaxonomy);
+      set({
+        categoryTaxonomy: nextTaxonomy,
+        promptLexicons: nextPromptLexicons,
+      });
+      void saveLibraryViewSettingsSerialized(
+          buildLibraryViewSettings(get(), {
+            promptLexicons: nextPromptLexicons,
+            categoryWorkspace: {
+              taxonomy: nextTaxonomy,
+              inbox: get().categoryInbox,
+              candidates: get().categoryCandidates,
+              learningEvents: get().categoryLearningEvents,
+            },
+          }),
+        )
+        .then((result) => {
+          if (result.ok) {
+            syncLibraryViewSettings(set, result.data);
+          }
+        })
+        .catch(() => undefined);
+      return nextTaxonomy;
+    };
+
+    const localAnalysis = (): PromptAnalysisRunResult => {
+      const base =
+        resolvedPayload.target === "prompt-tags" || resolvedPayload.target === "image-tags"
+          ? analyzePromptTags(resolvedPayload.prompt, {
+              currentCategory: resolvedPayload.category,
+            })
           : analyzePromptText(resolvedPayload.prompt, {
               title: resolvedPayload.title,
               tags: resolvedPayload.tags,
               currentCategory: resolvedPayload.category,
               knownCategories: resolvedPayload.knownCategories,
+            });
+
+      if (resolvedPayload.target === "prompt-category" || resolvedPayload.target === "image-category") {
+        const bound = buildTaxonomyCategoryAiResult(
+          taxonomy,
+          {
+            primaryCategory: base.primaryCategory,
+            suggestedCategories: base.suggestedCategories,
+          },
+          [resolvedPayload.title, resolvedPayload.prompt].filter(Boolean).join("\n"),
+          { autoCreateMissing: true },
+        );
+        const activeTaxonomy = persistTaxonomyIfGrown(bound.taxonomy, bound.createdCategoryIds);
+        const names = bound.suggestions
+          .map((suggestion) => activeTaxonomy.nodes.find((node) => node.id === suggestion.categoryId)?.name)
+          .filter((name): name is string => Boolean(name));
+        // Category path: never leak parameter chips/sections/tags into genre results.
+        return {
+          analysis: isolateCategoryAnalysisResult({
+            ...base,
+            suggestedCategories: names,
+            primaryCategory: names[0] ?? "未分类",
+            taxonomySuggestions: bound.suggestions,
+            taxonomyBand: bound.band,
+            taxonomyPrimaryCategoryId: bound.primary?.categoryId ?? null,
+            taxonomyCreatedCategoryIds: bound.createdCategoryIds,
+            taxonomySnapshot: bound.createdCategoryIds.length > 0 ? bound.taxonomy : undefined,
+          }),
+          source: "local",
+        };
+      }
+
+      if (resolvedPayload.target === "prompt-tags" || resolvedPayload.target === "image-tags") {
+        return {
+          analysis: {
+            chips: [],
+            sections: [],
+            suggestedTags: normalizeConcretePromptTags(base.suggestedTags, {
+              category: resolvedPayload.category,
+              maxCount: 15,
             }),
-      source: "local",
-    });
+            suggestedCategories: [],
+            primaryCategory: "未分类",
+            template: "",
+          },
+          source: "local",
+        };
+      }
+
+      return { analysis: base, source: "local" };
+    };
     const emptyImageAnalysis = (): PromptAnalysisRunResult => ({
       analysis: {
         chips: [],
@@ -698,9 +1157,35 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         suggestedCategories: [],
         primaryCategory: resolvedPayload.category || "未分类",
         template: "",
+        taxonomySuggestions: [],
+        taxonomyBand: "none",
+        taxonomyPrimaryCategoryId: null,
       },
       source: "local",
     });
+
+    // 空输入绝不能送进模型：提示词为空时模型拿不到任何素材信息，却仍会按提示里的
+    // 数量要求从分类目录里硬凑答案（曾给人像写真返回 产品摄影/食品摄影/风光摄影）。
+    // 宁可不返回分类，也不能写入与效果图无关的结果。
+    if (
+      (resolvedPayload.target === "prompt-category" || resolvedPayload.target === "prompt-tags") &&
+      !resolvedPayload.prompt.trim()
+    ) {
+      if (!runInBackground) {
+        set({ statusMessage: infoStatus("当前素材没有提示词内容，请改用「从效果图分析」。") });
+      }
+      const result = emptyImageAnalysis();
+      logAiAnalysisDone(false, { reason: "empty-prompt-input", source: result.source });
+      return result;
+    }
+
+    if (runInBackground && get().aiAnalysisCircuitOpen) {
+      const result = resolvedPayload.target === "image-category" || resolvedPayload.target === "image-tags"
+        ? emptyImageAnalysis()
+        : localAnalysis();
+      logAiAnalysisDone(false, { reason: "ai-circuit-open", source: result.source });
+      return result;
+    }
 
     const remoteAiReadiness = resolveRemoteAiReadiness(
       get().aiSettings,
@@ -711,12 +1196,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     );
 
     if (!remoteAiReadiness.ready) {
-      if (
-        resolvedPayload.target === "prompt" ||
-        resolvedPayload.target === "prompt-category" ||
-        resolvedPayload.target === "prompt-tags" ||
-        resolvedPayload.target === "prompt-options"
-      ) {
+      if (resolvedPayload.target === "prompt-category" || resolvedPayload.target === "prompt-tags") {
         if (!runInBackground) {
           set({ statusMessage: infoStatus("远程 AI 未配置，已使用本地分析。") });
         }
@@ -742,9 +1222,19 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (result.ok) {
       try {
         const analysis = buildPromptAnalysisFromRemote(resolvedPayload.prompt, result.data.analysis, resolvedPayload.target, {
-          optionValue: resolvedPayload.optionValue,
-          optionVariable: resolvedPayload.optionVariable,
+          taxonomy: get().categoryTaxonomy ?? taxonomy,
+          knownCategories: resolvedPayload.knownCategories,
+          knownTags: get().promptLexicons?.tags?.map((entry) => entry.label) ?? [],
         });
+
+        if (
+          (resolvedPayload.target === "prompt-category" || resolvedPayload.target === "image-category") &&
+          analysis.taxonomySnapshot &&
+          analysis.taxonomyCreatedCategoryIds &&
+          analysis.taxonomyCreatedCategoryIds.length > 0
+        ) {
+          persistTaxonomyIfGrown(analysis.taxonomySnapshot, analysis.taxonomyCreatedCategoryIds);
+        }
 
         if (!runInBackground) {
           set({ statusMessage: successStatus(getAiAnalyzeSuccessText(resolvedPayload.target)) });
@@ -754,23 +1244,22 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
           analysis,
           source: "remote",
         };
-        logAiAnalysisDone(true, { source: remoteResult.source });
+        logAiAnalysisDone(true, {
+          source: remoteResult.source,
+          taxonomyBand: analysis.taxonomyBand,
+          taxonomyPrimaryCategoryId: analysis.taxonomyPrimaryCategoryId,
+        });
         return remoteResult;
       } catch {
-        if (
-          resolvedPayload.target !== "prompt" &&
-          resolvedPayload.target !== "prompt-category" &&
-          resolvedPayload.target !== "prompt-tags"
-        ) {
-          if (resolvedPayload.target === "prompt-options") {
-            if (!runInBackground) {
-              set({ statusMessage: infoStatus("远程 AI 结果不可用，已生成本地词条。") });
-            }
-            const fallback = localAnalysis();
-            logAiAnalysisDone(false, { reason: "remote-parse-failed", source: fallback.source });
-            return fallback;
-          }
+        const presentation = publishAiError(
+          "AI_REMOTE_RESPONSE_INVALID",
+          "AI \u8fd4\u56de\u5185\u5bb9\u65e0\u6cd5\u89e3\u6790\u4e3a\u5e94\u7528\u9700\u8981\u7684 JSON \u7ed3\u6784\u3002",
+        );
+        if (!runInBackground) {
+          set({ statusMessage: errorStatus(presentation.code, presentation.summary) });
+        }
 
+        if (resolvedPayload.target !== "prompt-category" && resolvedPayload.target !== "prompt-tags") {
           if (!runInBackground) {
             set({ statusMessage: failureStatus("远程 AI 结果不可用，未更新图片识别结果。") });
           }
@@ -789,23 +1278,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       }
     }
 
-    if (resolvedPayload.target === "prompt-options") {
-      if (!runInBackground) {
-        set({ statusMessage: infoStatus("远程 AI 暂不可用，已生成本地词条。") });
-      }
-      const fallback = localAnalysis();
-      logAiAnalysisDone(false, { errorCode: result.error.code, source: fallback.source });
-      return fallback;
+    const presentation = publishAiError(result.error.code, result.error.message);
+    if (!runInBackground || presentation.shouldStopBackground) {
+      set({ statusMessage: errorStatus(presentation.code, presentation.summary) });
     }
 
-    if (
-      resolvedPayload.target !== "prompt" &&
-      resolvedPayload.target !== "prompt-category" &&
-      resolvedPayload.target !== "prompt-tags"
-    ) {
-      if (!runInBackground) {
-        set({ statusMessage: errorStatus(result.error.code, result.error.message) });
-      }
+    if (resolvedPayload.target !== "prompt-category" && resolvedPayload.target !== "prompt-tags") {
       const fallback = emptyImageAnalysis();
       logAiAnalysisDone(false, { errorCode: result.error.code, source: fallback.source });
       return fallback;
@@ -859,6 +1337,33 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     });
 
     return result.ok ? result.data.prompt : null;
+  },
+
+  summarizePromptTitleWithAi: async (payload) => {
+    // 画布生成时自动总结标题：静默执行（不占用状态条），失败或未就绪都返回 null 由调用方回退。
+    const resolvedPayload = applyAiActionPreference(get().aiSettings, "prompt-optimization", payload);
+    const prompt = resolvedPayload.prompt.trim();
+    if (!prompt) {
+      return null;
+    }
+
+    const remoteAiReadiness = resolveRemoteAiReadiness(
+      get().aiSettings,
+      "标题总结",
+      resolvedPayload.apiProfileId,
+      resolvedPayload.apiModelId,
+      "text",
+    );
+    if (!remoteAiReadiness.ready) {
+      return null;
+    }
+
+    try {
+      const result = await window.suyanApi.summarizePromptTitleWithAi({ ...resolvedPayload, prompt });
+      return result.ok ? result.data.title : null;
+    } catch {
+      return null;
+    }
   },
 
   translatePromptWithAi: async (payload) => {
@@ -1006,6 +1511,8 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   clearStatus: () => set({ statusMessage: null }),
+  clearAiErrorDialog: () => set({ aiErrorDialog: null }),
+  clearAiAnalysisCircuit: () => set({ aiAnalysisCircuitOpen: false }),
   openExternalUrl: async (url, label) => {
     set({ statusMessage: progressStatus("正在打开网页...") });
 
@@ -1210,6 +1717,31 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     }
   },
 
+  reorderLibraryRoots: async (rootIds) => {
+    const currentRoots = get().libraryRoots;
+    const rootsById = new Map(currentRoots.map((root) => [root.id, root]));
+    const orderedRoots = rootIds
+      .map((rootId) => rootsById.get(rootId))
+      .filter((root): root is LibraryRoot => Boolean(root));
+    const usedIds = new Set(orderedRoots.map((root) => root.id));
+    const nextRoots = [...orderedRoots, ...currentRoots.filter((root) => !usedIds.has(root.id))];
+
+    set({ libraryRoots: nextRoots, isBusy: true, statusMessage: progressStatus("正在保存素材目录顺序...") });
+
+    try {
+      const result = await window.suyanApi.reorderLibraryRoots(nextRoots.map((root) => root.id));
+
+      if (!result.ok) {
+        set({ libraryRoots: currentRoots, statusMessage: errorStatus(result.error.code, result.error.message) });
+        return;
+      }
+
+      set({ libraryRoots: result.data, statusMessage: successStatus("素材目录顺序已保存。") });
+    } finally {
+      set({ isBusy: false });
+    }
+  },
+
   remapLibraryRoot: async (rootId) => {
     set({ isBusy: true, statusMessage: progressStatus("正在重新定位素材目录...") });
 
@@ -1326,7 +1858,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       return;
     }
 
-    set({ isBusy: true, statusMessage: progressStatus("正在导入素材...") });
+    set({ isBusy: true, statusMessage: progressStatus(`正在解析 ${images.length} 张图片的提示词…`) });
 
     try {
       const previousItemIds = new Set(get().items.map((item) => item.id));
@@ -1338,7 +1870,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         setLibrary(result.data.library, set, get);
         const finalStatus =
           result.data.importedCount > 0
-            ? getMediaImportStatus(result.data.importedCount)
+            ? getBufferedMediaImportStatus(result.data)
             : infoStatus("没有可导入的图片。");
 
         if (result.data.importedCount > 0) {
@@ -1350,6 +1882,43 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       } else {
         set({ statusMessage: errorStatus(result.error.code, result.error.message) });
       }
+    } finally {
+      set({ isBusy: false });
+    }
+  },
+
+  importGeneratedImages: async (images, metadata) => {
+    if (images.length === 0) {
+      return [];
+    }
+
+    set({ isBusy: true, statusMessage: progressStatus(`正在保存 ${images.length} 张生成图片…`) });
+
+    try {
+      const previousItemIds = new Set(get().items.map((item) => item.id));
+      const result = await withImportOperationTimeout<ImportGeneratedImagesData>(
+        window.suyanApi.importGeneratedImages({ images, metadata }),
+      );
+
+      if (!result.ok) {
+        set({ statusMessage: errorStatus(result.error.code, result.error.message) });
+        throw new Error(result.error.message);
+      }
+
+      setLibrary(result.data.library, set, get);
+      const importedIdSet = new Set(result.data.importedItemIds);
+      const savedItems = result.data.library.items.filter((item) => importedIdSet.has(item.id));
+
+      if (savedItems.length !== images.length) {
+        const message = `生成图片保存不完整：应保存 ${images.length} 张，实际保存 ${savedItems.length} 张。`;
+        set({ statusMessage: errorStatus("GENERATED_IMAGE_IMPORT_INCOMPLETE", message) });
+        throw new Error(message);
+      }
+
+      markRecentImportPins(set, get, previousItemIds);
+      scheduleLexiconSyncAfterImport(set, get, previousItemIds);
+      set({ statusMessage: successStatus(`已保存 ${savedItems.length} 张生成图片到素材库。`) });
+      return savedItems;
     } finally {
       set({ isBusy: false });
     }
@@ -1512,14 +2081,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   generateVideoFrames: async (itemId) => {
-    if (!hasBuiltinModuleCapability("video-frame-extraction", get().moduleState)) {
-      const isInstalled = isBuiltinModuleInstalled("video-prompt", get().moduleState);
+    if (!(await get().checkVideoRuntime())) {
       set({
-        statusMessage: failureStatus(
-          isInstalled
-            ? "视频模块未启用，无法生成关键帧。"
-            : "视频提示词模块未安装，无法生成关键帧。",
-        ),
+        statusMessage: errorStatus("FFMPEG_BINARY_NOT_FOUND", "需要视频运行时（FFmpeg）才能生成关键帧，请先安装。"),
       });
       return false;
     }
@@ -1558,14 +2122,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   importVideoReferenceImages: async (itemId) => {
-    if (!hasBuiltinModuleCapability("video-reference-images", get().moduleState)) {
-      const isInstalled = isBuiltinModuleInstalled("video-prompt", get().moduleState);
+    if (!(await get().checkVideoRuntime())) {
       set({
-        statusMessage: failureStatus(
-          isInstalled
-            ? "视频模块未启用，无法导入参考图。"
-            : "视频提示词模块未安装，无法导入参考图。",
-        ),
+        statusMessage: errorStatus("FFMPEG_BINARY_NOT_FOUND", "需要视频运行时（FFmpeg）才能导入参考图，请先安装。"),
       });
       return false;
     }
@@ -1683,8 +2242,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     if (result.ok) {
       set({
         statusMessage: result.data.canceled
-          ? infoStatus("已取消导出。")
-          : successStatus(`已导出 ${result.data.exportedCount} 条素材。`),
+          ? infoStatus("已取消分享导出。")
+          : successStatus(
+              result.data.exportedCount > 1
+                ? `已打包分享当前提示词组（${result.data.exportedCount} 张效果图）。`
+                : "已打包分享当前提示词组。",
+            ),
       });
     } else {
       set({ statusMessage: errorStatus(result.error.code, result.error.message) });
@@ -1725,8 +2288,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       if (!options.silent && !runInBackground) {
         set({ statusMessage: successStatus("已保存。") });
       }
-      if (!runInBackground) {
-        // 保存编辑时只扫描当前改动条目，避免整库重建。
+      // Always sync tags into the browser lexicons after saves that touch tags.
+      // Background detail saves used to skip this, so AI-recognized tags never
+      // appeared under 标签浏览.
+      const shouldSyncLexicons = hasTagsPatch;
+
+      if (shouldSyncLexicons) {
         scheduleIdleWork(() => {
           void syncPromptLexiconsFromLibrary(set, get, {
             silent: true,
@@ -1743,6 +2310,264 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     if (!runInBackground) {
       set({ isBusy: false });
+    }
+  },
+
+  saveItemsBatch: async (patches, options = {}) => {
+    if (!patches.length) {
+      return true;
+    }
+
+    const runInBackground = options.background === true;
+    const currentItems = get().items;
+    const now = new Date().toISOString();
+    const nextById = new Map(currentItems.map((item) => [item.id, item]));
+    const touchedIds = new Set<string>();
+
+    for (const { itemId, patch } of patches) {
+      const targetItemIds = resolvePromptGroupPatchItemIds(currentItems, itemId, patch);
+      const hasTagsPatch = Object.prototype.hasOwnProperty.call(patch, "tags");
+      for (const id of targetItemIds) {
+        const current = nextById.get(id);
+        if (!current) {
+          continue;
+        }
+        touchedIds.add(id);
+        nextById.set(id, {
+          ...current,
+          ...patch,
+          tags: hasTagsPatch ? normalizeConcretePromptTags(patch.tags ?? []) : current.tags,
+          updatedAt: now,
+        });
+      }
+    }
+
+    if (touchedIds.size === 0) {
+      return true;
+    }
+
+    const nextItems = currentItems.map((item) => nextById.get(item.id) ?? item);
+
+    set({
+      items: nextItems,
+      ...(runInBackground ? {} : { isBusy: true, statusMessage: null }),
+    });
+
+    // Always await disk write so bulk clear/delete does not get lost on restart,
+    // even when runInBackground is true for UI responsiveness.
+    const result = await window.suyanApi.saveLibrary(buildLibraryFile(nextItems));
+
+    if (result.ok) {
+      // Always reconcile from disk so bulk clears survive restart.
+      setLibrary(result.data, set, get);
+      if (!options.silent && !runInBackground) {
+        set({ statusMessage: successStatus(`已更新 ${touchedIds.size} 条素材。`) });
+      }
+
+      const touchedTagOrCapsule = patches.some(({ patch }) => {
+        if (Object.prototype.hasOwnProperty.call(patch, "tags")) {
+          return true;
+        }
+        if (typeof patch.prompt === "string" && patch.prompt.includes("{{")) {
+          return true;
+        }
+        if (typeof patch.negativePrompt === "string" && patch.negativePrompt.includes("{{")) {
+          return true;
+        }
+        return false;
+      });
+
+      // Sync material tags into 标签浏览 even for silent/background batch saves
+      // (e.g. AI tag recognition). Skip bulk clears handled by clearLexiconDomain.
+      if (touchedTagOrCapsule) {
+        scheduleIdleWork(() => {
+          void syncPromptLexiconsFromLibrary(set, get, {
+            silent: true,
+            targetItemIds: [...touchedIds],
+          }).catch(() => undefined);
+        });
+      }
+
+      if (!runInBackground) {
+        set({ isBusy: false });
+      }
+      return true;
+    }
+
+    set({
+      items: currentItems,
+      ...(runInBackground
+        ? {}
+        : { statusMessage: errorStatus(result.error.code, result.error.message), isBusy: false }),
+    });
+    return false;
+  },
+
+  clearLexiconDomain: async (domain) => {
+    const currentItems = get().items;
+    const currentPromptLexicons = get().promptLexicons ?? {
+      categories: [],
+      tags: [],
+    };
+    const currentTaxonomy = get().categoryTaxonomy ?? createEmptyCategoryTaxonomy();
+    const currentTagOrder = get().tagOrder;
+    const now = new Date().toISOString();
+
+    let nextItems = currentItems;
+    let nextPromptLexicons = currentPromptLexicons;
+    let nextTaxonomy = currentTaxonomy;
+    let nextTagOrder = currentTagOrder;
+    let touched = 0;
+
+    if (domain === "categories") {
+      nextItems = currentItems.map((item) => {
+        const hasCategory =
+          Boolean(item.categoryId) ||
+          Boolean(item.genreIds && item.genreIds.length > 0) ||
+          (typeof item.category === "string" && item.category.trim() && item.category.trim() !== "未分类");
+        if (!hasCategory) {
+          return item;
+        }
+        touched += 1;
+        const history =
+          (typeof item.category === "string" && item.category.trim()) ||
+          (typeof item.legacyCategory === "string" && item.legacyCategory.trim()) ||
+          null;
+        return {
+          ...item,
+          category: null,
+          categoryId: null,
+          genreIds: null,
+          categorySource: null,
+          categoryConfidence: null,
+          legacyCategory: history,
+          updatedAt: now,
+        };
+      });
+      // Keep system taxonomy nodes only (drop custom/ai pollution from lexicon merge later).
+      nextTaxonomy = ensureSystemCategoryTaxonomy({
+        schemaVersion: 1,
+        updatedAt: now,
+        nodes: currentTaxonomy.nodes.filter((node) => node.type === "system"),
+      });
+      nextPromptLexicons = {
+        ...currentPromptLexicons,
+        // System category leaves only — never rehydrate from dirty custom lexicon rows.
+        categories: taxonomyToLexiconCategories(nextTaxonomy).filter((entry) => entry.id.startsWith("system:")),
+      };
+    } else if (domain === "tags") {
+      nextItems = currentItems.map((item) => {
+        if (!item.tags || item.tags.length === 0) {
+          return item;
+        }
+        touched += 1;
+        return {
+          ...item,
+          tags: [],
+          updatedAt: now,
+        };
+      });
+      nextPromptLexicons = {
+        ...currentPromptLexicons,
+        tags: [],
+      };
+      // Sidebar / filter tag order must not resurrect cleared labels after restart.
+      nextTagOrder = [];
+    }
+
+    set({
+      items: nextItems,
+      promptLexicons: nextPromptLexicons,
+      categoryTaxonomy: nextTaxonomy,
+      tagOrder: nextTagOrder,
+      isBusy: true,
+      statusMessage: progressStatus(
+        domain === "categories" ? "正在清空分类…" : "正在清空标签…",
+      ),
+    });
+
+    try {
+      // Persist library when items changed. Await disk write before settings so a
+      // crash mid-clear cannot leave view-settings empty while library still has data
+      // (or the reverse via a later autosave).
+      if (domain === "categories" || domain === "tags") {
+        const libraryResult = await window.suyanApi.saveLibrary(buildLibraryFile(nextItems));
+        if (!libraryResult.ok) {
+          set({
+            items: currentItems,
+            promptLexicons: currentPromptLexicons,
+            categoryTaxonomy: currentTaxonomy,
+            tagOrder: currentTagOrder,
+            isBusy: false,
+            statusMessage: errorStatus(libraryResult.error.code, libraryResult.error.message),
+          });
+          return false;
+        }
+        // Reconcile from the just-written library so cleared fields are the source of truth.
+        setLibrary(libraryResult.data, set, get);
+      }
+
+      // Always build settings from the cleared snapshot, not from a concurrent store
+      // mutation that may have raced in while the library write was in flight.
+      const settingsResult = await saveLibraryViewSettingsSerialized(
+        buildLibraryViewSettings(get(), {
+          promptLexicons: nextPromptLexicons,
+          tagOrder: nextTagOrder,
+          categoryWorkspace: {
+            taxonomy: nextTaxonomy,
+            inbox: domain === "categories" ? [] : get().categoryInbox,
+            candidates: domain === "categories" ? [] : get().categoryCandidates,
+            learningEvents: get().categoryLearningEvents,
+          },
+        }),
+      );
+
+      if (!settingsResult.ok) {
+        set({
+          items: currentItems,
+          promptLexicons: currentPromptLexicons,
+          categoryTaxonomy: currentTaxonomy,
+          tagOrder: currentTagOrder,
+          isBusy: false,
+          statusMessage: errorStatus(settingsResult.error.code, settingsResult.error.message),
+        });
+        return false;
+      }
+
+      syncLibraryViewSettings(set, settingsResult.data, {
+        // Keep the cleared item snapshot — settings payload has no items.
+        items: get().items,
+        promptLexicons: nextPromptLexicons,
+        categoryTaxonomy: nextTaxonomy,
+        tagOrder: nextTagOrder,
+        isBusy: false,
+        statusMessage: successStatus(
+          domain === "categories"
+            ? `已清空素材分类（系统目录保留）。`
+            : `已清空素材标签与标签词库。`,
+        ),
+      });
+      logRendererStartupEvent("lexicon:clear-domain:persisted", {
+        domain,
+        touched,
+        categoryCount: nextPromptLexicons.categories?.length ?? 0,
+        tagCount: nextPromptLexicons.tags?.length ?? 0,
+        itemCount: get().items.length,
+      });
+      return true;
+    } catch (error) {
+      set({
+        items: currentItems,
+        promptLexicons: currentPromptLexicons,
+        categoryTaxonomy: currentTaxonomy,
+        tagOrder: currentTagOrder,
+        isBusy: false,
+        statusMessage: errorStatus(
+          "LEXICON_CLEAR_FAILED",
+          error instanceof Error ? error.message : "清空词库失败，请重试。",
+        ),
+      });
+      return false;
     }
   },
 
@@ -1774,7 +2599,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       return;
     }
 
-    const settingsResult = await window.suyanApi.saveLibraryViewSettings(
+    const settingsResult = await saveLibraryViewSettingsSerialized(
       buildLibraryViewSettings(get(), { tagOrder: applied.tagOrder, promptLexicons: nextPromptLexicons }),
     );
 
@@ -1793,25 +2618,400 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     set({ isBusy: false });
   },
 
-  savePromptLexicons: async (promptLexicons) => {
+  savePromptLexicons: async (promptLexicons, options) => {
+    const silent = options?.silent === true;
     const currentPromptLexicons = get().promptLexicons;
+    const currentTaxonomy = get().categoryTaxonomy ?? createEmptyCategoryTaxonomy();
+    const nextTaxonomy = mergeLexiconCategoriesIntoTaxonomy(currentTaxonomy, promptLexicons.categories ?? []);
+    const syncedLexicons = syncLexiconCategoriesFromTaxonomy(promptLexicons, nextTaxonomy);
 
-    set({ promptLexicons, statusMessage: null });
+    set({
+      promptLexicons: syncedLexicons,
+      categoryTaxonomy: nextTaxonomy,
+      statusMessage: null,
+    });
 
-    const result = await window.suyanApi.saveLibraryViewSettings(
-      buildLibraryViewSettings(get(), { promptLexicons }),
+    const result = await saveLibraryViewSettingsSerialized(
+      buildLibraryViewSettings(get(), {
+        promptLexicons: syncedLexicons,
+        categoryWorkspace: {
+          taxonomy: nextTaxonomy,
+          inbox: get().categoryInbox,
+          candidates: get().categoryCandidates,
+          learningEvents: get().categoryLearningEvents,
+        },
+      }),
     );
 
     if (result.ok) {
-      syncLibraryViewSettings(set, result.data, { statusMessage: successStatus("已保存词库。") });
+      logRendererStartupEvent("lexicon:save:persisted", {
+        domain: "promptLexicons",
+        categoryCount: syncedLexicons.categories.length,
+        tagCount: syncedLexicons.tags.length,
+        silent,
+      });
+      syncLibraryViewSettings(set, result.data, {
+        statusMessage: silent ? null : successStatus("已保存词库。"),
+      });
       return true;
     }
 
+    logRendererStartupEvent("lexicon:save:failed", {
+      domain: "promptLexicons",
+      code: result.error.code,
+      message: result.error.message,
+    });
     set({
       promptLexicons: currentPromptLexicons,
+      categoryTaxonomy: currentTaxonomy,
       statusMessage: errorStatus(result.error.code, result.error.message),
     });
     return false;
+  },
+
+  assignItemCategoryId: async (itemId, categoryId, source = "user") => {
+    await get().movePromptGroupsToCategory([itemId], categoryId, source);
+  },
+
+  movePromptGroupsToCategory: async (itemIds, categoryId, source = "user") => {
+    const uniqueItemIds = [...new Set(itemIds.filter(Boolean))];
+    if (uniqueItemIds.length === 0) {
+      return false;
+    }
+
+    const taxonomy = get().categoryTaxonomy ?? createEmptyCategoryTaxonomy();
+    const currentItems = get().items;
+    const primaryTargets = uniqueItemIds
+      .map((id) => currentItems.find((item) => item.id === id))
+      .filter((item): item is LibraryItem => Boolean(item));
+    if (primaryTargets.length === 0) {
+      return false;
+    }
+
+    const affectedIdSet = new Set<string>();
+    for (const target of primaryTargets) {
+      const groupIds = resolvePromptGroupPatchItemIds(currentItems, target.id, {
+        category: resolveCategoryName(taxonomy, categoryId, target.category),
+        categoryId,
+      });
+      for (const id of groupIds) {
+        affectedIdSet.add(id);
+      }
+    }
+
+    const nextItems = currentItems.map((item) =>
+      affectedIdSet.has(item.id) ? assignItemCategory(item, taxonomy, categoryId, source, 1) : item,
+    );
+
+    const now = new Date().toISOString();
+    const learningEvents = [
+      ...primaryTargets.map((target, index) => ({
+        id: `learn-${Date.now()}-${index}-${target.id}`,
+        itemId: target.id,
+        fromCategoryId: target.categoryId ?? null,
+        toCategoryId: categoryId ?? "system:uncategorized",
+        source,
+        createdAt: now,
+      })),
+      ...get().categoryLearningEvents,
+    ].slice(0, 200);
+
+    const movedPrimaryIds = new Set(primaryTargets.map((item) => item.id));
+    const inbox = get().categoryInbox.filter((entry) => !movedPrimaryIds.has(entry.itemId));
+    const nextTaxonomy = recomputeCategoryUsageCounts(
+      taxonomy,
+      nextItems.map((item) => item.categoryId),
+    );
+    const nextPromptLexicons = syncLexiconCategoriesFromTaxonomy(get().promptLexicons, nextTaxonomy);
+    const categoryLabel = categoryId
+      ? resolveCategoryName(nextTaxonomy, categoryId, "目标分类")
+      : "未分类";
+
+    set({
+      items: nextItems,
+      categoryTaxonomy: nextTaxonomy,
+      categoryInbox: inbox,
+      categoryLearningEvents: learningEvents,
+      promptLexicons: nextPromptLexicons,
+      isBusy: true,
+      statusMessage: null,
+    });
+
+    const libraryResult = await window.suyanApi.saveLibrary(buildLibraryFile(nextItems));
+    const settingsResult = await saveLibraryViewSettingsSerialized(
+      buildLibraryViewSettings(get(), {
+        promptLexicons: nextPromptLexicons,
+        categoryWorkspace: {
+          taxonomy: nextTaxonomy,
+          inbox,
+          candidates: get().categoryCandidates,
+          learningEvents,
+        },
+      }),
+    );
+
+    if (libraryResult.ok) {
+      setLibrary(libraryResult.data, set, get);
+    }
+    if (settingsResult.ok) {
+      const count = primaryTargets.length;
+      syncLibraryViewSettings(set, settingsResult.data, {
+        statusMessage: successStatus(
+          categoryId
+            ? count > 1
+              ? `已将 ${count} 组提示词移至「${categoryLabel}」。`
+              : `已移至「${categoryLabel}」。`
+            : count > 1
+              ? `已将 ${count} 组提示词移出分类。`
+              : "已清除所属分类。",
+        ),
+      });
+    } else if (!libraryResult.ok) {
+      set({
+        items: currentItems,
+        statusMessage: errorStatus(libraryResult.error.code, libraryResult.error.message),
+      });
+      set({ isBusy: false });
+      return false;
+    }
+
+    set({ isBusy: false });
+    return libraryResult.ok;
+  },
+
+  upsertCustomCategory: async (input) => {
+    const name = input.name.trim();
+    if (!name) {
+      set({ statusMessage: errorStatus("CATEGORY_NAME_EMPTY", "分类名称不能为空。") });
+      return null;
+    }
+
+    const currentTaxonomy = get().categoryTaxonomy ?? createEmptyCategoryTaxonomy();
+    const currentPromptLexicons = get().promptLexicons;
+    const { taxonomy, categoryId } = upsertCustomCategoryNode(currentTaxonomy, input);
+    if (!categoryId || categoryId === "system:uncategorized") {
+      set({ statusMessage: errorStatus("CATEGORY_UPSERT_FAILED", "无法创建或更新分类。") });
+      return null;
+    }
+
+    const nextPromptLexicons = syncLexiconCategoriesFromTaxonomy(get().promptLexicons, taxonomy);
+    set({
+      categoryTaxonomy: taxonomy,
+      promptLexicons: nextPromptLexicons,
+      isBusy: true,
+      statusMessage: null,
+    });
+
+    const result = await saveLibraryViewSettingsSerialized(
+      buildLibraryViewSettings(get(), {
+        promptLexicons: nextPromptLexicons,
+        categoryWorkspace: {
+          taxonomy,
+          inbox: get().categoryInbox,
+          candidates: get().categoryCandidates,
+          learningEvents: get().categoryLearningEvents,
+        },
+      }),
+    );
+
+    if (result.ok) {
+      const isNew = !input.id || !currentTaxonomy.nodes.some((node) => node.id === input.id);
+      logRendererStartupEvent("lexicon:custom-category:save", {
+        ok: true,
+        categoryId,
+        isNew,
+        categoryCount: nextPromptLexicons.categories.length,
+      });
+      syncLibraryViewSettings(set, result.data, {
+        statusMessage: successStatus(isNew ? `已新增分类「${name}」。` : `已更新分类「${name}」。`),
+      });
+      set({ isBusy: false });
+      return categoryId;
+    }
+
+    logRendererStartupEvent("lexicon:custom-category:save", {
+      ok: false,
+      categoryId,
+      code: result.error.code,
+      message: result.error.message,
+    });
+    set({
+      categoryTaxonomy: currentTaxonomy,
+      promptLexicons: currentPromptLexicons,
+      statusMessage: errorStatus(result.error.code, result.error.message),
+      isBusy: false,
+    });
+    return null;
+  },
+
+  deleteCustomCategory: async (categoryId, reassignToCategoryId = null) => {
+    const currentTaxonomy = get().categoryTaxonomy ?? createEmptyCategoryTaxonomy();
+    const requestedId = typeof categoryId === "string" ? categoryId.trim() : "";
+    if (!requestedId) {
+      return false;
+    }
+
+    // Category browser may pass:
+    // - real taxonomy ids (custom:/ai:/system:…)
+    // - derived freeform ids (derived-category:<labelKey>) from item.category labels
+    const derivedLabelKey = requestedId.startsWith("derived-category-")
+      ? requestedId.slice("derived-category-".length)
+      : null;
+
+    let target = currentTaxonomy.nodes.find((node) => node.id === requestedId) ?? null;
+    if (!target && derivedLabelKey) {
+      target =
+        currentTaxonomy.nodes.find(
+          (node) =>
+            node.type !== "system" &&
+            normalizeCategoryLabelKey(node.name) === derivedLabelKey,
+        ) ?? null;
+    }
+
+    const resolvedId = target?.id ?? (requestedId.startsWith("custom:") || requestedId.startsWith("ai:") || requestedId.startsWith("system:") ? requestedId : null);
+    const matchLabelKey =
+      derivedLabelKey ||
+      (target ? normalizeCategoryLabelKey(target.name) : null) ||
+      null;
+
+    // Nothing to delete if the id is unknown and no freeform label key can match items.
+    if (!target && !matchLabelKey && !resolvedId) {
+      set({ statusMessage: errorStatus("CATEGORY_NOT_FOUND", "未找到该分类，可能已被删除。") });
+      return false;
+    }
+
+    const taxonomy = target
+      ? removeCategoryNode(currentTaxonomy, target.id)
+      : currentTaxonomy;
+    const remainingCategoryIds = new Set(taxonomy.nodes.map((node) => node.id));
+    const removedCategoryIds = new Set(
+      currentTaxonomy.nodes
+        .map((node) => node.id)
+        .filter((id) => !remainingCategoryIds.has(id)),
+    );
+    const currentItems = get().items;
+    const nextItems = currentItems.map((item) => {
+      const byId = Boolean(item.categoryId && removedCategoryIds.has(item.categoryId)) ||
+        Boolean(resolvedId && item.categoryId === resolvedId);
+      const byLabel =
+        Boolean(matchLabelKey) &&
+        typeof item.category === "string" &&
+        normalizeCategoryLabelKey(item.category) === matchLabelKey;
+      // Freeform / derived categories often have empty categoryId; clear by display label too.
+      if (byId || byLabel) {
+        return assignItemCategory(item, taxonomy, reassignToCategoryId, "user", 1);
+      }
+      return item;
+    });
+    const nextTaxonomy = recomputeCategoryUsageCounts(
+      taxonomy,
+      nextItems.map((item) => item.categoryId),
+    );
+    let nextPromptLexicons = syncLexiconCategoriesFromTaxonomy(get().promptLexicons, nextTaxonomy);
+    // Drop leftover freeform category entries that only lived in the lexicon draft list.
+    let nextCategories = nextPromptLexicons.categories;
+    if (matchLabelKey) {
+      nextCategories = nextCategories.filter(
+        (entry) => normalizeCategoryLabelKey(entry.label) !== matchLabelKey,
+      );
+    }
+    if (resolvedId) {
+      nextCategories = nextCategories.filter((entry) => entry.id !== resolvedId);
+    }
+    if (nextCategories !== nextPromptLexicons.categories) {
+      nextPromptLexicons = {
+        ...nextPromptLexicons,
+        categories: nextCategories,
+      };
+    }
+
+    const deletedName = target?.name || matchLabelKey || "自定义分类";
+    const itemsChanged = nextItems.some((item, index) => item !== currentItems[index]);
+
+    set({
+      items: nextItems,
+      categoryTaxonomy: nextTaxonomy,
+      promptLexicons: nextPromptLexicons,
+      isBusy: true,
+      statusMessage: progressStatus(`正在删除分类「${deletedName}」…`),
+    });
+
+    try {
+      let libraryOk = true;
+      if (itemsChanged) {
+        const libraryResult = await window.suyanApi.saveLibrary(buildLibraryFile(nextItems));
+        libraryOk = libraryResult.ok;
+        if (libraryResult.ok) {
+          setLibrary(libraryResult.data, set, get);
+        } else {
+          set({
+            items: currentItems,
+            categoryTaxonomy: currentTaxonomy,
+            promptLexicons: get().promptLexicons,
+            statusMessage: errorStatus(libraryResult.error.code, libraryResult.error.message),
+            isBusy: false,
+          });
+          return false;
+        }
+      }
+
+      const settingsResult = await saveLibraryViewSettingsSerialized(
+        buildLibraryViewSettings(get(), {
+          promptLexicons: nextPromptLexicons,
+          categoryWorkspace: {
+            taxonomy: nextTaxonomy,
+            inbox: get().categoryInbox,
+            candidates: get().categoryCandidates,
+            learningEvents: get().categoryLearningEvents,
+          },
+        }),
+      );
+
+      if (settingsResult.ok) {
+        syncLibraryViewSettings(set, settingsResult.data, {
+          statusMessage: successStatus(`已删除分类「${deletedName}」。`),
+          isBusy: false,
+        });
+        return true;
+      }
+
+      set({
+        categoryTaxonomy: nextTaxonomy,
+        promptLexicons: nextPromptLexicons,
+        statusMessage: errorStatus(settingsResult.error.code, settingsResult.error.message),
+        isBusy: false,
+      });
+      return libraryOk;
+    } catch (error) {
+      set({
+        items: currentItems,
+        categoryTaxonomy: currentTaxonomy,
+        statusMessage: errorStatus(
+          "CATEGORY_DELETE_FAILED",
+          error instanceof Error ? error.message : "删除分类失败，请重试。",
+        ),
+        isBusy: false,
+      });
+      return false;
+    }
+  },
+
+  dismissCategoryInboxItem: async (itemId) => {
+    const inbox = get().categoryInbox.filter((entry) => entry.itemId !== itemId);
+    set({ categoryInbox: inbox });
+    const result = await saveLibraryViewSettingsSerialized(
+      buildLibraryViewSettings(get(), {
+        categoryWorkspace: {
+          taxonomy: get().categoryTaxonomy,
+          inbox,
+          candidates: get().categoryCandidates,
+          learningEvents: get().categoryLearningEvents,
+        },
+      }),
+    );
+    if (result.ok) {
+      syncLibraryViewSettings(set, result.data);
+    }
   },
 
   importPromptLexicon: async (kind) => {
@@ -1880,7 +3080,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     set({ likedImageIds: nextLikedImageIds, statusMessage: null });
 
-    const result = await window.suyanApi.saveLibraryViewSettings(
+    const result = await saveLibraryViewSettingsSerialized(
       buildLibraryViewSettings(get(), { likedImageIds: nextLikedImageIds }),
     );
 
@@ -1891,6 +3091,29 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     } else {
       set({
         likedImageIds: currentLikedImageIds,
+        statusMessage: errorStatus(result.error.code, result.error.message),
+      });
+    }
+  },
+
+  toggleRecommendationStar: async (url) => {
+    const current = get().starredRecommendations;
+    const isStarred = current.includes(url);
+    const next = isStarred ? current.filter((item) => item !== url) : [url, ...current];
+
+    set({ starredRecommendations: next, statusMessage: null });
+
+    const result = await saveLibraryViewSettingsSerialized(
+      buildLibraryViewSettings(get(), { starredRecommendations: next }),
+    );
+
+    if (result.ok) {
+      syncLibraryViewSettings(set, result.data, {
+        statusMessage: successStatus(isStarred ? "已取消星标。" : "已星标并置顶。"),
+      });
+    } else {
+      set({
+        starredRecommendations: current,
         statusMessage: errorStatus(result.error.code, result.error.message),
       });
     }
@@ -2035,6 +3258,13 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   compressVideos: async (options, onProgress) => {
+    if (!(await get().checkVideoRuntime())) {
+      set({
+        statusMessage: errorStatus("FFMPEG_BINARY_NOT_FOUND", "需要视频运行时（FFmpeg）才能压缩视频，请先安装。"),
+      });
+      return null;
+    }
+
     set({ isBusy: true, statusMessage: progressStatus("正在压缩视频...") });
 
     const unsubscribe = onProgress
@@ -2093,7 +3323,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
     set({ moduleState: nextModuleState, statusMessage: null });
 
-    const result = await window.suyanApi.saveLibraryViewSettings(
+    const result = await saveLibraryViewSettingsSerialized(
       buildLibraryViewSettings(get(), { moduleState: nextModuleState }),
     );
 
@@ -2109,16 +3339,27 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     return false;
   },
 
-  installModule: async (moduleId) => {
+  installModule: async (moduleId, options) => {
     set({ isBusy: true, statusMessage: progressStatus(`正在安装模块...`) });
 
     try {
-      const result = await window.suyanApi.installModuleFromLocal(moduleId);
+      // video-runtime 走安全的按需组件通道（下载/离线导入，内置验签）；其余模块沿用本地包安装。
+      const result =
+        moduleId === "video-runtime"
+          ? options?.source === "local"
+            ? await window.suyanApi.installFfmpegComponentFromLocal()
+            : await window.suyanApi.installFfmpegComponentFromDownload()
+          : await window.suyanApi.installModuleFromLocal(moduleId);
 
       if (!result.ok) {
         set({
           statusMessage: errorStatus(result.error.code, result.error.message),
         });
+        return false;
+      }
+
+      if ("canceled" in result.data && result.data.canceled) {
+        set({ statusMessage: infoStatus("已取消安装。") });
         return false;
       }
 
@@ -2139,6 +3380,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       }
 
       await get().setModuleState(patch);
+      if (moduleId === "video-runtime") {
+        videoRuntimeProbeCache = { installed: true, checkedAt: Date.now() };
+      }
       set({
         statusMessage: successStatus(`模块安装成功，已自动校验并启用。`),
       });
@@ -2147,6 +3391,32 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       set({ isBusy: false });
     }
   },
+
+  checkVideoRuntime: async () => {
+    const now = Date.now();
+    if (
+      videoRuntimeProbeCache &&
+      now - videoRuntimeProbeCache.checkedAt < VIDEO_RUNTIME_PROBE_TTL_MS
+    ) {
+      return videoRuntimeProbeCache.installed;
+    }
+
+    const result = await window.suyanApi.checkModuleInstalled("video-runtime").catch(() => null);
+    // 探测失败时不改写持久化状态（避免瞬时 IPC 故障把已装用户误标为未装）。
+    if (!result?.ok) {
+      return get().moduleState["video-runtime"].installed;
+    }
+
+    const installed = result.data.installed;
+    const current = get().moduleState["video-runtime"];
+    // 已装时保留用户 enabled 偏好；二进制消失强制关闭；新装上默认启用。
+    const next = resolveVideoRuntimeStateAfterProbe(current, installed);
+    if (current.installed !== next.installed || current.enabled !== next.enabled) {
+      await get().setModuleState({ "video-runtime": next });
+    }
+    videoRuntimeProbeCache = { installed: next.installed, checkedAt: Date.now() };
+    return next.installed;
+  },
 }));
 
 function buildLibraryViewSettings(
@@ -2154,8 +3424,14 @@ function buildLibraryViewSettings(
   patch: Partial<LibraryViewSettings> = {},
 ): LibraryViewSettings {
   return {
+    // referenceImageDataUrl is a session-only base64 blob; strip it before
+    // persisting so app settings stay small. promptOrigin is session-only too:
+    // a stale origin from a previous run must not silently pull new generations
+    // into an old prompt group.
+    canvasDraft: { ...state.canvasDraft, referenceImageDataUrl: "", promptOrigin: null },
     tagOrder: state.tagOrder,
     likedImageIds: state.likedImageIds,
+    starredRecommendations: state.starredRecommendations,
     generationModelOrder: state.generationModelOrder,
     hiddenGenerationModels: state.hiddenGenerationModels,
     themeMode: state.themeMode,
@@ -2168,8 +3444,15 @@ function buildLibraryViewSettings(
     materialBrowserSortMode: state.materialBrowserSortMode,
     materialBrowserSortDirection: state.materialBrowserSortDirection,
     materialBrowserRandomSeed: Math.max(0, Math.trunc(state.materialBrowserRandomSeed)),
+    materialBrowserScrollTop: normalizeMaterialBrowserScrollTop(state.materialBrowserScrollTop),
     networkMaterialImportMode: state.networkMaterialImportMode,
     promptLexicons: state.promptLexicons,
+    categoryWorkspace: {
+      taxonomy: state.categoryTaxonomy,
+      inbox: state.categoryInbox,
+      candidates: state.categoryCandidates,
+      learningEvents: state.categoryLearningEvents,
+    },
     moduleState: state.moduleState,
     ...patch,
   };
@@ -2181,9 +3464,12 @@ function syncLibraryViewSettings(
   extra: Partial<LibraryState> = {},
 ): void {
   applyThemeModeToRoot(settings.themeMode);
+  const workspace = normalizeCategoryWorkspace(settings.categoryWorkspace, settings.promptLexicons);
   set({
+    canvasDraft: settings.canvasDraft,
     tagOrder: settings.tagOrder,
     likedImageIds: settings.likedImageIds,
+    starredRecommendations: settings.starredRecommendations,
     generationModelOrder: settings.generationModelOrder,
     hiddenGenerationModels: settings.hiddenGenerationModels,
     themeMode: settings.themeMode,
@@ -2196,11 +3482,31 @@ function syncLibraryViewSettings(
     materialBrowserSortMode: settings.materialBrowserSortMode,
     materialBrowserSortDirection: settings.materialBrowserSortDirection,
     materialBrowserRandomSeed: settings.materialBrowserRandomSeed,
+    materialBrowserScrollTop: settings.materialBrowserScrollTop,
     networkMaterialImportMode: settings.networkMaterialImportMode,
     promptLexicons: settings.promptLexicons,
+    categoryTaxonomy: workspace.taxonomy,
+    categoryInbox: workspace.inbox,
+    categoryCandidates: workspace.candidates,
+    categoryLearningEvents: workspace.learningEvents,
     moduleState: settings.moduleState,
     ...extra,
   });
+}
+
+function normalizeCategoryWorkspace(
+  input: CategoryWorkspaceState | null | undefined,
+  promptLexicons: PromptLexiconSettings | null | undefined,
+): CategoryWorkspaceState {
+  // Always re-seed the precise system photography tree, then merge custom lexicon nodes.
+  const baseTaxonomy = ensureSystemCategoryTaxonomy(input?.taxonomy ?? null);
+  const taxonomy = mergeLexiconCategoriesIntoTaxonomy(baseTaxonomy, promptLexicons?.categories ?? []);
+  return {
+    taxonomy,
+    inbox: Array.isArray(input?.inbox) ? input.inbox : [],
+    candidates: Array.isArray(input?.candidates) ? input.candidates : [],
+    learningEvents: Array.isArray(input?.learningEvents) ? input.learningEvents : [],
+  };
 }
 
 function waitForThemePaint(themeMode: ThemeMode): Promise<void> {
@@ -2223,6 +3529,14 @@ function normalizeMasonryTileWidth(input: number): number {
 }
 
 function normalizeMaterialBrowserRandomSeed(input: number): number {
+  if (!Number.isFinite(input)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.trunc(input));
+}
+
+function normalizeMaterialBrowserScrollTop(input: number): number {
   if (!Number.isFinite(input)) {
     return 0;
   }
@@ -2256,6 +3570,55 @@ function setLibrary(
   set({ items: reconciledItems, selectedItemId });
 }
 
+async function pruneOrphanTagsAfterLoad(
+  set: (partial: Partial<LibraryState>) => void,
+  get: () => LibraryState,
+): Promise<void> {
+  const state = get();
+  const lexicons = state.promptLexicons;
+  if (!lexicons) {
+    return;
+  }
+  const items = state.items;
+  let itemsChanged = false;
+  const nextItems = items.map((item) => {
+    const sanitized = sanitizeMaterialTags(item.tags ?? []);
+    const prev = item.tags ?? [];
+    if (sanitized.length === prev.length && sanitized.every((tag, index) => tag === prev[index])) {
+      return item;
+    }
+    itemsChanged = true;
+    return { ...item, tags: sanitized };
+  });
+  const usedKeys = collectUsedTagKeysFromItems(nextItems);
+  const pruned = pruneOrphanTagLexiconEntries(lexicons.tags ?? [], usedKeys);
+  const tagsChanged = pruned.removedCount > 0;
+  if (!itemsChanged && !tagsChanged) {
+    logRendererStartupEvent("lexicon:orphan-prune", { removedCount: 0, itemsNormalized: 0 });
+    return;
+  }
+  if (itemsChanged) {
+    set({ items: nextItems });
+    const libraryResult = await window.suyanApi.saveLibrary(buildLibraryFile(nextItems));
+    if (libraryResult.ok) {
+      setLibrary(libraryResult.data, set, get);
+    }
+  }
+  if (tagsChanged) {
+    const nextLexicons = { ...lexicons, tags: pruned.entries };
+    set({ promptLexicons: nextLexicons });
+    const settingsResult = await saveLibraryViewSettingsSerialized(
+      buildLibraryViewSettings(get(), { promptLexicons: nextLexicons }),
+    );
+    if (settingsResult.ok) {
+      syncLibraryViewSettings(set, settingsResult.data);
+    }
+  }
+  logRendererStartupEvent("lexicon:orphan-prune", {
+    removedCount: pruned.removedCount,
+    itemsNormalized: itemsChanged ? 1 : 0,
+  });
+}
 async function syncPromptLexiconsFromLibrary(
   set: (partial: Partial<LibraryState>) => void,
   get: () => LibraryState,
@@ -2279,11 +3642,11 @@ async function syncPromptLexiconsFromLibrary(
     return;
   }
 
-  // 新导入条目通常还没有胶囊结构，可直接跳过昂贵扫描。
+  // 新导入条目可能已有 AI 标签；只有没有任何标签时，才跳过昂贵扫描。
   if (
     options.targetItemIds &&
     options.targetItemIds.length > 0 &&
-    !targetItems.some((item) => item.prompt.includes("{{") || item.negativePrompt.includes("{{"))
+    !targetItems.some((item) => Array.isArray(item.tags) && item.tags.some((tag) => tag.trim()))
   ) {
     logRendererStartupEvent("lexicon-sync:merge", {
       durationMs: 0,
@@ -2292,14 +3655,14 @@ async function syncPromptLexiconsFromLibrary(
       indexedPromptCount: 0,
       targetCount: targetItems.length,
       skipped: true,
-      reason: "no-capsules",
+      reason: "no-tags",
     });
     return;
   }
 
-  const { mergeLibraryPromptParametersIntoLexiconForItems } = await import("../utils/promptLexicons");
+  const { mergeLibraryPromptLexiconForItems } = await import("../utils/promptLexicons");
   const mergeStart = performance.now();
-  const result = mergeLibraryPromptParametersIntoLexiconForItems(
+  const result = mergeLibraryPromptLexiconForItems(
     get().promptLexicons,
     items,
     targetItems,
@@ -2319,7 +3682,7 @@ async function syncPromptLexiconsFromLibrary(
     return;
   }
 
-  const saveResult = await window.suyanApi.saveLibraryViewSettings(
+  const saveResult = await saveLibraryViewSettingsSerialized(
     buildLibraryViewSettings(get(), { promptLexicons: result.promptLexicons }),
   );
 
@@ -2412,7 +3775,7 @@ async function prunePromptLexiconsAfterDelete(
     }
 
     set({ promptLexicons: pruneResult.promptLexicons });
-    const saveResult = await window.suyanApi.saveLibraryViewSettings(
+    const saveResult = await saveLibraryViewSettingsSerialized(
       buildLibraryViewSettings(get(), { promptLexicons: pruneResult.promptLexicons }),
     );
 
@@ -2602,7 +3965,7 @@ async function analyzeNsfwItem(
 
     return {
       itemId: item.id,
-      rating: resolveNsfwRatingFromRemoteAnalysis(result.data.analysis),
+      rating: resolveNsfwRatingFromRemoteAnalysisV2(result.data.analysis),
     };
   } catch {
     return null;
@@ -2690,32 +4053,6 @@ function getNsfwGradingResultStatus({
   const actionText = isForced ? "重新校正" : "补充";
 
   return successStatus(`已${actionText} ${updatedCount} 张图片的 NSFW 分级${skippedText}${failedText}。`);
-}
-
-function successStatus(text: string): StatusMessage {
-  return { type: "success", text, autoDismissMs: statusToastAutoDismissMs };
-}
-
-function formatSavedBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function progressStatus(text: string): StatusMessage {
-  return { type: "info", text, autoDismissMs: null };
-}
-
-function infoStatus(text: string): StatusMessage {
-  return { type: "info", text, autoDismissMs: statusToastAutoDismissMs };
-}
-
-function failureStatus(text: string): StatusMessage {
-  return { type: "error", text, autoDismissMs: statusToastAutoDismissMs };
-}
-
-function errorStatus(code: string, fallback: string): StatusMessage {
-  return { type: "error", text: getUiErrorMessage(code, fallback), autoDismissMs: statusToastAutoDismissMs };
 }
 
 function withImportOperationTimeout<T>(operation: Promise<IpcResult<T>>): Promise<IpcResult<T>> {
@@ -2823,6 +4160,22 @@ function getAiActionLabel(target: AiAnalyzePromptPayload["target"]): string {
   return "提示词参数分析";
 }
 
+/**
+ * 分类 / 标签 / 参数 / 词条扩写不得携带负向提示词。
+ *
+ * 负向词描述「要避免的内容」，进入分析后会被反向当成画面事实：写了「不要食物」
+ * 反而判成食品摄影，「避免模糊」变成画质标签。主进程侧也不会再拼接负向文本
+ * （见 remoteAiClient.negativePromptExclusionNotice），这里再拦一道，
+ * 让负向内容根本不跨进程传输。
+ */
+function withoutNegativePromptForAnalysis(payload: AiAnalyzePromptPayload): AiAnalyzePromptPayload {
+  if (!payload.negativePrompt) {
+    return payload;
+  }
+
+  return { ...payload, negativePrompt: "" };
+}
+
 function getAiAnalyzeCapability(target: AiAnalyzePromptPayload["target"]): AiProviderModelCapability {
   return target === "image-category" || target === "image-tags" || target === "image-safety" ? "vision" : "text";
 }
@@ -2851,9 +4204,68 @@ function getImageImportForItemStatus(result: {
 function getMediaImportStatus(importedCount: number): StatusMessage {
   return successStatus(
     importedCount > 1
-      ? `已导入 ${importedCount} 个素材，并放入同一张空白提示词卡片。`
-      : "已导入 1 个素材，并创建空白提示词卡片。",
+      ? `已导入 ${importedCount} 个素材。`
+      : "已导入 1 个素材。",
   );
+}
+
+/** Drag-drop / buffer import: report per-image prompt extraction and grouping. */
+function getBufferedMediaImportStatus(result: {
+  importedCount: number;
+  importedPromptCount?: number;
+  importedImageCount?: number;
+  importGroups?: Array<{
+    title: string;
+    promptPreview: string;
+    imageCount: number;
+    hasPromptContent: boolean;
+  }>;
+}): StatusMessage {
+  const imageCount = result.importedImageCount ?? result.importedCount;
+  const groupCount = result.importedPromptCount ?? result.importGroups?.length ?? imageCount;
+  const groups = result.importGroups ?? [];
+
+  if (imageCount <= 0) {
+    return infoStatus("没有可导入的图片。");
+  }
+
+  if (imageCount === 1) {
+    const only = groups[0];
+    if (only?.hasPromptContent) {
+      return successStatus(`已导入 1 张图并解析提示词：${truncateImportStatusText(only.promptPreview, 48)}`);
+    }
+    return successStatus("已导入 1 张图（未检测到嵌入提示词，已创建空白卡片）。");
+  }
+
+  const withPrompt = groups.filter((group) => group.hasPromptContent).length;
+  const blankGroups = groups.length - withPrompt;
+  const detailParts = groups.slice(0, 3).map((group) => {
+    const label = group.hasPromptContent
+      ? truncateImportStatusText(group.title || group.promptPreview, 28)
+      : "空白提示词";
+    return `「${label}」×${group.imageCount}`;
+  });
+  const more = groups.length > 3 ? ` 等 ${groups.length} 组` : "";
+
+  const summary =
+    groupCount === 1
+      ? `已导入 ${imageCount} 张图，归入 1 个提示词组`
+      : `已导入 ${imageCount} 张图，按提示词内容分成 ${groupCount} 组`;
+  const stats =
+    withPrompt > 0 || blankGroups > 0
+      ? `（含提示词 ${withPrompt} 组${blankGroups > 0 ? `，空白 ${blankGroups} 组` : ""}）`
+      : "";
+  const detail = detailParts.length > 0 ? `：${detailParts.join("、")}${more}` : "";
+
+  return successStatus(`${summary}${stats}${detail}。`);
+}
+
+function truncateImportStatusText(value: string, maxLength: number): string {
+  const text = value.trim().replace(/\s+/g, " ");
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 function getClipboardImportStatus(result: {
@@ -2953,7 +4365,7 @@ function resolveRemoteAiReadiness(
     return {
       ready: false,
       statusMessage: failureStatus(
-        `${actionLabel}失败：当前模型不支持${requiredCapability === "vision" ? "图片理解" : "文本生成"}，请在模型配置中选择合适模型。`,
+        `${actionLabel}失败：当前模型不支持${requiredCapability === "vision" ? "图片理解" : requiredCapability === "image-generation" ? "图像生成" : "文本生成"}，请在模型配置中选择合适模型。`,
       ),
     };
   }
